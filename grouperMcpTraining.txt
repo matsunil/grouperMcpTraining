@@ -4,8 +4,67 @@ claude --resume grouper
 Before pushing to that repo, switch back with:
 ! gh auth switch -u matsunil
 
+Training doc: https://docs.grouper.internet2.edu/wiki/spaces/Grouper/pages/314408978/Grouper+Training+-+MCP+AI+-+Lesson+00+Pre-work
+
+https://docs.grouper.internet2.edu/wiki/spaces/Grouper/pages/28543735/Connecting+to+the+Grouper+Training+Environment+VM
+
 
 curl -L -o grouper.zip https://github.com/Internet2/grouper/archive/refs/tags/GROUPER_RELEASE_7.9.0.zip && unzip -q grouper.zip && mv grouper-GROUPER_RELEASE_7.9.0 grouper && rm grouper.zip
 
+https://grouper.at.internet2.edu/grouper/grouperUi/app/UiV2Main.indexGshSimplifiedUi?operation=UiV2Template.newTemplateSimplifiedUi&templateType=GTEManageAWSInstance&stemId=d0fcbfb223e74a288de5a388d42e6fca
+
+Total allowed VM hours: 10
+Total used VM hours: 0.00
+New VM created. It will be destroyed in 5.0 hours.
+Wait a few minutes, then connect by putting the following command into your terminal/powershell:
+
+ssh -L 8443:localhost:8443 -L 8432:localhost:5432 -L 8389:localhost:389 -l student 3.144.1.141
+
+The error 'Connection refused' means that the VM is not yet done building.
+The first time you connect you may see 'authenticity of host can't be established', type 'yes' to continue connecting.
+Terminals will prompt for password, but won't show any keystrokes. Paste the password below and hit enter.
+Login password: cHHByXHD
+
+Then navigate in your browser to: https://localhost:8443 and accept the security warning.
+
+Trust the GTE certificate:
+claude mcp add --transport http -s user grouper-gte-local https://localhost:8443/grouper-ws/mcp
+
+5. In Claude Code, type /mcp, select "grouper-gte-local", and select "Authenticate"
+
+6. A browser opens.  Accept the security warning, log in as banderson / password, and approve read-only access
+
+7. Back in Claude Code, use the copy button to copy this prompt:
+
+what groups is banderson a member of in Grouper?
+
+You should see a list of groups from the GTE
+
+8. Make Claude always ask before it changes Grouper.  Use the copy button to copy this prompt into Claude Code in the same conversation:
+
+Add this to my user memory, ~/.claude/CLAUDE.md,
+so it applies in every folder: before any write
+operation with the grouper-gte-local MCP server
+(adding or removing members, saving or deleting
+groups and folders, assigning privileges or
+attributes, running daemon jobs), tell me exactly
+what you will change and wait for my approval.
+
+9. Let the read-only Grouper tools run without asking each time.  Write tools still ask.  Use the copy button to copy this prompt into Claude Code in the same conversation:
+
+In my user settings, ~/.claude/settings.json, add
+the read-only grouper-gte-local MCP tools to the
+permissions allow list, so they run without asking
+me: doc_search, attribute_def_name_find,
+group_find, folder_find, attribute_assignment_get,
+audit_get, privilege_get, entity_get_groups,
+group_get_members, memberships_get, entity_get,
+group_has_member, recipe, sql_get_schema,
+sql_select, admin_external_system_get,
+admin_daemon_job_message, admin_daemon_logs,
+admin_config_search, admin_daemon_names, and ldap.
+Tool names look like
+mcp__grouper-gte-local__group_find.  Do not add
+any write tools.  Show me the result.
 
 
