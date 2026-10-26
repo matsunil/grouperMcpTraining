@@ -106,7 +106,18 @@ Description: Simple Shibboleth-protected application to show login state
 Assets for custom UI hands-on: https://localhost:8443/demo/customUi/
 Description: Hosted files to use in various configurations
 
+Grouper Training - MCP AI - Lesson 01: Introduction
+https://docs.grouper.internet2.edu/wiki/spaces/Grouper/pages/313720842/Grouper+Training+-+MCP+AI+-+Lesson+01+Introduction
+
 https://localhost:8443/grouper/
 banderson / password
+
+SSH terminal:
+groovy:000> :quit
+[student@ip-172-31-5-213 ~]$ ./gte 101.1.1
+
+
+Grouper Training - MCP AI - Lesson 02: Configuring Grouper for MCP
+https://docs.grouper.internet2.edu/wiki/spaces/Grouper/pages/314933250/Grouper+Training+-+MCP+AI+-+Lesson+02+Configuring+Grouper+for+MCP
 
 
