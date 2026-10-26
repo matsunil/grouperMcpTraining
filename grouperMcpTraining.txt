@@ -172,4 +172,7 @@ Grouper Training - MCP AI - Lesson 07: Grouper's AI assistant
 https://docs.grouper.internet2.edu/wiki/spaces/Grouper/pages/332300301/Grouper+Training+-+MCP+AI+-+Lesson+07+Grouper+s+AI+assistant
 
 
+Grouper Training - MCP AI - Lesson 08: Claude driving the Grouper UI
+https://docs.grouper.internet2.edu/wiki/spaces/Grouper/pages/332202005/Grouper+Training+-+MCP+AI+-+Lesson+08+Claude+driving+the+Grouper+UI
+
 
