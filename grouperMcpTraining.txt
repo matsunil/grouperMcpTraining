@@ -147,5 +147,10 @@ how many members does the vpn_users group have in the demo LDAP?  show me the LD
 Expected: 1088 members.
 
 
+Grouper Training - MCP AI - Lesson 03: Connecting AI clients
+https://docs.grouper.internet2.edu/wiki/spaces/Grouper/pages/332431362/Grouper+Training+-+MCP+AI+-+Lesson+03+Connecting+AI+clients
+
+MCP has no SQL access by default.  In the UI as banderson, go to "Miscellaneous" -> "Configure" -> "Configuration files" -> "Import", choose grouper.properties, and import:
+grouper.mcp.sql.grouper.grouperDatabase = true
 
 
