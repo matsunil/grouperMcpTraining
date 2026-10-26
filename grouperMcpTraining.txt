@@ -106,6 +106,7 @@ Description: Simple Shibboleth-protected application to show login state
 Assets for custom UI hands-on: https://localhost:8443/demo/customUi/
 Description: Hosted files to use in various configurations
 
+
 Grouper Training - MCP AI - Lesson 01: Introduction
 https://docs.grouper.internet2.edu/wiki/spaces/Grouper/pages/313720842/Grouper+Training+-+MCP+AI+-+Lesson+01+Introduction
 
@@ -119,5 +120,32 @@ groovy:000> :quit
 
 Grouper Training - MCP AI - Lesson 02: Configuring Grouper for MCP
 https://docs.grouper.internet2.edu/wiki/spaces/Grouper/pages/314933250/Grouper+Training+-+MCP+AI+-+Lesson+02+Configuring+Grouper+for+MCP
+
+Step 2: search LDAP as banderson
+Log in again so you can grant the admin read-only scope.  In the GTE, etc:sysadmingroup is already in etc:mcp:mcpUsersAdminReadWrite, and admin read-write includes the admin read-only tools, so banderson can use the LDAP tool.
+
+Do this in Claude Code on the command line.  If your GTE VM is new since the pre-work, its database is new too, so remove and add the MCP server first.  In a terminal:
+
+cd ~/grouperMcpTraining
+claude mcp remove -s user grouper-gte-local
+claude mcp add --transport http -s user grouper-gte-local https://localhost:8443/grouper-ws/mcp
+claude
+
+Type /mcp, select "grouper-gte-local", then select "Re-authenticate".
+
+Log in as banderson, and on the consent page check "Read-only" and "Admin read-only".  Type /exit, then quit the Claude app completely and open it again, so it uses the new login.
+
+Use the copy button to copy this prompt into the Claude app in a new conversation:
+how many members does the vpn_users group have in the demo LDAP?  show me the LDAP filter you used
+
+You should see zparks with employee number 800000789, and memberOf values if zparks is in an LDAP group.
+
+
+Use the copy button to copy this prompt into the Claude app, in the same conversation:
+how many members does the vpn_users group have in the demo LDAP?  show me the LDAP filter you used
+
+Expected: 1088 members.
+
+
 
 
