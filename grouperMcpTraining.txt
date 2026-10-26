@@ -171,6 +171,9 @@ Home > Miscellaneous > GSH templates
 Grouper Training - MCP AI - Lesson 07: Grouper's AI assistant
 https://docs.grouper.internet2.edu/wiki/spaces/Grouper/pages/332300301/Grouper+Training+-+MCP+AI+-+Lesson+07+Grouper+s+AI+assistant
 
+Step 4: let banderson use it
+In the UI, go to the group etc:aiAgent:aiAgentUsers and add the member etc:sysadmingroup.  People also need to be in an MCP access group; in the GTE, etc:sysadmingroup is already in etc:mcp:mcpUsersReadwrite.
+
 
 Grouper Training - MCP AI - Lesson 08: Claude driving the Grouper UI
 https://docs.grouper.internet2.edu/wiki/spaces/Grouper/pages/332202005/Grouper+Training+-+MCP+AI+-+Lesson+08+Claude+driving+the+Grouper+UI
