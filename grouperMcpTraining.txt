@@ -106,4 +106,7 @@ Description: Simple Shibboleth-protected application to show login state
 Assets for custom UI hands-on: https://localhost:8443/demo/customUi/
 Description: Hosted files to use in various configurations
 
+https://localhost:8443/grouper/
+banderson / password
+
 
