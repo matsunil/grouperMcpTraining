@@ -154,3 +154,11 @@ MCP has no SQL access by default.  In the UI as banderson, go to "Miscellaneous"
 grouper.mcp.sql.grouper.grouperDatabase = true
 
 
+Grouper Training - MCP AI - Lesson 04: Access levels and scopes
+https://docs.grouper.internet2.edu/wiki/spaces/Grouper/pages/331677779/Grouper+Training+-+MCP+AI+-+Lesson+04+Access+levels+and+scopes
+
+
+Grouper Training - MCP AI - Lesson 05: Recipes
+https://docs.grouper.internet2.edu/wiki/spaces/Grouper/pages/332169255/Grouper+Training+-+MCP+AI+-+Lesson+05+Recipes
+
+
