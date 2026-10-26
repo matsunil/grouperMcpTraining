@@ -1,4 +1,12 @@
 
+Grouper training wiki: https://docs.grouper.internet2.edu/wiki/spaces/Grouper/pages/28541839/Grouper+Training+Environment
+
+GTE commands/VM documentation: https://docs.grouper.internet2.edu/wiki/spaces/Grouper/pages/28543607/Grouper+training+VM+documentation
+
+Lesson guides: https://docs.grouper.internet2.edu/wiki/spaces/Grouper/pages/28543462/Grouper+Training+-+lesson+guides
+
+Grouper Deployment Guide: https://docs.grouper.internet2.edu/wiki/spaces/Grouper/pages/28541813/Grouper+Deployment+Guide
+
 claude --resume grouper
 
 Before pushing to that repo, switch back with:
@@ -67,11 +75,35 @@ Tool names look like
 mcp__grouper-gte-local__group_find.  Do not add
 any write tools.  Show me the result.
 
+-------------------------------------------------------------------------------
 
 If the VM is terminated and restarted:
 claude mcp remove grouper-gte-local -s user
 
 claude mcp add --transport http -s user grouper-gte-local https://localhost:8443/grouper-ws/mcp
 
+-------------------------------------------------------------------------------
+
+
+Grouper: https://localhost:8443/grouper/
+Description: Grouper UI application
+Credentials:
+Admin: banderson / password
+Civilian: jsmith / password
+
+LDAP manager: https://localhost:8443/phpldapadmin/
+Description: Phpldapadmin LDAP administration
+Credentials:
+username: cn=root,dc=internet2,dc=edu
+password: password
+
+Mail server: https://localhost:8443/mail/
+Description: Mailpit - email testing tool
+
+Shibboleth attributes app: https://localhost:8443/app
+Description: Simple Shibboleth-protected application to show login state
+
+Assets for custom UI hands-on: https://localhost:8443/demo/customUi/
+Description: Hosted files to use in various configurations
 
 
