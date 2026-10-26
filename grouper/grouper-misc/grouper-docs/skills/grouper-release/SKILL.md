@@ -1,0 +1,882 @@
+---
+name: grouper-release
+description: Cut a Grouper container release and record it -- bump the container
+  Tomcat/base versions, confirm no DDL/upgrade-task or server.xml-patch surprises
+  since the last release, resolve the GRP issues that shipped, tag them with the
+  new fixVersion, and add the release row to the "v7 Release Notes" wiki page. Use
+  whenever the user wants to do/record a Grouper release, cut a new container
+  version (e.g. 7.3.2), update the release-notes table, mark a version
+  STABLE/LATEST STABLE, or bump Tomcat/OS/Java in the container for a release.
+---
+
+# Grouper release
+
+End-to-end steps to cut and record a Grouper container release. Companion
+skills do the heavy lifting for Jira and the wiki -- this one is the checklist
+and the release-notes-table contract.
+
+- Jira writes (create version, resolve issues, set fixVersion): use **grouper-jira**.
+- Wiki writes (edit the release-notes page): use **grouper-wiki-edit** (REST +
+  token, NEVER the MCP write path -- it corrupts storage-format XML).
+
+Work a new release newest-first: the new row goes ABOVE the current top row.
+
+## Inputs to collect first
+
+- New version, e.g. `7.3.2` (Grouper API version == container tag).
+- Container base versions for the `Versions` cell: OS (e.g. Rocky 9.8), Tomcat
+  (e.g. 9.0.120), Java Corretto (e.g. 17.0.19.10.1).
+- The built image `sha256:` digest (from the container build/push pipeline).
+  Not needed up front -- the row goes in with it blank (step 0).
+- Release date (YYYY/MM/DD).
+- Status for the new row: always `RELEASED` (see Status values). Promotion to
+  `LATEST STABLE` is a later step, confirmed with the user.
+
+## 0-pre. Review open GitHub PRs
+
+Before anything else, check for community PRs waiting on the release branch, so
+anything mergeable ships in this release (merge before tagging, step 2):
+
+```bash
+gh pr list --repo Internet2/grouper --state open --base GROUPER_7_BRANCH
+```
+
+Use the release line's branch for `--base` (e.g. `GROUPER_6_BRANCH`). For each PR,
+review the diff (`/code-review <PR URL>`) and give the user the findings. The user
+decides whether to merge or comment -- never merge, approve, or post on a PR
+yourself. A merged PR's GRP issue is then resolved/tagged with the others in
+steps 5-6. Also listed on the internal "Release steps for new container build"
+wiki page (GrIntDev, pageId `48794029`).
+
+## 0-review. Review every commit since the last release
+
+Before the mirror and the tag, review every commit in the release range, grouped
+by GRP issue (commits without a GRP issue are reviewed too):
+
+```bash
+git log --no-merges --format='%h %an %s' --shortstat GROUPER_RELEASE_<prev>..origin/<BRANCH>
+```
+
+Review each issue's combined diff on four dimensions:
+
+- **Security:** authorization (privilege checks, sysadmin-only paths), injection
+  (SQL/HQL, XSS -- unescaped JSP output, JS string building), secrets in logs or
+  responses, new endpoints/servlets and their auth, unsafe defaults (a new feature
+  should be off by default when it reaches outside Grouper, e.g. an AI provider).
+- **Functionality:** does the code do what the issue says; edge cases (null,
+  blank, empty lists, paging), regressions in callers, transaction/cache handling,
+  DB portability (postgres/oracle/mysql) for DDL and queries.
+- **Tests:** is there a test that would fail without the change, and does it cover
+  the risky part. Note what is untested; do not write tests unasked.
+- **Documentation:** new config keys exist in the `*.base.properties` with a
+  blank value and the default in the `# {...}` comment, matching the code default;
+  new features have a wiki page or an update to an existing one; externalized text
+  for new UI strings; upgrade instructions when operators must act.
+
+Large issues (thousands of lines, e.g. a new feature) get their own reviewer;
+small ones can share one. Use parallel subagents, each returning findings with
+file:line, severity (blocker / should-fix / nit) and a concrete failure scenario.
+Verify any blocker yourself before reporting it.
+
+Give the user one consolidated report, blockers first. The user decides what to
+fix before the tag; fixes go in as normal commits with their own (or the original)
+GRP issue, then re-check the commit-vs-Jira reconciliation (step 6).
+
+## 0. Jira and wiki edits BEFORE the mirror
+
+The mirror refresh (step 1) is committed and then tagged, so anything written to
+the wiki or Jira after that is not in this release's mirror. Do ALL the Jira and
+Confluence work that does not need the built image FIRST, then mirror, then tag:
+
+1. DDL / upgrade tasks check (step 4).
+2. Resolve the shipped GRP issues and set their fixVersion (steps 5, 6).
+3. Feature/config doc pages the shipped changes affect (e.g. a config reference
+   page, a feature page, a security-issue page). Ask the user which pages; grep
+   the wikiMirror for the config keys and features the commits touch.
+4. **v7 Upgrade instructions from v7** rows for anything operators must do or be
+   aware of (this sets the `Upgrade instructions` count in the row). New rows go
+   on top. Every cell's `data-highlight-colour` follows the row's Importance:
+   `Important` = pink `#ffebe6`, `Medium important` = yellow `#fffae6`,
+   `Not important` = blue `#deebff`. Copying the row above keeps ITS colour, which
+   is how the 7.7.0 Important row (GRP-7418) went in yellow; set it from the
+   Importance instead, and re-check every row's colour after the edit.
+5. A security-issue page for a fix in this release: mark the release as released
+   on the release date (timeline, affected-versions table, remediation text).
+6. The **release-notes row** (step 8) with the `sha256:` left BLANK
+   (`<p><span ...>sha256:</span></p>`), and Rocky/Corretto taken from the
+   registries (see "Rocky and Corretto without the image" in step 7).
+
+After the image publishes, the only wiki edit left is pasting the digest into the
+row. That one edit is not mirrored until the next release, which is fine.
+
+## 1. Refresh the grouper-docs mirrors FIRST
+
+Do this BEFORE tagging, so the mirror refresh is part of the release commit rather
+than a commit that lands after the tag and leaves the branch ahead of it.
+
+Run them in the checkout for the branch being released -- a v6 release refreshes
+v6's mirror. v7, v6 and v4 all carry both `wikiMirror` and `issueMirror`, so run
+both scripts on every branch; only `sitemap.xml` is v7-only (the v6/v4 wiki run
+does not produce one, and there is nothing to copy to i2midev6 for them).
+
+Both mirrors are incremental, so this is cheap.
+
+```bash
+set -a && . ~/.secrets/grouper_confluence.env && set +a
+cd grouper-misc/grouper-docs/wikiMirror  && python3 wikiToMarkdown.py
+cd ../issueMirror                        && python3 jiraToMarkdown.py
+```
+
+**Dependency:** the scripts need `beautifulsoup4`, and it is often not installed
+(`ModuleNotFoundError: No module named 'bs4'`). Homebrew's python is
+externally-managed, so do not pip install into it -- use a throwaway venv:
+
+```bash
+python3 -m venv /tmp/wikivenv && /tmp/wikivenv/bin/pip install -q beautifulsoup4
+/tmp/wikivenv/bin/python wikiToMarkdown.py
+```
+
+- The wiki run also regenerates `wikiMirror/sitemap.xml` (v7 only); copy it to
+  `i2midev6:/var/www/html/sitemap.xml` (see the sitemap section of
+  `wikiMirror/convertToMarkdownAiInstructions.md`). Give the user the commands;
+  they run them. i2midev6 serves grouperdemo.internet2.edu and is reached via
+  login.internet2.edu (the maintainer's ssh alias is `internet2_demo`):
+
+  ```bash
+  scp grouper-misc/grouper-docs/wikiMirror/sitemap.xml internet2_demo:/var/www/html/sitemap.xml
+  curl -sI https://grouperdemo.internet2.edu/sitemap.xml   # expect 200, xml content-type
+  ```
+
+  The server file is owned by the maintainer's account (chowned once, mode 644),
+  so plain scp overwrites it in place without sudo. If scp says permission
+  denied, the file was deleted or re-owned: re-chown it
+  (`sudo chown <user> /var/www/html/sitemap.xml && sudo chmod 644 ...`). Never
+  `mv` a copy in from a home directory -- it keeps its home SELinux label and
+  Apache returns 403; use `sudo cp` if a copy step is needed.
+- `jiraToMarkdown.py` deliberately skips `GRP-1 .. GRP-7143` -- the cloud
+  metadata for many of those is misaligned by the CSV import, so the existing
+  files are the accurate record. See
+  `issueMirror/convertJiraToMarkdownAiInstructions.md`.
+- Review both diffs and commit separately (`wiki: sync`, `issues: sync`);
+  a human pushes.
+
+**What this run will NOT capture:** only the sha256 digest in the release-notes
+row, since that needs the image, which needs the tag. Everything else was written
+in step 0 and IS captured. The digest gets mirrored by the NEXT release's run. Do
+not re-run the mirror after the tag just to pick it up, or you reintroduce the
+post-tag commit this ordering exists to avoid.
+
+## 2. Push everything, THEN tag
+
+The git tag is what Maven Central and the container build read. Tag a tree that is
+not fully pushed and the release itself is still correct -- the tag carries the
+commit -- but the BRANCH POINTER is left behind its own release tag, which is
+invisible unless someone checks for it explicitly.
+
+This is easy to do by accident, because pushing the tag and pushing the branch are
+two separate operations and `git push --tags` does NOT push the branch. It happened
+on 6.4.0: `GROUPER_RELEASE_6.4.0` was on origin pointing at the right commit while
+`origin/GROUPER_6_BRANCH` still pointed one commit back.
+
+Before tagging, confirm the working tree is clean and nothing is unpushed:
+
+```bash
+git status --short                                    # expect no tracked changes
+git log --oneline origin/<BRANCH>..<BRANCH>           # expect NO output
+```
+
+If that second command prints anything, push it first:
+
+```bash
+git push origin <BRANCH>
+```
+
+Only then tag, and push the tag:
+
+```bash
+git tag GROUPER_RELEASE_<version>
+git push origin GROUPER_RELEASE_<version>
+```
+
+Then prove the tag and the pushed branch agree. Do not skip this -- it is the only
+check that catches the split, and it costs one command:
+
+```bash
+git fetch origin
+git merge-base --is-ancestor GROUPER_RELEASE_<version>^{commit} origin/<BRANCH> \
+  && echo "OK: tag is on the pushed branch" || echo "BAD: branch is behind the tag"
+```
+
+If it reports BAD, push the branch -- it is a plain fast-forward, since the branch
+head is an ancestor of the tagged commit. Never force-push or move the tag to
+"fix" this.
+
+Remember the OTHER repos too. The container lives in a separate repo with a branch
+per version, and the same split applies there.
+
+## 2a. Build the jars (grouper-build Jenkinsfile)
+
+The jars are built and deployed to Maven Central by a separate repo,
+`grouperContainer/grouper-build_v7` (v6: `grouper-build_v6`), with one branch per
+release like the container repo. **The user creates the release branch and
+commits/pushes; the AI edits the Jenkinsfile on it.** Check
+`git branch --show-current` shows the new version first.
+
+Edit two things in `Jenkinsfile`:
+
+- **Version:** `def git_tag = '<version>'` (e.g. `'7.5.1'`). It builds the
+  `GROUPER_RELEASE_<version>` tag, so the tag must already be pushed (step 2).
+- **Java:** the `JAVA_HOME='.../amazon-corretto-<ver>-linux-x64'` line inside
+  `environment {}` -- set it to the current latest Corretto 17. Get it from the
+  redirect the Jenkins JDK tool itself downloads:
+
+  ```bash
+  curl -sI https://corretto.aws/downloads/latest/amazon-corretto-17-x64-linux-jdk.tar.gz | grep -i '^location'
+  ```
+
+  (`.../resources/17.0.20.12.1/...` -> `17.0.20.12.1`). That line is
+  informational; the mvn steps do not depend on it.
+
+**How the mvn steps get JAVA_HOME, and why it must not be resolved up front.**
+The `Corretto-JDK17` tool installs from the corretto "latest" URL, so
+`withMaven(jdk: ...)` re-unpacks it whenever Corretto releases, deleting the old
+nested `amazon-corretto-*` directory. On 7.5.1 the Jenkinsfile ran a `find` at
+node start, got `17.0.20.10.1`, then the tool unpacked `17.0.20.12.1` over it and
+maven failed with `The JAVA_HOME environment variable is not defined correctly`.
+The fix (in the Jenkinsfile since 7.5.1): `java_home` is a single-quoted
+`$(find ... -name "amazon-corretto-*" | sort -V | tail -1)` string that each `sh`
+step expands AFTER the tool is installed. If you see that error again, check that
+nothing reintroduced an up-front `sh(returnStdout: true)` lookup.
+
+Note: this Corretto is only the BUILD JDK. The Corretto in the release notes
+`Versions` cell is the container's, read from the running image (step 7).
+
+## 3. Container prep (Dockerfile)
+
+The container repo has one branch per release, named for the version (`7.4.0`,
+`7.5.0`, `7.5.1`), each cut from the previous release's branch. **The user
+creates the new release branch themselves** -- do not create or switch branches
+in the container repo. Check `git branch --show-current` shows the new version,
+then edit the files on it; the user commits and pushes.
+
+The container Dockerfile pins `ARG GROUPER_CONTAINER_VERSION`,
+`ARG GROUPER_VERSION`, `ARG TOMCAT_VERSION`, and the OS/Java base. Bump both
+version ARGs to the new release (the Dockerfile is the only file that carries the
+version -- confirm with `git grep -n <previous version>`). For a Tomcat/security
+bump:
+
+- **Bump `TOMCAT_VERSION`** to the target (check https://tomcat.apache.org/security-9.html
+  for open CVEs against the current pin; pick the lowest release that clears them).
+- **server.xml patch still applies.** The container overlays a stock Tomcat
+  `conf/server.xml` and patches it at runtime with `server.xml.grouper.patch`; a
+  failed patch exits the container. Before bumping, diff stock `conf/server.xml`
+  between the old and new Tomcat versions (fetch from the Apache git tags). If
+  byte-identical, the patch is safe; if not, regenerate the patch. Confirm with a
+  `patch --dry-run` against the new stock file.
+- **Tarball is on the mirror.** The build downloads Tomcat from the Internet2
+  software mirror (`software.internet2.edu/grouper/downloads/tools/`), not Apache.
+  Confirm `apache-tomcat-<version>.tar.gz` is present there (use a ranged GET --
+  the mirror may 404 on HEAD but serve 206 on GET).
+
+## 3a. Third-party jar vulnerability scan (before the tag)
+
+Tomcat is not the only thing that ships. Scan every jar in the PREVIOUS release's
+image (the poms usually have not changed, so it is what this release would ship)
+against OSV, which covers transitive jars the poms never name. Do it before the
+tag so the bumps ship in this release. No scanner needs to be installed:
+
+1. List each jar's Maven coordinates from `META-INF/maven/*/pom.properties` inside
+   the image (`podman run --rm --entrypoint bash i2incommon/grouper:<prev> -c 'cd
+   /opt/grouper/grouperWebapp/WEB-INF/lib; ...unzip -p ... pom.properties'`). About a
+   quarter of the jars have no pom.properties; guess groupId from the file name for
+   the important ones (bouncycastle, c3p0, postgresql, mysql, hibernate, groovy).
+2. `POST https://api.osv.dev/v1/querybatch` with `{"queries":[{"package":
+   {"ecosystem":"Maven","name":"g:a"},"version":"v"}...]}`, then
+   `GET /v1/vulns/<id>` for severity (`database_specific.severity`) and the fixed
+   versions. Skip withdrawn advisories.
+3. For each hit, the fix is usually one property in `grouper-parent/pom.xml`
+   (`jackson.version`, `jsoup.version`, `log4j.version`, `amqp-client.version`...).
+   `git grep` that nothing else pins the old version.
+
+Rules learned on 7.8.0:
+
+- **Confirm the fixed version is on Maven Central before using it.** The advisory
+  for amqp-client said "fixed in 5.36.1", which was never published (Central had
+  5.36.0 and 5.37.0); check `maven-metadata.xml` and the exact `.pom` URL.
+- **One GRP Jira per library**, titled `Upgrade <lib> to <ver> for security`
+  (Improvement, fixVersion set at create), listing the advisory ids. The user
+  commits each bump separately and the highlight line is
+  `Security improvements: upgrade <a>lib</a>, <a>lib</a>, ...`.
+- **Patch bumps are low risk; misaligned transitive families are not.** Netty came
+  in at three versions (4.1.72 from qpid-jms-client, 4.1.135, 4.2.17), most
+  advisories server-side (Grouper only uses netty as a client). The fix there is a
+  `netty-bom` import in grouper-parent AND the three container poms (they do not
+  inherit grouper-parent, same as GRP-7453 for Jackson) -- a separate, tested
+  change, not a release-day bump.
+
+## 4. Confirm DDL / upgrade tasks since the last release
+
+Determines the `Upgrade tasks` cell (usually `None` for a patch release).
+
+- The DDL version enum is `GrouperDdl.java` (a `V1..Vn` enum). Compare the highest
+  `Vn` at the last release tag vs HEAD -- if unchanged and nothing under a `ddl/`
+  package or `*upgradeTasks*` changed, there is no schema migration: `Upgrade
+  tasks: None`.
+- If DDL did change, the cell links the "Grouper upgrade tasks" wiki page with the
+  new task numbers and `(DDL)`.
+
+## 5. Resolve the GRP issues that shipped
+
+- List GRP-#### keys from commits since the last release tag
+  (`git log <TAG>..HEAD`).
+- Any that are still Open / To Do but committed should be resolved (via
+  grouper-jira). Container-only issues (e.g. a Tomcat bump with no code commit)
+  count too if they ship in this image. Ask before transitioning -- an issue may
+  be deliberately open because follow-on work is planned, even though code for it
+  is committed.
+- Transition with the bare `Resolved` transition and do NOT set a `resolution`
+  value. The project convention is Resolved with an empty resolution; setting
+  `Fixed` makes the issue an outlier.
+- An unresolved issue can still carry the fixVersion -- it just will not appear in
+  the release-notes count, which filters on status. Subtract it from the count.
+
+## 6. Create the version and tag fixVersion
+
+- Create the new version in GRP if it does not exist (grouper-jira:
+  `POST /rest/api/3/version` with `projectId` 10100). Match existing versions'
+  shape (they are typically `released:false`).
+- Set `fixVersion = <version>` on every resolved-since-last-release issue that has
+  no fixVersion (`PUT /issue/KEY` with
+  `{"update":{"fixVersions":[{"add":{"name":"<version>"}}]}}`). Leave issues that
+  already carry a different fixVersion (e.g. a backport) alone unless told
+  otherwise.
+- Verify the count the release-notes link uses:
+  `project = GRP AND status in (Resolved, Closed, "Ready for Release") AND
+  fixVersion = <version>`. `GET /rest/api/3/search/jql` no longer returns a
+  `total`; use `POST /rest/api/3/search/approximate-count` with `{"jql": "..."}`.
+  Sanity-check the endpoint by running the same JQL for the PREVIOUS version and
+  confirming it matches the number already on that release-notes row.
+
+### Reconcile the tagged set against reality BEFORE writing the row
+
+The release-notes count and the highlight lines are both built from the tagged
+fixVersion set, so anything missing from it propagates silently into the row, the
+Jiras link and the Slack announcement. Two independent checks, both cheap:
+
+**1. Commits vs tagged.** Every JIRA in the commit range should carry this
+version:
+
+```bash
+git log --format=%s <PREV_TAG>..<THIS_TAG> | grep -oE 'GRP-[0-9]+' | sort -u > /tmp/from_commits.txt
+# then list the tagged set via the JQL below and diff the two
+```
+
+Investigate BOTH directions. In commits but not tagged is the common gap. On
+7.5.0 this found `GRP-7197` with NO fixVersion at all, whose commit was the very
+commit the release tag pointed at.
+
+**2. Container-level changes need a JIRA tagged for THIS branch.** A Tomcat or
+base-image bump often has no commit in the grouper repo at all -- it lives in the
+container repo -- so check 1 cannot see it. Compare the Versions cell you are
+about to write against the PREVIOUS row: anything that moved needs a JIRA carrying
+this version. On 7.5.0 Tomcat went 9.0.120 -> 9.0.121 while `GRP-7277` was tagged
+only `6.4.0` and `4.25.0`, so the security highlight silently omitted it.
+
+Jira's search index lags a write by a few seconds -- if a count looks unchanged
+right after a fixVersion edit, re-query before concluding anything.
+
+**Re-run check 1 right before the mirror refresh**, after `git fetch`. Other
+developers push during a release: on 7.8.0 `GRP-7450` landed mid-release, and the
+fixes from the 0-review step plus the security bumps added six more Jiras after the
+row was first written. Each time the count changes, update the `<N> Jiras` link
+text on the row (the JQL link itself does not change).
+
+## 7. Smoke-test the published image with a local quickstart
+
+Run the published container locally before writing the release-notes row. This is
+not optional polish -- two of the row's cells can only be read out of the running
+image, and this is the cheapest way to catch a broken build before the demo server
+and the announcement.
+
+### Wait for the image to actually publish
+
+Pushing the container branch only triggers the Jenkins build; the tag 404s for a
+while afterwards. Do not conclude the build failed from one early check. Poll the
+registry without pulling anything:
+
+```bash
+TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:i2incommon/grouper:pull" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "https://registry-1.docker.io/v2/i2incommon/grouper/tags/list" \
+  | python3 -c "import sys,json;print(sorted(json.load(sys.stdin)['tags'])[-8:])"
+```
+
+The same token gets the **sha256 digest** for the notes, again without pulling:
+
+```bash
+curl -s -o /dev/null -w 'HTTP %{http_code}  digest: %header{docker-content-digest}\n' \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json" \
+  -I "https://registry-1.docker.io/v2/i2incommon/grouper/manifests/<version>"
+```
+
+Rather than checking by hand, run that manifest HEAD in a background loop (a new
+token each pass, `sleep 60`, stop on HTTP 200, give up after ~90 minutes) so the
+session is notified when it lands. The 7.8.0 image took about 22 minutes after
+the container branch was pushed. The jars publish separately: Maven Central has
+`.../grouper/<version>/grouper-<version>.pom` well before the image.
+
+### Compose file
+
+Works with docker or podman. Use a real random password, not this one.
+
+```yaml
+services:
+  postgres:
+    image: "postgres:14"
+    restart: always
+    ports:
+      - '5433:5432'
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=BlKIS9FeyezRnAw7gW7K
+  grouper:
+    image: "i2incommon/grouper:<version>"
+    restart: always
+    ports:
+      - '8443:8443'
+    command:
+      - quickstart
+    environment:
+      - GROUPERSYSTEM_QUICKSTART_PASS=BlKIS9FeyezRnAw7gW7K
+      - GROUPER_MORPHSTRING_ENCRYPT_KEY=abcd1234
+      - GROUPER_DATABASE_PASSWORD=BlKIS9FeyezRnAw7gW7K
+      - GROUPER_DATABASE_USERNAME=postgres
+      - GROUPER_DATABASE_URL=jdbc:postgresql://postgres:5432/postgres
+```
+
+Note there is NO `GROUPER_AUTO_DDL_UPTOVERSION` line. prep_quickstart sets its own
+default (`v6.*.*` on v6, `v4.*.*` on v4 -- note the `v` prefix) and only when the
+variable is unset, so anything you pass OVERRIDES the correct value. Leave it out.
+
+```bash
+docker compose up --detach          # first start builds the schema, several minutes
+docker compose logs -f grouper
+```
+
+Then **https://localhost:8443/grouper** as `GrouperSystem` with the quickstart
+password. Self-signed cert, so expect the browser warning.
+
+#### The port differs by branch -- v4 is NOT the same as v6/v7
+
+**v6 and v7** dropped Apache: Tomcat serves HTTPS directly on **8443**, so
+`'8443:8443'` above is right.
+
+**v4 still bundles Apache and Shibboleth.** Its quickstart sets
+`GROUPER_RUN_APACHE=true` and configures only the AJP and HTTP connectors -- there
+is no HTTPS connector, so **nothing listens on 8443**. Apache terminates TLS on 443
+and proxies to Tomcat over AJP. Publishing `'8443:8443'` on v4 maps to a closed
+port and the browser just hangs. On v4 use:
+
+```yaml
+    ports:
+      - '8443:443'          # host 8443 -> Apache 443 inside the container
+```
+
+The URL is unchanged (`https://localhost:8443/grouper/`); only the container-side
+port differs. Host-side 8443 keeps it non-privileged, which matters for rootless
+podman.
+
+Confirm what is actually listening rather than guessing:
+
+```bash
+docker compose exec grouper netstat -ltnp     # or: ss -ltnp
+```
+
+On v4 expect 443 and 80 (httpd), 8080 and 8009 (Tomcat HTTP/AJP), 8005 shutdown --
+and no 8443. On v6/v7 expect 8443.
+
+Mapping `'8443:8080'` also reaches v4 and skips the cert warning, but it bypasses
+Apache, so it does not exercise the path a real v4 deployment uses. Prefer 443.
+
+### Five mistakes that cost real time
+
+- **Do not set `GROUPER_AUTO_DDL_UPTOVERSION` at all.** prep_quickstart sets the
+  right value itself (`v4.*.*` / `v6.*.*`, with a `v` prefix) and only when unset,
+  so passing your own overrides it. The wiki quickstart lesson still shows `5.*.*`,
+  which is both the wrong major and the wrong format -- do not copy it.
+- **v4 has no HTTPS on 8443** -- see the port section above. This one looks like a
+  hung container or a broken build and is neither.
+- **Never put the published host port in `GROUPER_DATABASE_URL`.** `'5433:5432'`
+  publishes the container's 5432 as 5433 *on the host only*; container-to-container
+  it is still `postgres:5432`. The host port exists so a human can attach with
+  `psql -h localhost -p 5433 -U postgres`, nothing more.
+- **The database name is lowercase `postgres`.** Postgres preserves the case of a
+  name sent over the wire, so `/Postgres` fails with `database "Postgres" does not
+  exist`.
+- **The webapp is at `/grouper`, not the root.** A 404 from Tomcat at `/` is
+  normal and says nothing about whether the app deployed.
+
+A database connection failure looks far worse than it is: Grouper reads its config
+FROM the database, so a refused connection surfaces as `Problem reading config:
+'database:grouper'` inside a static initializer, failing
+`CommonServletContainerInitializer` and then the whole context. Read to the LAST
+`Caused by` -- that one names the actual port or database problem.
+
+On a fresh schema the log has a burst of `ERROR ... relation "grouper_members"
+does not exist`, `grouper_ddl ... does not exist` and `Script was executed
+successfully` lines. That is the DDL install logging at ERROR level, not a failure;
+expect `Skipping upgrade due to new install to version V<n>` and then
+`Server startup in [...] milliseconds`.
+
+### What to check once it is up (v6/v7)
+
+The v7 quickstart runs UI, WS and daemon in ONE webapp, so everything is under
+`/grouper` (there is no `/grouper-ws` context; it 404s):
+
+- `https://localhost:8443/grouper/status?diagnosticType=db` -> `SUCCESS` and the
+  version.
+- WS: `POST /grouper/servicesRest/v4_0_000/stems` as GrouperSystem (basic auth)
+  with a `WsRestFindStemsRequest` `FIND_BY_STEM_NAME_APPROXIMATE` for `etc` ->
+  `SUCCESS` and the etc folders.
+- MCP: `POST /grouper/mcp` answers with a JSON-RPC error saying `grouper.ws.url`
+  and `grouper.ui.url` are not configured. That refusal is correct (GRP-7238); a
+  404 or a stack trace is not.
+- DDL: `grouper_ddl` row `Grouper` is at the expected version, and any tables or
+  columns this release's upgrade task adds exist
+  (`psql -h localhost -p 5433 -U postgres`).
+- UI pages return 200 but need JavaScript, so curl only proves they render a shell.
+  Click through in a browser if the release changed UI screens.
+
+### Rocky and Corretto without the image (for step 0)
+
+The Rocky minor can not be read off the Dockerfile or the image labels: the base
+is pinned to a **floating major** (`ARG ROCKY_VERSION=9`), and the label reports
+only `version: 9`. But both values are whatever is newest when Jenkins builds, so
+read them from the same sources the build pulls from:
+
+- **Rocky:** the minor tag whose digest equals the floating `9` tag (the newest
+  `9.N` tag).
+
+  ```bash
+  TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:rockylinux/rockylinux:pull" \
+    | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+  for t in 9 9.8; do curl -s -o /dev/null -w "$t %header{docker-content-digest}\n" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json" \
+    -I https://registry-1.docker.io/v2/rockylinux/rockylinux/manifests/$t; done
+  ```
+
+- **Corretto:** the container installs `java-17-amazon-corretto-devel` with dnf
+  from `yum.corretto.aws`, so take the newest version in that repo
+  (`17.0.20.12-1` -> `17.0.20.12.1`):
+
+  ```bash
+  B=https://yum.corretto.aws/x86_64
+  P=$(curl -s $B/repodata/repomd.xml | grep -o 'href="[^"]*primary.xml.gz"' | cut -d'"' -f2)
+  curl -s $B/$P | gunzip | grep -o 'java-17-amazon-corretto-devel-[0-9][^"<]*x86_64\.rpm' | sort -uV | tail -1
+  ```
+
+  This is the container's Java. It is not the same thing as the build JDK in
+  step 2a, although both are usually the latest Corretto 17.
+
+### Confirm them from the running image
+
+Confirm the whole Versions cell (Java, Tomcat, OS) with one throwaway container
+-- no database or compose file needed. This is the command from the internal
+"Release steps for new container build" wiki page (GrIntDev), and it differs by
+release line because v4 still ships Apache httpd and Shibboleth SP:
+
+v6+ (v7):
+
+```bash
+docker run --rm i2incommon/grouper:<version> bash -c "java -version && grep 'Apache Tomcat Version' /opt/tomcat/RELEASE-NOTES && grep PRETTY_NAME /etc/os-release"
+```
+
+v4:
+
+```bash
+docker run --rm i2incommon/grouper:<version> bash -c "java -version && httpd -v && /usr/sbin/shibd -v && grep 'Apache Tomcat Version' /opt/tomcat/RELEASE-NOTES && grep PRETTY_NAME /etc/os-release"
+```
+
+The `Status:` / `Digest:` lines of the pull also give the sha256 for the row.
+Read Corretto from the `Corretto-17.0.20.12.1` token, not the `openjdk version`
+line (that reads `17.0.20.1`). If any value differs from the row (a release
+landed between step 0 and the Jenkins build), fix the row. The user may run this
+on the demo server right after upgrading it -- that counts; the quickstart above
+remains the functional test.
+
+Ignore any `ImageOS: centos7` label -- stale metadata inherited from the TIER base,
+wrong for years.
+
+### Tear down
+
+```bash
+docker compose stop            # keep containers and data, restart with `start`
+docker compose down            # remove containers, KEEP the data volume
+docker compose down --volumes  # remove the data too
+```
+
+Use `down --volumes` when re-testing against a genuinely fresh schema. Keep the
+volume when you only changed a Grouper env var -- wiping costs another full DDL
+build for nothing, and `up --detach --force-recreate` already recreates any
+container whose config changed.
+
+## 8. Add the row to the release-notes wiki page
+
+Page: **v7 Release Notes**, pageId `28549113`
+(`/wiki/spaces/Grouper/pages/28549113`). Edit via grouper-wiki-edit (fetch
+`body.storage`, edit the XHTML, PUT with `version.number + 1`, keep the top
+Navigation include). Insert the new `<tr>` ABOVE the current first data row.
+
+### Table columns (storage order)
+
+1. **Date / Status** -- date in a `<p>`, then the status `<p>`(s) below. The date
+   is the TAG date. The row is written before the tag (step 0), so if the tag lands
+   on a later day, fix the date when pasting the sha256. If the
+   release has a known bug that a later release fixes, add a second `<p>` with the
+   `GRP-####` link under the status (as 7.3.0 carries GRP-7119, 7.3.1 carries
+   GRP-7132).
+2. **Container tag (version)** -- `<p>i2incommon/grouper:<version></p>` then a `<p>`
+   with `sha256:` and the 64-char digest **split across four spans, 10/18/18/18,
+   separated by `<br />`**. `sha256:` shares the first line, which is why the first
+   chunk is 10 and the rest are 18. Every row on every page uses this; a continuous
+   run stands out immediately. Copy the shape from the row above:
+
+   ```
+   <p><span style="color: rgb(193,199,208);">sha256:</span>
+   <span style="color: rgb(151,160,175);">444227ae6d</span><br />
+   <span style="color: rgb(151,160,175);">7eb362afbe65bce07b</span><br />
+   <span style="color: rgb(151,160,175);">16070d20e07b556a99</span><br />
+   <span style="color: rgb(151,160,175);">06925d6b63cad52194</span></p>
+   ```
+
+   **Use the multi-arch manifest-list digest, not a per-arch one.** `docker image
+   inspect ... {{ .RepoDigests }}` prints BOTH and the order is not stable -- on
+   4.25.0 the list came first, on 7.5.0 it came second. Resolve it against the
+   registry instead of trusting position:
+
+   ```bash
+   TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:i2incommon/grouper:pull" \
+     | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+   curl -s -o /dev/null -w '%header{docker-content-digest}\n' -H "Authorization: Bearer $TOKEN" \
+     -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json" \
+     -I "https://registry-1.docker.io/v2/i2incommon/grouper/manifests/<version>"
+   ```
+
+   Picking a per-arch digest pins the row to one architecture and excludes the
+   other platform's users.
+3. **Upgrade instructions / Upgrade tasks** -- one cell, bold labels:
+   `<p><strong>Upgrade instructions:</strong></p>` + value, then
+   `<p><strong>Upgrade tasks:</strong></p>` + value. The two lines mean different
+   things -- do not use the same wording for both:
+   - **Upgrade instructions** is `None` unless one of the shipped Jiras needs
+     operators to be aware of or do something. When there is something, it is a
+     COUNT of instructions linking the upgrade-instructions page, e.g.
+     `3 from 7.2.1`, `1 from v7.0.2`. Most releases are `None`.
+   - **Upgrade tasks** is the upgrade task NUMBER(s), not a count, linking the
+     "Grouper upgrade tasks" page (pageId `28549372`). One task is just `44`; two
+     are `41, 42`. Append ` (DDL)` only when the task carries a schema change --
+     compare `GrouperDdl.java` between the tag and HEAD to decide. `None` when no
+     task was added.
+4. **Versions** -- `OS: <os>` / `Tomcat: <t>` / `Java Corretto: <j>` /
+   `Grouper API: <version>` (one per line via `<br>`).
+5. **Enhancements and bugs fixed / known issues** -- first `<p>` is the
+   `<N> Jiras` link (the fixVersion JQL from step 6). Second `<p>` is the
+   highlight list: **sentence case**, each linked to its GRP issue (or a wiki page
+   when one exists), separated by `<br>`. Keep it curated -- not every issue; aim
+   for about five lines (7.8.0 shipped 19 Jiras in 5 lines), folding related fixes
+   into one line and leaving build-only or developer-only changes to the Jiras link.
+   Propose the lines to the user before writing them. Say "institutions", not
+   "orgs".
+   **Security items go FIRST** -- vulnerability fixes, then third-party jar
+   upgrades -- so a site deciding whether to upgrade sees them without reading the
+   whole cell. New features and bug fixes follow. Related items can share one line
+   (`Security improvements: upgrade <a>jsoup</a>, <a>c3p0</a>`).
+
+### Status values and cell colour
+
+A new release is **never** stable on release day. It goes out as `RELEASED` (white),
+and the PREVIOUS `LATEST STABLE` keeps that status. A release is promoted after it
+has been out about **4 days** with no issues reported. That is a judgment call by
+the Grouper team, not an automatic date, so **always confirm with the user before
+changing any status**: list the proposed changes per page, wait for a yes, then edit.
+
+The resulting state on each release-notes page (v7, v6, v4) is:
+
+- the newest release that has been out about 4 days or more: `LATEST STABLE`, yellow
+- any newer release still inside its ~4 days: `RELEASED`, white
+- every release between those and the expiry cutoff (the old LATEST STABLE, and any
+  RELEASED rows that were skipped over): `STABLE`, no fill
+- older than the cutoff: `EXPIRED`; `NOT STABLE` rows never change
+
+**When to check for promotions.** At the start of every release (any line, since the
+other lines' pages often have a RELEASED row waiting too), and whenever the user asks.
+Read all three pages, find RELEASED rows that are 4+ days old, and propose the
+promotion: the newest such row -> `LATEST STABLE` (yellow); the previous LATEST
+STABLE and any older RELEASED rows -> `STABLE` (strip `data-highlight-colour` from
+every cell). Then run the expiry sweep below with the new anchor. Example
+(2026/10/05): v7 had 7.7.0 (released that day), 7.6.1, 7.6.0, 7.5.1 RELEASED and
+7.5.0 LATEST STABLE; after confirming, 7.7.0 stayed RELEASED, 7.6.1 became LATEST
+STABLE, and 7.6.0, 7.5.1, 7.5.0 became STABLE. On v6 and v4 the newest release
+(6.5.0, 4.26.0) had been out long enough, so it became LATEST STABLE.
+
+Status text and the cell `data-highlight-colour` attribute (applied to every cell
+in the row):
+
+- `LATEST STABLE` -> `#fffae6` (yellow). **Exactly one row** may be LATEST STABLE;
+  when promoting a new one, demote the previous LATEST STABLE to `STABLE`.
+- `STABLE` -> no `data-highlight-colour` attribute (plain / no fill).
+- `NOT STABLE` -> no fill; add the blocking `GRP-####` link under the status.
+- `RELEASED` -> white (`#ffffff`); a release in its first ~4 days, before the
+  stability call. Never leave an older row RELEASED once a newer one is promoted.
+- `EXPIRED` -> no fill; older superseded releases, see the sweep below.
+
+### Expire old rows -- run this on EVERY release AND every promotion
+
+Without a sweep the table accumulates rows that still claim to be STABLE years
+after anyone would recommend them. The rule:
+
+1. **Anchor on the `LATEST STABLE` row's date** -- NOT the new release's date, and
+   not today. The anchor is "what we currently recommend", so a release that has
+   only just shipped and is still `RELEASED` must not expire anything yet.
+2. **Cutoff = anchor date minus 3 months.**
+3. For every row **older than the cutoff**:
+   - `STABLE` -> `EXPIRED`
+   - `RELEASED` -> `EXPIRED` (an aged RELEASED means nobody ever made the
+     stability call; expiring it IS that call, and leaving it reads as more
+     current than the EXPIRED rows above it)
+   - `NOT STABLE` -> **leave alone.** That is a permanent judgment about that
+     release and stays visible.
+   - `EXPIRED` -> already done.
+4. **Strip `data-highlight-colour` when expiring.** EXPIRED and STABLE carry no
+   fill. This matters because the attribute has historically been left behind:
+   a row promoted RELEASED -> STABLE keeps its `#ffffff` unless someone removes
+   it, so the drift accumulates silently. Remove it on every demotion too.
+
+Run it at BOTH points, because the anchor moves:
+
+- **At release**, the anchor is still the PREVIOUS release (the new row is only
+  `RELEASED`), so the cutoff has not moved much and the sweep is usually small.
+- **At promotion**, the new row becomes `LATEST STABLE`, so the anchor jumps
+  forward and the cutoff moves with it -- typically expiring one or two more rows.
+  Skip this and those expiries silently wait for the NEXT release.
+
+Worked example from the v4 page at 4.25.0: anchor `4.24.0` dated 2026/07/17,
+cutoff 2026/04/17. `4.22.0`, `4.22.1` and `4.22.3` (March 2026, all STABLE) expire;
+`4.23.0` (2026/05/24) is inside the window and stays STABLE; the `NOT STABLE` rows
+from 2024-2025 are untouched. When 4.25.0 is later promoted, the anchor becomes
+2026/08/31, the cutoff moves to 2026/05/31, and `4.23.0` expires then.
+
+### Table layout
+
+The table is `data-layout="full-width"` with an explicit `<colgroup>` of 5
+`<col>` widths (roughly 12 / 19 / 15 / 19 / 35 percent) so columns do not
+starve. Full-width + colgroup is what makes the Cloud table read like the old
+on-prem one; without column widths Cloud squeezes every column and wraps tags
+mid-token.
+
+## 9. Verify
+
+Re-GET the page and confirm: the new row is on top, exactly one `LATEST STABLE`,
+the `<N> Jiras` link resolves to the expected count, the new hash is split
+10/18/18/18 across four spans like every other row, and
+every row still has 5 cells. Give the user the page URL.
+
+Confirm the reconciliation from step 6 still holds: the `<N> Jiras` count on the
+row equals the JQL count, every JIRA in the commit range carries this version, and
+anything that changed in the Versions cell has a JIRA tagged for this branch.
+
+Also confirm the expiry sweep ran: no row older than (LATEST STABLE date - 3
+months) should still say `STABLE` or `RELEASED`, and no `EXPIRED` or `STABLE` row
+should carry a `data-highlight-colour` attribute.
+
+Re-run the tag/branch check from step 2 as well, for every repo the release touched
+(grouper, and the container repo). Commits often land after tagging -- a late fix,
+a doc tweak -- so a branch that was in sync at tag time can be behind by the end:
+
+```bash
+git fetch origin
+git log --oneline origin/<BRANCH>..<BRANCH>    # expect NO output
+git merge-base --is-ancestor GROUPER_RELEASE_<version>^{commit} origin/<BRANCH> \
+  && echo "OK" || echo "BAD: branch is behind the tag"
+```
+
+## 10. Slack announcement
+
+Two things close out a release: the demo server is upgraded to the new container
+tag, and the release is announced on Slack.
+
+### Upgrade the demo server
+
+The user does this; give them the commands. The demo server is **i2midev6**
+(grouperdemo.internet2.edu, the maintainer's ssh alias `internet2_demo`, via
+login.internet2.edu). The work is done as root. Each release line has its own
+container directory, and that directory is NOT always the release major -- it is
+a historical name:
+
+| Release line | Directory | Scripts / container |
+|---|---|---|
+| v7 | `/opt/grouper/7/container/` | `grouperBuildContainer_v7.sh`, `grouperRunContainer_v7.sh`, `grouper_v7` |
+| v6 | `/opt/grouper/5/container/` | `grouperBuildContainer_v6.sh`, `grouperRunContainer_v6.sh`, `grouper_v6` |
+| v4 | `/opt/grouper/2.6/` | not recorded yet -- ask the user to `ls` it (and `docker ps`) rather than guessing `_v4` |
+
+Give exactly these commands, substituting the release line's directory, suffix
+and version (v6 shown):
+
+```bash
+ssh internet2_demo
+sudo su -
+cd /opt/grouper/5/container/
+docker rm -f grouper_v6
+emacs Dockerfile                  # change the version to <version>, e.g. 6.4.1
+./grouperBuildContainer_v6.sh
+./grouperRunContainer_v6.sh
+```
+
+For v7 the same sequence is `cd /opt/grouper/7/container/`, `docker rm -f
+grouper_v7`, `grouperBuildContainer_v7.sh`, `grouperRunContainer_v7.sh`.
+
+Then have the user run the version check from step 7 ("Confirm them from the
+running image") there, and fix the row if anything differs.
+
+The release is not finished until the user has something to paste into Slack.
+Once the demo server is up, ALWAYS produce the announcement without being asked --
+it is the last deliverable of every release.
+
+**Output it as RENDERED markdown, never inside a code fence.** The whole point is
+that the links survive the copy/paste into Slack. A fenced block pastes as literal
+markdown source and every link is lost, which means redoing it by hand.
+
+Everything in it comes from the release-notes row you just wrote -- do not
+re-derive it, or the wiki and the announcement will disagree:
+
+- Version from the row.
+- The upgrade-instructions sentence from the `Upgrade instructions` cell: `None`
+  becomes "There are no upgrade instructions from v<previous>." When the cell has
+  a count, say so instead and link the upgrade-instructions page.
+- The `<N> Jiras` link, verbatim from cell 5 (same JQL URL).
+- The highlight lines, verbatim from cell 5 -- same text, same order (security
+  first), same links, one per line.
+
+Template:
+
+> @channel
+>
+> We are proud to announce the release of **Grouper v7.4.0**.  There are no
+> upgrade instructions from v7.3.2.
+>
+> See the [v7 release notes](https://grouper.atlassian.net/wiki/spaces/Grouper/pages/28549113/v7+Release+Notes)
+>
+> [73 Jiras](<fixVersion JQL url>)
+> OAuth security fixes: [open redirect on authorize](...), [client secret verification](...), [signing key encrypted at rest](...)
+> Security improvements: upgrade [PostgreSQL JDBC](...), [jsoup](...), [c3p0](...), [ldaptive](...)
+> [New Jamf Pro provisioner](...)
+> ... one highlight per line, in cell-5 order ...
+
+Note the highlights are a flat list of lines, not a bulleted list -- Slack renders
+the plain lines the way the release-notes cell reads.
+
+After the announcement, tell the user the new row stays `RELEASED` and to ask for the
+promotion to `LATEST STABLE` in about 4 days (see "Status values and cell colour").

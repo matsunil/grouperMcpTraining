@@ -1,0 +1,338 @@
+<%@ include file="../assetsJsp/commonTaglib.jsp"%>
+${grouper:titleFromKeyAndText('groupImportPageTitle', grouperRequestContainer.groupContainer.guiGroup.group.displayName)}
+
+            <%-- for the new group or new stem button --%>
+            <input type="hidden" name="objectStemId" value="${grouperRequestContainer.groupContainer.guiGroup.group.parentUuid}" />
+
+            <div class="bread-header-container">
+              <ul class="breadcrumb">
+                <li><a href="?operation=UiV2Main.indexMain" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Main.indexMain');">${textContainer.text['myGroupsHomeBreadcrumb'] }</a><span class="divider"><i class='fa fa-angle-right'></i></span></li>
+                <li class="active">${textContainer.text['groupImportMembersBreadcrumb'] }</li>
+              </ul>
+              <div class="page-header blue-gradient">
+                <h1>${textContainer.text['groupImportTitle'] }</h1>
+              </div>
+            </div>
+
+            <div id="member-search" tabindex="-1" role="dialog" aria-labelledby="member-search-label" aria-hidden="true" class="modal hide fade">
+              <div class="modal-header"><button type="button" class="close" data-dismiss="modal" aria-label="${textContainer.textEscapeXml['modalCloseAriaLabel']}"><span aria-hidden="true">&times;</span></button>
+                <h3 id="member-search-label">${textContainer.text['groupSearchForEntityButton'] }</h3>
+              </div>
+              <div class="modal-body">
+                <form class="form form-inline" id="addMemberSearchFormId">
+                  <input name="addMemberSubjectSearch" type="text" placeholder="" aria-label="${textContainer.textEscapeXml['groupSearchMemberOrId']}"/>
+                  <button class="btn" onclick="ajax('../app/UiV2Group.addMemberSearch?groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}', {formIds: 'addMemberSearchFormId'}); return false;" >${textContainer.text['groupSearchButton'] }</button>
+                  <br />
+                  <span style="white-space: nowrap;"><input type="checkbox" name="matchExactId" value="true" aria-label="${textContainer.textEscapeXml['groupLabelExactIdMatch']}"/> ${textContainer.text['groupLabelExactIdMatch'] }</span>
+                  <br />
+                  <span style="white-space: nowrap;">${textContainer.text['find.search-source'] } 
+                  <select name="sourceId">
+                    <option value="all">${textContainer.textEscapeXml['find.search-all-sources'] }</option>
+                    <c:forEach items="${grouperRequestContainer.subjectContainer.sources}" var="source" >
+                      <option value="${grouper:escapeHtml(source.id)}">
+                        ${grouper:escapeHtml(source.name) } (
+                          <c:forEach var="subjectType" items="${source.subjectTypes}" varStatus="typeStatus">
+                            <c:if test="${typeStatus.count>1}">, </c:if>
+                            ${grouper:escapeHtml(subjectType)}
+                          </c:forEach>
+                        )                               
+                      </option>
+                    </c:forEach>
+                  </select></span>
+                </form>
+                <div id="addMemberResults">
+                </div>
+              </div>
+              <div class="modal-footer">
+                <button data-dismiss="modal" aria-hidden="true" class="btn">${textContainer.text['groupSearchCloseButton']}</button>
+              </div>
+            </div>
+
+
+            <div id="group-search" tabindex="-1" role="dialog" aria-labelledby="group-search-label" aria-hidden="true" class="modal hide fade">
+              <div class="modal-header"><button type="button" class="close" data-dismiss="modal" aria-label="${textContainer.textEscapeXml['modalCloseAriaLabel']}"><span aria-hidden="true">&times;</span></button>
+                <h3 id="group-search-label">${textContainer.text['groupImportSearchForGroupButton']}</h3>
+              </div>
+
+              <div class="modal-body">
+                <form class="form form-inline" id="addGroupSearchFormId">
+                  <input id="addGroupSearchId" name="addGroupSearch" type="text" aria-label="${textContainer.textEscapeXml['groupImportSearchGroupPlaceholder']}" placeholder="${textContainer.text['groupImportSearchGroupPlaceholder']}" />
+                  <button class="btn" onclick="ajax('../app/UiV2GroupImport.groupImportGroupSearch', {formIds: 'addGroupSearchFormId'}); return false;" >${textContainer.text['groupImportSearchButton'] }</button>
+                  <br />
+                  <span style="white-space: nowrap;"><input type="checkbox" name="matchExactId" value="true" aria-label="${textContainer.textEscapeXml['subjectSearchExactIdMatch']}"/> ${textContainer.text['subjectSearchExactIdMatch'] }</span>
+                </form>
+                <div id="addGroupResults">
+                </div>
+              </div>
+              <div class="modal-footer">
+                <button data-dismiss="modal" aria-hidden="true" class="btn">${textContainer.text['subjectSearchCloseButton']}</button>
+              </div>
+            </div>
+
+            <form class="form-horizontal" id="importGroupFormId" enctype="multipart/form-data" method="post" >
+              <%-- note this wont work for token per page --%>
+              <input type="hidden" name="<csrf:token-name/>" value="<csrf:token-value />"/>
+              
+              
+               <c:if test="${grouperRequestContainer.grouperLoaderContainer.loaderGroup}">
+                <div role="alert" class="alert alert-info">
+                    ${textContainer.text['loaderGroupDirectMembershipAddRemoveWarning']}
+                </div>
+               </c:if>
+              
+              <h3>${textContainer.text['groupImportHowAddGroups'] }</h3>
+              <p>${textContainer.text['groupImportMultipleGroupsInfo']}</p>
+
+              <div class="control-group">
+                <div class="controls">
+                  <label class="radio">
+                    <input type="radio" name="bulkAddGroupOptions" value="input" checked="checked"
+                    onchange="$('.bulk-add-group-import-container').slideUp('fast'); $('.bulk-add-group-list-container').slideUp('fast'); $('.bulk-add-group-input-container').slideDown('fast'); return true;"
+                    >${textContainer.text['groupImportSearchForGroupsToAdd'] }
+                  </label>
+                  <label class="radio">
+                    <input type="radio" name="bulkAddGroupOptions" value="list"
+                      onchange="$('.bulk-add-group-import-container').slideUp('fast'); $('.bulk-add-group-list-container').slideDown('fast'); $('.bulk-add-group-input-container').slideUp('fast'); return true;"
+                    >${textContainer.text['groupImportCopyListOfGroupNamesOrIds'] }
+                  </label>
+                  <label class="radio">
+                    <input type="radio" name="bulkAddGroupOptions" value="import"
+                      onchange="$('.bulk-add-group-import-container').slideDown('fast'); $('.bulk-add-group-list-container').slideUp('fast'); $('.bulk-add-group-input-container').slideUp('fast'); return true;"
+                    >${textContainer.text['groupImportImportGroupFile'] }
+                  </label>
+                </div>
+              </div>
+
+              <div class="bulk-add-group-input-container">
+                <div class="control-group bulk-add-group-block">
+                  <label for="groupImportGroupComboId" style="position:absolute" class="control-label">${textContainer.text['groupImportAddMembersToGroupLabel'] }</label>
+                  <div class="controls">
+                    <grouper:combobox2 idBase="groupImportGroupCombo" style="width: 30em" 
+                       value="${grouperRequestContainer.groupContainer.guiGroup.group.id}"
+                       filterOperation="../app/UiV2Group.groupUpdateFilter" />                    
+                    ${textContainer.text['groupImportGroupLabelPreComboLink']} <a href="#group-search" 
+                      onclick="$('#addGroupSearchId').val(''); $('#addGroupResults').empty(); return true;"
+                      role="button" data-toggle="modal" style="text-decoration: underline !important;"
+                      >${textContainer.text['groupImportGroupSearchLink']}</a>
+                  </div>
+                  <br />
+                  <div class="control-group" style="margin-bottom: 5px">
+                    <div class="controls"><a href="#" 
+                      onclick="ajax('../app/UiV2GroupImport.groupImportAddGroup', {formIds: 'importGroupFormId'}); return false;"
+                      class="btn bulk-add-another-group" role="button">${textContainer.text['groupImportAddAnotherGroupButton']}</a></div>
+                  </div>
+
+                  <div class="controls">
+                    <div id="groupImportExtraGroupsDivId">
+                      <%@ include file="groupImportExtraGroups.jsp"%>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="bulk-add-group-list-container hide">
+                <div class="control-group">
+                  <label for="groupListId" class="control-label">${textContainer.text['groupImportEnterListOfGroupNamesOrIds'] }</label>
+                  <div class="controls">
+                    <textarea rows="10" name="groupList" id="groupListId"></textarea>
+                    <br /><br />
+                    <a href="#"
+                      onclick="ajax('../app/UiV2GroupImport.groupImportValidateGroupList', {formIds: 'importGroupFormId'}); return false;"
+                      class="btn bulk-add-another-group" role="button">${textContainer.text['groupImportValidateGroupsButton']}</a>
+                  </div>
+                </div>
+              </div>
+
+              <div class="bulk-add-group-import-container hide">
+                <div class="control-group">
+                  <label class="control-label" for="importGroupCsvFileId">${textContainer.text['groupImportSelectGroupFileToImport'] }</label>
+                  <div class="controls">
+                    <input type="file" name="importGroupCsvFile" id="importGroupCsvFileId"><span class="help-block">
+                    ${textContainer.text['groupImportSelectGroupFileDescription']}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <hr>
+              <h3>${textContainer.text['groupImportHowAdd'] }</h3>
+              <div class="control-group">
+                <div class="controls">
+                  <label class="radio">
+                    <input type="radio" name="bulkAddOptions" value="input" checked="checked"
+                    onchange="$('.bulk-add-import-container').slideUp('fast'); $('.bulk-add-list-container').slideUp('fast'); $('.bulk-add-input-container').slideDown('fast'); return true;"
+                    >${textContainer.text['groupImportSearchForMembersToAdd'] }
+                  </label>
+                  <label class="radio">
+                    <input type="radio" name="bulkAddOptions" value="list"
+                      onchange="$('.bulk-add-import-container').slideUp('fast'); $('.bulk-add-list-container').slideDown('fast'); $('.bulk-add-input-container').slideUp('fast'); return true;"
+                    >${textContainer.text['groupImportCopyListOfIds'] }
+                  </label>
+                  <label class="radio">
+                    <input type="radio" name="bulkAddOptions" value="import"
+                      onchange="$('.bulk-add-import-container').slideDown('fast'); $('.bulk-add-list-container').slideUp('fast'); $('.bulk-add-input-container').slideUp('fast'); return true;"
+                    >${textContainer.text['groupImportImportFile'] }
+                  </label>
+                </div>
+              </div>
+
+              <div class="bulk-add-input-container">
+                <div class="control-group bulk-add-block">
+                  <label for="groupAddMemberComboId" class="control-label">${textContainer.text['groupImportEnterMemberNameOrId'] }</label>
+                  <div class="controls">
+                    <grouper:combobox2 idBase="groupAddMemberCombo" style="width: 30em" 
+                       value="${grouperRequestContainer.groupImportContainer.importDefaultSubject}"
+                       filterOperation="../app/UiV2Group.addMemberFilter" />
+                                           
+                    ${textContainer.text['groupImportSubjectLabelPreComboLink']} <a href="#member-search" 
+                      onclick="$('#addMemberSearchId').val(''); $('#addMemberResults').empty(); return true;"
+                      role="button" data-toggle="modal" style="text-decoration: underline !important;"
+                      >${textContainer.text['groupImportSubjectSearchLink']}</a>
+                  </div>
+                  <br />
+                  <div class="control-group" style="margin-bottom: 5px">
+                    <div class="controls">
+                      <a href="#" 
+                        onclick="ajax('../app/UiV2GroupImport.groupImportAddMember', {formIds: 'importGroupFormId'}); return false;"
+                        class="btn bulk-add-another" role="button">${textContainer.text['groupImportAddAnotherMemberButton']}</a></div>
+                  </div>
+                  <div class="controls">
+                  
+                    <div id="groupImportExtraMembersDivId">
+                      <%@ include file="groupImportExtraSubjects.jsp"%>
+                    </div>
+                    
+                  </div>
+                </div>
+              </div>
+              
+              <div class="bulk-add-import-container hide">
+                <div class="control-group">
+                  <label class="control-label" for="importCsvFileId">${textContainer.text['groupImportSelectFileToImport'] }</label>
+                  <div class="controls">
+                    <input type="file" name="importCsvFile" id="importCsvFileId"><span class="help-block">
+                    
+                    ${textContainer.text['groupImportSelectFileDescription']}
+                    </span>                    
+                    <br><br>
+                      <table class="table table-condensed table-striped table-bordered">
+                        <thead>
+                          <tr>
+                            <th>${textContainer.text['groupImportSourceId'] }</th>
+                            <th>${textContainer.text['groupImportSourceName'] }</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <%-- <tr>
+                            <td>g:gsa</td>
+                            <td>Grouper: Group Source Adapter</td>
+                          </tr> --%>
+                          <c:forEach items="${grouperRequestContainer.commonRequestContainer.sources}" 
+                            var="source" >
+                            <tr>
+                              <td>${grouper:escapeHtml(source.id) }</td>
+                              <td>${grouper:escapeHtml(source.name) }</td>
+                            </tr>
+                          
+                          </c:forEach>
+                          
+                        </tbody>
+                      </table>
+                  </div>
+                </div>
+              </div>
+
+              <div class="bulk-add-list-container hide">
+                <div class="control-group">
+                  <label for="entityListId" class="control-label">${textContainer.text['groupImportEnterListOfMemberIds'] }</label>
+                  <div class="controls">
+                    <textarea rows="10" name="entityList" id="entityListId"></textarea>
+                    <span class="help-block">${textContainer.text['groupImportEnterListOfMemberIdsHelp'] }</span>
+                    <br />
+                    <a href="#" 
+                      onclick="ajax('../app/UiV2GroupImport.groupImportValidateList', {formIds: 'importGroupFormId'}); return false;"
+                      class="btn bulk-add-another" role="button">${textContainer.text['groupImportValidateButton']}</a>
+                  </div>
+                </div>
+                <div class="control-group">
+                  <label for="searchEntitySourceId" class="control-label">${textContainer.text['find.search-source'] }</label>
+                  <div class="controls">
+                    <select name="searchEntitySourceName" id="searchEntitySourceId">
+                      <option value="all">${textContainer.textEscapeXml['find.search-all-sources'] }</option>
+                      <c:forEach items="${grouperRequestContainer.subjectContainer.sources}" var="source" >
+                        <option value="${grouper:escapeHtml(source.id)}">
+                          ${grouper:escapeHtml(source.name) } (
+                            <c:forEach var="subjectType" items="${source.subjectTypes}" varStatus="typeStatus">
+                              <c:if test="${typeStatus.count>1}">, </c:if>
+                              ${grouper:escapeHtml(subjectType)}
+                            </c:forEach>
+                          )
+                        </option>
+                      </c:forEach>
+                    </select>
+                  </div>
+                </div>
+              </div>
+              
+              <div class="control-group">
+              	<div class="controls">
+                  <label class="radio">
+	                <input type="radio" name="replaceOrRemoveExistingMembers" id="doNotModifyExistingMembersId" value="none" checked="checked"
+	                >${textContainer.text['groupImportDoNotModifyExistingMembers'] }
+                  </label>
+                </div>
+                <div class="controls">
+                  <label class="radio">
+	                <input type="radio" name="replaceOrRemoveExistingMembers" id="replaceExistingMembersId" value="replace"
+	                >${textContainer.text['groupImportReplaceExistingMembers'] }
+                  </label>
+                </div>
+                <div class="controls">
+                  <label class="radio">
+	                <input type="radio" name="replaceOrRemoveExistingMembers" id="removeMembers" value="remove"
+	                >${textContainer.text['groupImportRemoveMembers'] }
+                  </label>
+                </div>
+              </div>
+              <div class="control-group">
+                <label for="member-start-date"
+                  class="control-label">${textContainer.text['groupImportStartDate'] }</label>
+                <div class="controls">
+                  <input type="datetime-local" step="1" name="startDate"  placeholder="${textContainer.text['membershipEditDatePlaceholder'] }" id="member-start-date"><span class="help-block">${textContainer.text['groupImportStartDateSubtext'] }</span>
+                </div>
+              </div>
+              <div class="control-group">
+                <label for="member-end-date" class="control-label">${textContainer.text['groupImportEndDate'] }</label>
+                <div class="controls">
+                  <input type="datetime-local" step="1" name="endDate" placeholder="${textContainer.text['membershipEditDatePlaceholder'] }" id="member-end-date"><span class="help-block">${textContainer.text['groupImportEndDateSubtext'] }</span>
+                </div>
+              </div>
+              <div class="form-actions">
+                <button type="button" 
+                  onclick="return guiSubmitFileForm(event, '#importGroupFormId', '../app/UiV2GroupImport.groupImportSubmit')"
+                  class="btn btn-primary">${textContainer.text['groupImportAddMembersButton'] }</button> 
+                <%-- needs to go back to the calling page which is set in a param --%>
+                <c:choose>
+                  <c:when test="${grouperRequestContainer.groupImportContainer.importFromSubject}">
+                    <button type="button" onclick="return guiV2link('operation=UiV2Subject.viewSubject&subjectId=${grouper:escapeUrl(grouperRequestContainer.subjectContainer.guiSubject.subject.id)}&sourceId=${grouper:escapeUrl(grouperRequestContainer.subjectContainer.guiSubject.subject.sourceId)}');"
+                       class="btn btn-cancel">${textContainer.text['groupImportCancelButton']}</button>
+                  </c:when>
+                  <c:when test="${grouperRequestContainer.groupImportContainer.importFromGroup}">
+                    <button type="button" onclick="return guiV2link('operation=UiV2Group.viewGroup&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}');"
+                       class="btn btn-cancel">${textContainer.text['groupImportCancelButton']}</button>
+                  </c:when>
+                  <c:otherwise>
+                    <button type="button" onclick="return guiV2link('operation=UiV2Main.indexMain');"
+                       class="btn btn-cancel">${textContainer.text['groupImportCancelButton']}</button>
+                  </c:otherwise>
+                </c:choose>
+              </div>
+              
+              <%-- helps with navigation --%>
+              <input type="hidden" name="groupId" value="${grouperRequestContainer.groupContainer.guiGroup.group.id}" />
+              <input type="hidden" name="subjectId" value="${grouper:escapeHtml(grouperRequestContainer.subjectContainer.guiSubject.subject.id)}" />
+              <input type="hidden" name="sourceId" value="${grouper:escapeHtml(grouperRequestContainer.subjectContainer.guiSubject.subject.sourceId)}" />
+
+            </form>
+
+

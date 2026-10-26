@@ -1,0 +1,33 @@
+<%@ include file="../assetsJsp/commonTaglib.jsp"%>
+
+  <c:set var="configInstance" value="${grouperRequestContainer.grouperReportContainer.grouperReportConfigInstance}" />
+  <div class="btn-group btn-block">
+  
+    <button type="button" data-toggle="dropdown" aria-label="${textContainer.text['ariaLabelGuiMoreGrouperReportActions']}" id="more-action-button" class="btn btn-medium btn-block dropdown-toggle" 
+      aria-haspopup="true" aria-expanded="false" onclick="$('#grouper-report-more-options').is(':visible') === true ? $(this).attr('aria-expanded','false') : $(this).attr('aria-expanded',function(index, currentValue) { $('#grouper-report-more-options li').first().focus();return true;});">
+        ${textContainer.text['grouperReportMoreActionsButton'] } <span class="caret"></span></button>
+
+    <ul class="dropdown-menu dropdown-menu-right" id="grouper-report-more-options">
+    
+      <c:if test="${fn:length(configInstance.guiReportInstances) > 0}">
+	      <c:set var="mostRecentGuiReportInstance" value="${configInstance.guiReportInstances[0]}" />
+	      <li><a href="../app/UiV2GrouperReport.downloadReportForFolder?attributeAssignId=${mostRecentGuiReportInstance.reportInstance.attributeAssignId}&stemId=${grouperRequestContainer.stemContainer.guiStem.stem.id}">${textContainer.text['grouperReportConfigTableReportActionsDownloadMostRecent'] }</a></li>
+	      <c:if test="${guiReportConfig.canRead}">
+	       <li><a href="?operation=UiV2Admin.viewLogs&jobName=grouper_report_${grouperRequestContainer.stemContainer.guiStem.stem.id}_${configInstance.reportConfigBean.attributeAssignmentMarkerId}" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Admin.viewLogs&jobName=grouper_report_${grouperRequestContainer.stemContainer.guiStem.stem.id}_${configInstance.reportConfigBean.attributeAssignmentMarkerId}');">${textContainer.text['grouperReportConfigTableReportActionsReportLogs'] }</a></li>
+	      </c:if>
+      </c:if>
+     
+	    <c:if test="${grouperRequestContainer.grouperReportContainer.canWriteGrouperReports }">
+	      <c:choose>
+	        <c:when test="${configInstance.reportConfigBean.reportConfigEnabled}">
+	          <li><a href="#" onclick="ajax('../app/UiV2GrouperReport.changeReportConfigStatusForFolder?newStatus=disable&attributeAssignmentMarkerId=${grouper:escapeUrl(configInstance.reportConfigBean.attributeAssignmentMarkerId)}&stemId=${grouper:escapeUrl(grouperRequestContainer.stemContainer.guiStem.stem.id)}'); return false;">${textContainer.text['grouperReportConfigTableReportActionsDisbleReportConfig'] }</a></li>
+	        </c:when>
+	        <c:otherwise>
+	          <li><a href="#" onclick="ajax('../app/UiV2GrouperReport.changeReportConfigStatusForFolder?newStatus=enable&attributeAssignmentMarkerId=${grouper:escapeUrl(configInstance.reportConfigBean.attributeAssignmentMarkerId)}&stemId=${grouper:escapeUrl(grouperRequestContainer.stemContainer.guiStem.stem.id)}'); return false;">${textContainer.text['grouperReportConfigTableReportActionsEnableReportConfig'] }</a></li>
+	        </c:otherwise>
+	      </c:choose>
+	      <li><a href="#" onclick="if (confirm('${textContainer.textEscapeSingleDouble['grouperReportConfigConfirmDeleteReportConfig']}')) { ajax('../app/UiV2GrouperReport.deleteReportConfigForFolder?attributeAssignmentMarkerId=${grouper:escapeUrl(configInstance.reportConfigBean.attributeAssignmentMarkerId)}&stemId=${grouper:escapeUrl(grouperRequestContainer.stemContainer.guiStem.stem.id)}'); } return false;">${textContainer.text['grouperReportConfigTableReportActionsDeleteReportConfig'] }</a></li>
+	    </c:if>
+    </ul>
+
+  </div>

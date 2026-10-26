@@ -1,0 +1,1008 @@
+/*******************************************************************************
+ * Copyright 2012 Internet2
+ * 
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ * 
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ * 
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ ******************************************************************************/
+/**
+ * 
+ */
+package edu.internet2.middleware.grouper.grouperUi.beans.api;
+
+import java.io.Serializable;
+import java.text.SimpleDateFormat;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
+
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.builder.EqualsBuilder;
+import org.apache.commons.lang3.builder.HashCodeBuilder;
+
+import edu.internet2.middleware.grouper.Composite;
+import edu.internet2.middleware.grouper.CompositeFinder;
+import edu.internet2.middleware.grouper.Group;
+import edu.internet2.middleware.grouper.GroupType;
+import edu.internet2.middleware.grouper.GroupTypeFinder;
+import edu.internet2.middleware.grouper.GrouperSession;
+import edu.internet2.middleware.grouper.SubjectFinder;
+import edu.internet2.middleware.grouper.abac.GrouperAbac;
+import edu.internet2.middleware.grouper.app.loader.ldap.LoaderLdapUtils;
+import edu.internet2.middleware.grouper.app.serviceLifecycle.GrouperRecentMemberships;
+import edu.internet2.middleware.grouper.attr.AttributeDefName;
+import edu.internet2.middleware.grouper.cfg.GrouperConfig;
+import edu.internet2.middleware.grouper.exception.GroupNotFoundException;
+import edu.internet2.middleware.grouper.exception.GrouperSessionException;
+import edu.internet2.middleware.grouper.group.TypeOfGroup;
+import edu.internet2.middleware.grouper.grouperUi.beans.ui.GroupContainer;
+import edu.internet2.middleware.grouper.grouperUi.beans.ui.GrouperRequestContainer;
+import edu.internet2.middleware.grouper.grouperUi.beans.ui.TextContainer;
+import edu.internet2.middleware.grouper.misc.GrouperDAOFactory;
+import edu.internet2.middleware.grouper.misc.GrouperObject;
+import edu.internet2.middleware.grouper.misc.GrouperSessionHandler;
+import edu.internet2.middleware.grouper.privs.AccessPrivilege;
+import edu.internet2.middleware.grouper.privs.Privilege;
+import edu.internet2.middleware.grouper.privs.PrivilegeHelper;
+import edu.internet2.middleware.grouper.ui.GrouperUiFilter;
+import edu.internet2.middleware.grouper.ui.util.GrouperUiConfig;
+import edu.internet2.middleware.grouper.ui.util.GrouperUiUtils;
+import edu.internet2.middleware.grouper.util.GrouperUtil;
+import edu.internet2.middleware.subject.Subject;
+
+
+
+/**
+ * Result of one group being retrieved since a user is a member of it.  The number of
+ * groups will equal the number of groups the user is a member of (provided the filter matches)
+ * 
+ * @author mchyzer
+ */
+@SuppressWarnings("serial")
+public class GuiGroup extends GuiObjectBase implements Serializable {
+
+  /**
+   * 
+   * @return font awesome icon css class e.g. fa-group
+   */
+  public String getIcon() {
+    if (this.group.getTypeOfGroup() == TypeOfGroup.entity) {
+      return "fa-cloud-download";
+    }
+    return "fa-group";
+  }
+  
+  /**
+   * if the logged in user can invite external users to this group
+   * @return true if the logged in user can invite external users for this group
+   */
+  public boolean isCanInviteExternalUsers() {
+    if (GrouperUiConfig.retrieveConfig().propertyValueBoolean("inviteExternalPeople.link-from-new-ui", false)) {
+      boolean canInviteOthers = PrivilegeHelper.canInviteExternalUsers(
+              GrouperSession.staticGrouperSession(),
+              this.group,
+              GrouperSession.staticGrouperSession().getSubject());
+
+      //see if we can invite
+      // since the lite UI uses jsp to check property settings, it's safe to check for just the new UI property
+      if (canInviteOthers) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+  
+  /**
+   * get a composite from the underlying group if there is one there
+   * this is needed since there is a group.isComposite, so it conflicts
+   * with the javabean group.getComposite()
+   * @return the composite
+   */
+  public Composite getComposite() {
+    Composite composite = this.group.getComposite(false);
+    return composite;
+  }
+  
+  /**
+   * get lines that show if this group is a composite factor of other groups
+   * @return the text
+   */
+  public String getCompositeFactorOfOtherGroupsText() {
+    
+    //get the composites
+    Set<Composite> composites = CompositeFinder.findAsFactor(this.group);
+    
+    if (GrouperUtil.length(composites) == 0) {
+      return TextContainer.retrieveFromRequest().getText().get("groupLabelThisGroupNotCompositeFactor");
+    }
+
+    StringBuilder result = new StringBuilder();
+    boolean firstLine = true;
+    for (Composite composite : composites) {
+      
+      try {
+        if (!firstLine) {
+          result.append("<br />\n");
+        }
+        
+        Group theGroup = composite.getOwnerGroup();
+
+        GuiGroup guiGroup = new GuiGroup(theGroup);
+        result.append(guiGroup.getCompositeOwnerText());
+
+      } catch (GroupNotFoundException gnfe) {
+        // just note that this one owner cannot be viewed, and keep listing the rest.  returning here
+        // would throw away the lines already built for the composites the user can see
+        result.append(TextContainer.retrieveFromRequest().getText().get("groupLabelNotAllowedToViewOwner"));
+      }
+      
+      firstLine = false;
+      
+    }
+    return result.toString();
+  }
+  
+  /**
+   * text about this group being a composite owner
+   * @return text about this group being a composite owner
+   */
+  public String getCompositeOwnerText() {
+    
+    if (this.group.hasComposite()) {
+      
+      boolean allowed = true;
+
+      final Subject subject = GrouperSession.staticGrouperSession().getSubject();
+      
+      allowed = allowed && this.group.canHavePrivilege(subject, AccessPrivilege.READ.getName(), false);      
+
+      Composite composite = this.group.getComposite(false);
+      
+      Group leftGroup = null;
+      Group rightGroup = null;
+      
+      if (composite == null || !allowed) {
+        //cannot view
+        allowed = false;
+      } else {
+      
+        try {
+          leftGroup = composite.getLeftGroup();
+          
+          rightGroup = composite.getRightGroup();
+        } catch (GroupNotFoundException gnfe) {
+          allowed = false;
+        }
+        
+      }
+      
+      if (!allowed) {
+        return TextContainer.retrieveFromRequest().getText().get("groupLabelNotAllowedToViewAllGroups");
+      }
+      
+      //setup object model for text
+      GroupContainer groupContainer = GrouperRequestContainer.retrieveFromRequestOrCreate().getGroupContainer();
+      groupContainer.setCompositeOwnerGuiGroup(this);
+      groupContainer.setCompositeLeftFactorGuiGroup(new GuiGroup(leftGroup));
+      groupContainer.setCompositeRightFactorGuiGroup(new GuiGroup(rightGroup));
+
+      switch(composite.getType()) {
+        case COMPLEMENT:
+          return TextContainer.retrieveFromRequest().getText().get("groupLabelCompositeMinus");
+        case INTERSECTION:
+          return TextContainer.retrieveFromRequest().getText().get("groupLabelCompositeIntersection");
+        case UNION:
+          return TextContainer.retrieveFromRequest().getText().get("groupLabelCompositeUnion");
+          
+      }
+      
+    } 
+    return TextContainer.retrieveFromRequest().getText().get("groupLabelThisGroupNotComposite");
+    
+  }
+  
+  /**
+   * comma separated privilege labels allowed by grouper all
+   * @return the labels
+   */
+  public String getPrivilegeLabelsAllowedByGrouperAll() {
+    StringBuilder results = new StringBuilder();
+    boolean foundOne = false;
+    
+    if (this.isGrantAllAdmin()) {
+      if (foundOne) {
+        results.append(", ");
+      }
+      foundOne = true;
+      results.append(TextContainer.retrieveFromRequest().getText().get("priv.adminUpper"));
+    }
+    if (this.isGrantAllUpdate()) {
+      if (foundOne) {
+        results.append(", ");
+      }
+      foundOne = true;
+      results.append(TextContainer.retrieveFromRequest().getText().get("priv.updateUpper"));
+    }
+    if (this.isGrantAllRead()) {
+      if (foundOne) {
+        results.append(", ");
+      }
+      foundOne = true;
+      results.append(TextContainer.retrieveFromRequest().getText().get("priv.readUpper"));
+    }
+    if (this.isGrantAllView()) {
+      if (foundOne) {
+        results.append(", ");
+      }
+      foundOne = true;
+      results.append(TextContainer.retrieveFromRequest().getText().get("priv.viewUpper"));
+    }
+    if (this.isGrantAllOptin()) {
+      if (foundOne) {
+        results.append(", ");
+      }
+      foundOne = true;
+      results.append(TextContainer.retrieveFromRequest().getText().get("priv.optinUpper"));
+    }
+    if (this.isGrantAllOptout()) {
+      if (foundOne) {
+        results.append(", ");
+      }
+      foundOne = true;
+      results.append(TextContainer.retrieveFromRequest().getText().get("priv.optoutUpper"));
+    }
+    if (this.isGrantAllAttrUpdate()) {
+      if (foundOne) {
+        results.append(", ");
+      }
+      foundOne = true;
+      results.append(TextContainer.retrieveFromRequest().getText().get("priv.groupAttrUpdateUpper"));
+    }
+    if (this.isGrantAllAttrRead()) {
+      if (foundOne) {
+        results.append(", ");
+      }
+      foundOne = true;
+      results.append(TextContainer.retrieveFromRequest().getText().get("priv.groupAttrReadUpper"));
+    }
+    return results.toString();
+  }
+  
+  /**
+   * 
+   * @see java.lang.Object#equals(java.lang.Object)
+   */
+  @Override
+  public boolean equals(Object other) {
+    if (this == other) {
+      return true;
+    }
+    if (!(other instanceof GuiGroup)) {
+      return false;
+    }
+    return new EqualsBuilder()
+      .append( this.group, ( (GuiGroup) other ).group )
+      .isEquals();
+  }
+
+  /**
+   * @see java.lang.Object#hashCode()
+   */
+  @Override
+  public int hashCode() {
+    return new HashCodeBuilder()
+      .append( this.group )
+      .toHashCode();
+  }
+
+
+  /**
+   * if the underlying group has a composite
+   * @return true if has composite
+   */
+  public boolean isHasComposite() {
+    return this.group.hasComposite();
+  }
+  
+  /**
+   * 
+   * <p>REQUEST THREAD ONLY: this resolves the logged-in subject from the servlet request
+   * threadlocal, which is null on a worker thread (GRP-7242).  From inside a GrouperCallable
+   * or any other non-request thread, capture the subject on the request thread and call the
+   * overload that takes a loggedInSubject.</p>
+   * @param groups
+   * @return groups
+   */
+  public static Set<GuiGroup> convertFromGroups(Set<Group> groups) {
+    return convertFromGroups(groups, null, -1, GrouperUiFilter.retrieveSubjectLoggedIn());
+  }
+
+  /**
+   * Convert groups using an explicitly supplied logged-in subject.  Use this overload when conversion
+   * can run outside the servlet request thread (for example, in a home-page widget worker).
+   * @param groups groups to convert
+   * @param loggedInSubject subject whose privileges should be prefetched
+   * @return groups
+   */
+  public static Set<GuiGroup> convertFromGroups(Set<Group> groups, Subject loggedInSubject) {
+    return convertFromGroups(groups, null, -1, loggedInSubject);
+  }
+
+  /**
+   * 
+   * <p>REQUEST THREAD ONLY: this resolves the logged-in subject from the servlet request
+   * threadlocal, which is null on a worker thread (GRP-7242).  From inside a GrouperCallable
+   * or any other non-request thread, capture the subject on the request thread and call the
+   * overload that takes a loggedInSubject.</p>
+   * @param groups
+   * @param configMax
+   * @param defaultMax
+   * @return groups
+   */
+  public static Set<GuiGroup> convertFromGroups(Set<Group> groups, String configMax, int defaultMax) {
+    return convertFromGroups(groups, configMax, defaultMax, GrouperUiFilter.retrieveSubjectLoggedIn());
+  }
+
+  /**
+   * Convert groups using an explicitly supplied logged-in subject.  Use this overload when conversion
+   * can run outside the servlet request thread (for example, in a home-page widget worker).
+   * @param groups groups to convert
+   * @param configMax config key containing the maximum number of groups
+   * @param defaultMax default maximum number of groups
+   * @param loggedInSubject subject whose privileges should be prefetched
+   * @return groups
+   */
+  public static Set<GuiGroup> convertFromGroups(Set<Group> groups, String configMax, int defaultMax,
+      Subject loggedInSubject) {
+    Set<GuiGroup> tempGroups = new LinkedHashSet<GuiGroup>();
+    
+    Integer max = null;
+    
+    if (!StringUtils.isBlank(configMax)) {
+      max = GrouperUiConfig.retrieveConfig().propertyValueInt(configMax, defaultMax);
+    }
+    
+    int count = 0;
+    for (Group group : GrouperUtil.nonNull(groups)) {
+      tempGroups.add(new GuiGroup(group));
+      if (max != null && ++count >= max) {
+        break;
+      }
+    }
+    
+    //bulk-prefetch parent stems in ONE query so per-row getParentGuiStem() is a cache hit (avoids N+1)
+    GuiObjectBase.cacheParentStems(tempGroups);
+
+    //bulk-prefetch the logged-in subject's privileges in ONE query so per-row canRead()/canUpdate()/
+    //canAdmin()/canGroupAttrRead() are answered from the object (avoids an N+1 of privilege resolution)
+    cacheLoggedInPrivileges(tempGroups, CAN_GETTER_PRIVILEGES, loggedInSubject);
+
+    return tempGroups;
+    
+  }
+
+  
+  /**
+   * &lt;a href="#" rel="tooltip" data-html="true" data-delay-show='200' data-placement="right" title="&amp;lt;strong&amp;gt;FOLDER:&amp;lt;/strong&amp;gt;&amp;lt;br /&amp;gt;Full : Path : To : The : Entity&lt;br /&gt;&lt;br /&gt;This is the description for this entity. Lorem ipsum dolor sit amet, consectetur adipisicing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.">Editors</a>
+   * @return short link
+   */
+  public String getShortLink() {
+    
+    return shortLinkHelper(false, false);
+  }
+  
+  /**
+   * display short link with image next to it in li
+   * &lt;a href="#" rel="tooltip" data-html="true" data-delay-show='200' data-placement="right" title="&amp;lt;strong&amp;gt;FOLDER:&amp;lt;/strong&amp;gt;&amp;lt;br /&amp;gt;Full : Path : To : The : Entity&lt;br /&gt;&lt;br /&gt;This is the description for this entity. Lorem ipsum dolor sit amet, consectetur adipisicing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.">Editors</a>
+   * @return short link
+   */
+  public String getShortLinkWithIcon() {
+    
+    return shortLinkHelper(true, false);
+  }
+
+  /**
+   * display short link with image next to it in li and the path info below it
+   * &lt;a href="#" rel="tooltip" data-html="true" data-delay-show='200' data-placement="right" title="&amp;lt;strong&amp;gt;FOLDER:&amp;lt;/strong&amp;gt;&amp;lt;br /&amp;gt;Full : Path : To : The : Entity&lt;br /&gt;&lt;br /&gt;This is the description for this entity. Lorem ipsum dolor sit amet, consectetur adipisicing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.">Editors</a>
+   * @return short link
+   */
+  public String getShortLinkWithIconAndPath() {
+    
+    return shortLinkHelper(true, true);
+  }
+
+  /**
+   * 
+   * @param showIcon
+   * @param showPath 
+   * @return the link
+   */
+  private String shortLinkHelper(boolean showIcon, boolean showPath) {
+    
+    if (this.group == null) {
+      //TODO put icon here?
+      return TextContainer.retrieveFromRequest().getText().get("guiObjectUnknown");
+    }
+    
+    GrouperRequestContainer.retrieveFromRequestOrCreate().getCommonRequestContainer().setGuiGroup(this);
+    GrouperRequestContainer.retrieveFromRequestOrCreate().getCommonRequestContainer().setShowIcon(showIcon);
+    GrouperRequestContainer.retrieveFromRequestOrCreate().getCommonRequestContainer().setShowPath(showPath);
+    
+    try {
+      
+      String result = TextContainer.retrieveFromRequest().getText().get("guiGroupShortLink");
+      return result;
+      
+    } finally {
+
+      GrouperRequestContainer.retrieveFromRequestOrCreate().getCommonRequestContainer().setGuiGroup(null);
+      GrouperRequestContainer.retrieveFromRequestOrCreate().getCommonRequestContainer().setShowIcon(false);
+      GrouperRequestContainer.retrieveFromRequestOrCreate().getCommonRequestContainer().setShowPath(false);
+
+    }
+
+  }
+
+  /**
+   * &lt;a href="#" rel="tooltip" data-html="true" data-delay-show='200' data-placement="right" title="&amp;lt;strong&amp;gt;FOLDER:&amp;lt;/strong&amp;gt;&amp;lt;br /&amp;gt;Full : Path : To : The : Entity&lt;br /&gt;&lt;br /&gt;This is the description for this entity. Lorem ipsum dolor sit amet, consectetur adipisicing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.">Editors</a>
+   * @return short link
+   */
+  public String getLink() {
+    
+    return linkHelper(false);
+  }
+  
+  /**
+   * display short link with image next to it in li
+   * &lt;a href="#" rel="tooltip" data-html="true" data-delay-show='200' data-placement="right" title="&amp;lt;strong&amp;gt;FOLDER:&amp;lt;/strong&amp;gt;&amp;lt;br /&amp;gt;Full : Path : To : The : Entity&lt;br /&gt;&lt;br /&gt;This is the description for this entity. Lorem ipsum dolor sit amet, consectetur adipisicing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.">Editors</a>
+   * @return short link
+   */
+  public String getLinkWithIcon() {
+    
+    return linkHelper(true);
+  }
+
+  /**
+   * 
+   * @param showIcon
+   * @return the link
+   */
+  private String linkHelper(boolean showIcon) {
+    
+    if (this.group == null) {
+      //TODO put icon here?
+      return TextContainer.retrieveFromRequest().getText().get("guiObjectUnknown");
+    }
+    
+    GrouperRequestContainer.retrieveFromRequestOrCreate().getCommonRequestContainer().setGuiGroup(this);
+    GrouperRequestContainer.retrieveFromRequestOrCreate().getCommonRequestContainer().setShowIcon(showIcon);
+    
+    try {
+      
+      String result = TextContainer.retrieveFromRequest().getText().get("guiGroupLink");
+      return result;
+      
+    } finally {
+
+      GrouperRequestContainer.retrieveFromRequestOrCreate().getCommonRequestContainer().setGuiGroup(null);
+      GrouperRequestContainer.retrieveFromRequestOrCreate().getCommonRequestContainer().setShowIcon(false);
+
+    }
+
+  }
+
+  
+  /** group */
+  private Group group;
+  
+  /** if there is an external config url */
+  private String configUrl;
+  
+  /** see if has a config url */
+  private Boolean hasMembershipConfigUrl = null;
+
+  private int rulesDeleteCount;
+
+  /**
+   * return the group
+   * @return the group
+   */
+  public Group getGroup() {
+    return this.group;
+  }
+
+  /**
+   * 
+   */
+  public GuiGroup() {
+    
+  }
+  
+  /**
+   * 
+   * @param theGroup
+   */
+  public GuiGroup(Group theGroup) {
+    this.group = theGroup;
+  }
+  
+  
+  /**
+   * @param group1 the group to set
+   */
+  public void setGroup(Group group1) {
+    this.group = group1;
+  }
+
+  /**
+   * the export subject ids file name
+   * @return the export subject ids file name
+   */
+  public String getExportSubjectIdsFileName() {
+    return getExportSubjectIdsFileNameStatic(this.group);
+  }
+  
+  /**
+   * static logic
+   * @param group
+   * @return the file name
+   */
+  public static String getExportSubjectIdsFileNameStatic(Group group) {
+    String groupExtensionFileName = group.getDisplayExtension();
+    
+    groupExtensionFileName = GrouperUiUtils.stripNonFilenameChars(groupExtensionFileName);
+    
+    return "groupExportSubjectIds_" + groupExtensionFileName + ".csv";
+ 
+  }
+  
+  /**
+   * the export all file name
+   * @return the export subject ids file name
+   */
+  public String getExportAllFileName() {
+    return getExportAllFileNameStatic(this.group);
+  }
+  
+  /**
+   * static logic
+   * @param group
+   * @return the file name
+   */
+  public static String getExportAllFileNameStatic(Group group) {
+    String groupExtensionFileName = group.getDisplayExtension();
+    
+    groupExtensionFileName = GrouperUiUtils.stripNonFilenameChars(groupExtensionFileName);
+    
+    return "groupExportAll_" + groupExtensionFileName + ".csv";
+ 
+  }
+  
+  /**
+   * @see GuiObjectBase#getGrouperObject()
+   */
+  @Override
+  public GrouperObject getGrouperObject() {
+    return this.group;
+  }
+
+  /**
+   * if the group has admin granted to all
+   * @return true
+   */
+  public boolean isGrantAllAdmin() {
+    return this.group.hasAdmin(SubjectFinder.findAllSubject());
+  }
+
+
+  /**
+   * the implication-expanded union of the privileges behind the four can* getters
+   * (canRead/canUpdate/canAdmin/canGroupAttrRead).  A list screen that renders any of those getters
+   * can prefetch this set so all four are answered from the object.
+   */
+  public static final Set<Privilege> CAN_GETTER_PRIVILEGES = Collections.unmodifiableSet(
+      GrouperUtil.toSet(AccessPrivilege.READ, AccessPrivilege.UPDATE, AccessPrivilege.ADMIN,
+          AccessPrivilege.GROUP_ATTR_READ));
+
+  /**
+   * which privileges were resolved/prefetched for the logged-in subject on this group via
+   * {@link #cacheLoggedInPrivileges(Collection, Set)} (null = never prefetched).  This is the
+   * source of truth for the can* getters; it does NOT depend on the resolver privilege cache.
+   */
+  private Set<Privilege> loggedInPrivilegesChecked;
+
+  /**
+   * the subset of {@link #loggedInPrivilegesChecked} the logged-in subject actually holds on this group.
+   * NB this holds privilege identities (the {@link AccessPrivilege} constants), not granted
+   * AccessPrivilege instances, so {@code contains(AccessPrivilege.READ)} works.
+   */
+  private Set<Privilege> loggedInPrivilegesHeld;
+
+  /**
+   * Bulk-resolve the logged-in subject's privileges (the subset of privilegesToCheck it holds) for a
+   * collection of gui groups in ONE query, and store the result on each gui group, so the per-row can*
+   * getters are answered from the object (no resolver call, no dependence on the ehcache privilege
+   * cache) instead of an N+1 of per-group privilege resolution.  Each screen passes the privilege set
+   * its getters actually use (and only that) - e.g. {@link AccessPrivilege#UPDATE_PRIVILEGES} for a
+   * screen that renders canUpdate, or the union for a screen that renders canRead and canUpdate.
+   * <p>REQUEST THREAD ONLY: this resolves the logged-in subject from the servlet request
+   * threadlocal, which is null on a worker thread (GRP-7242).  From inside a GrouperCallable
+   * or any other non-request thread, capture the subject on the request thread and call the
+   * overload that takes a loggedInSubject.</p>
+   * @param guiGroups the gui groups to prefetch privileges for
+   * @param privilegesToCheck the access privileges to resolve (only these are resolved/stored)
+   */
+  public static void cacheLoggedInPrivileges(Collection<GuiGroup> guiGroups, Set<Privilege> privilegesToCheck) {
+    cacheLoggedInPrivileges(guiGroups, privilegesToCheck, GrouperUiFilter.retrieveSubjectLoggedIn());
+  }
+
+  /**
+   * Bulk-resolve privileges for an explicitly supplied logged-in subject.  This overload has no
+   * dependency on servlet request state and is safe to use from a worker thread.
+   * @param guiGroups the gui groups to prefetch privileges for
+   * @param privilegesToCheck the access privileges to resolve (only these are resolved/stored)
+   * @param loggedInSubject subject whose privileges should be prefetched
+   */
+  public static void cacheLoggedInPrivileges(Collection<GuiGroup> guiGroups,
+      Set<Privilege> privilegesToCheck, Subject loggedInSubject) {
+
+    if (GrouperUtil.length(guiGroups) == 0 || GrouperUtil.length(privilegesToCheck) == 0
+        || loggedInSubject == null) {
+      return;
+    }
+
+    //collect the distinct underlying groups
+    Set<Group> groups = new LinkedHashSet<Group>();
+    for (GuiGroup guiGroup : guiGroups) {
+      if (guiGroup != null && guiGroup.group != null) {
+        groups.add(guiGroup.group);
+      }
+    }
+    if (groups.size() == 0) {
+      return;
+    }
+
+    //ONE batched, privilege-scoped resolver call (resolved polymorphically through the access resolver
+    //chain - wheel/sysadmin/grouperAll handled by their own layers)
+    GrouperSession grouperSession = GrouperSession.staticGrouperSession();
+    Map<Group, Set<Privilege>> heldByGroup = grouperSession.getAccessResolver().getPrivileges(
+        groups, loggedInSubject, privilegesToCheck);
+
+    //store the resolved privileges on each gui group (the getters read from here)
+    for (GuiGroup guiGroup : guiGroups) {
+      if (guiGroup == null || guiGroup.group == null) {
+        continue;
+      }
+      Set<Privilege> held = heldByGroup == null ? null : heldByGroup.get(guiGroup.group);
+      guiGroup.loggedInPrivilegesChecked = new LinkedHashSet<Privilege>(privilegesToCheck);
+      guiGroup.loggedInPrivilegesHeld = held == null
+          ? new LinkedHashSet<Privilege>() : new LinkedHashSet<Privilege>(held);
+    }
+  }
+
+  /**
+   * whether the can* getters should fail fast (throw) when this group's capability privileges were not
+   * prefetched.  Default false: when not prefetched, the getter falls back to the (slower) per-row
+   * resolver so behaviour is preserved until every screen is audited and wired to prefetch.
+   * @return true if fail-fast is enabled
+   */
+  private static boolean failFastLoggedInPrivilegePrefetch() {
+    return GrouperUiConfig.retrieveConfig().propertyValueBoolean("uiV2.privilege.prefetch.failFast", false);
+  }
+
+  /**
+   * common logic for the can* getters: the capability holds if the logged-in subject holds ANY of
+   * <i>capabilityPrivileges</i> (the implication-expanded set for the capability, e.g.
+   * {UPDATE, ADMIN} for canUpdate).  Reads the values prefetched by
+   * {@link #cacheLoggedInPrivileges(Collection, Set)}.  If this group was not prefetched for the
+   * capability's privileges, either throws (fail-fast, config gated) or falls back to per-row
+   * resolution so behaviour is preserved.
+   * @param capabilityPrivileges the privileges any of which grants the capability
+   * @param getterName for the fail-fast error message
+   * @return true if the logged-in subject holds the capability
+   */
+  private boolean isCanHaveAnyLoggedInPrivilege(Set<Privilege> capabilityPrivileges, String getterName) {
+
+    //prefetched the right subset -> the stored values are the source of truth (no resolver, no cache dep)
+    if (this.loggedInPrivilegesChecked != null
+        && this.loggedInPrivilegesChecked.containsAll(capabilityPrivileges)) {
+      if (this.loggedInPrivilegesHeld != null) {
+        for (Privilege capabilityPrivilege : capabilityPrivileges) {
+          if (this.loggedInPrivilegesHeld.contains(capabilityPrivilege)) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    //not prefetched for this capability
+    if (failFastLoggedInPrivilegePrefetch()) {
+      throw new RuntimeException("Privileges " + capabilityPrivileges + " were not prefetched for group '"
+          + (this.group == null ? null : this.group.getName()) + "' before calling " + getterName
+          + "().  Add a GuiGroup.cacheLoggedInPrivileges(guiGroups, privilegesToCheck) call at this "
+          + "screen's GuiGroup construction point with a privilege set that includes "
+          + capabilityPrivileges + ".");
+    }
+
+    //fallback: resolve the old (per-row) way so screens not yet wired keep working.  canHavePrivilege
+    //already applies privilege implication (e.g. UPDATE check also returns true for ADMIN).
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+    for (Privilege capabilityPrivilege : capabilityPrivileges) {
+      if (this.group.canHavePrivilege(loggedInSubject, capabilityPrivilege.getName(), false)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * if the logged in user can update (or inherit), dont check security
+   * @return true
+   */
+  public boolean isCanUpdate() {
+    return this.isCanHaveAnyLoggedInPrivilege(AccessPrivilege.UPDATE_PRIVILEGES, "isCanUpdate");
+  }
+  
+  /**
+   * if the logged in user can admin (or inherit), dont check security
+   * @return true
+   */
+  public boolean isCanAdmin() {
+    return this.isCanHaveAnyLoggedInPrivilege(AccessPrivilege.ADMIN_PRIVILEGES, "isCanAdmin");
+  }
+  
+  /**
+   * if the logged in user can read (or inherit), dont check security
+   * @return true
+   */
+  public boolean isCanRead() {
+    return this.isCanHaveAnyLoggedInPrivilege(AccessPrivilege.READ_PRIVILEGES, "isCanRead");
+  }
+
+  /**
+   * if the logged in user can group attr read (or inherit), dont check security
+   * @return true
+   */
+  public boolean isCanGroupAttrRead() {
+    return this.isCanHaveAnyLoggedInPrivilege(AccessPrivilege.GROUP_ATTR_READ_PRIVILEGES, "isCanGroupAttrRead");
+  }
+
+  /**
+   * if the logged in user has update
+   * @return true
+   * @deprecated use isCanUpdate instead probably
+   */
+  @Deprecated
+  public boolean isHasUpdate() {
+    
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+    
+    return this.group.hasUpdate(loggedInSubject);
+
+  }
+
+
+  /**
+   * if the group has update granted to all
+   * @return true
+   */
+  public boolean isGrantAllUpdate() {
+    return this.group.hasUpdate(SubjectFinder.findAllSubject());
+  }
+
+  /**
+   * if the group has read granted to all
+   * @return true
+   */
+  public boolean isGrantAllRead() {
+    return this.group.hasRead(SubjectFinder.findAllSubject());
+  }
+
+  /**
+   * if the group has view granted to all
+   * @return true
+   */
+  public boolean isGrantAllView() {
+    return this.group.hasView(SubjectFinder.findAllSubject());
+  }
+
+  /**
+   * if the group has optin granted to all
+   * @return true
+   */
+  public boolean isGrantAllOptin() {
+    return this.group.hasOptin(SubjectFinder.findAllSubject());
+  }
+
+
+  /**
+   * if the group has optout granted to all
+   * @return true
+   */
+  public boolean isGrantAllOptout() {
+    return this.group.hasOptout(SubjectFinder.findAllSubject());
+  }
+
+
+  /**
+   * if the group has attr read granted to all
+   * @return true
+   */
+  public boolean isGrantAllAttrRead() {
+    return this.group.hasGroupAttrRead(SubjectFinder.findAllSubject());
+  }
+
+
+  /**
+   * if the group has attr update granted to all
+   * @return true
+   */
+  public boolean isGrantAllAttrUpdate() {
+    return this.group.hasGroupAttrUpdate(SubjectFinder.findAllSubject());
+  }
+
+  /**
+   * test if an attribute GrouperLoaderLdap is assigned to this group
+   * @return true if an attribute GrouperLoaderLdap is assigned.
+   * return false if not
+   */
+  public boolean isHasAttrDefNameGrouperLoaderLdap() {
+
+    return (Boolean)GrouperSession.internal_callbackRootGrouperSession(new GrouperSessionHandler() {
+      
+      public Object callback(GrouperSession grouperSession) throws GrouperSessionException {
+        boolean hasAttrLdap = false;
+        
+        //first, get the attribute def name
+        AttributeDefName grouperLoaderLdapName = GrouperDAOFactory.getFactory().getAttributeDefName()
+            .findByNameSecure(LoaderLdapUtils.grouperLoaderLdapName(), false);
+        
+        //check if the attribute def name is assigned to this group
+        if (grouperLoaderLdapName != null) {
+          hasAttrLdap = GuiGroup.this.group.getAttributeDelegate().hasAttribute(grouperLoaderLdapName);
+        }
+        
+        return hasAttrLdap;
+      }
+    });
+  }
+
+  /**
+   * test if an attribute GrouperLoader SQL is assigned to this group
+   * @return true if an attribute GrouperLoader SQL is assigned.
+   * return false if not
+   */
+  public boolean isHasAttrDefNameGrouperLoader() {
+    return (Boolean)GrouperSession.internal_callbackRootGrouperSession(new GrouperSessionHandler() {
+      
+      public Object callback(GrouperSession grouperSession) throws GrouperSessionException {
+        boolean hasAttrLdap = false;
+    
+        //first, get the attribute def name
+        AttributeDefName grouperLoader = GrouperDAOFactory.getFactory().getAttributeDefName()
+            .findByNameSecure(GrouperConfig.retrieveConfig().propertyValueString("grouper.rootStemForBuiltinObjects", "etc") + ":legacy:attribute:legacyGroupType_grouperLoader", false);
+        
+        //check if the attribute def name is assigned to this group
+        if (grouperLoader != null) {
+          hasAttrLdap = GuiGroup.this.group.getAttributeDelegate().hasAttribute(grouperLoader);
+        }
+        
+        return hasAttrLdap;
+      }
+    });
+  }
+  
+  /**
+   * test if a recent memberships loader is assigned to this group
+   * @return true if an attribute GrouperLoader SQL is assigned.
+   * return false if not
+   */
+  public boolean isHasRecentMembershipsGrouperLoader() {
+    return (Boolean)GrouperSession.internal_callbackRootGrouperSession(new GrouperSessionHandler() {
+      
+      public Object callback(GrouperSession grouperSession) throws GrouperSessionException {
+        boolean hasRecentMemberships = false;
+    
+        //first, get the attribute def name
+        AttributeDefName recentMemberships = GrouperDAOFactory.getFactory().getAttributeDefName().findByNameSecure(
+            GrouperRecentMemberships.recentMembershipsStemName() + ":" + GrouperRecentMemberships.GROUPER_RECENT_MEMBERSHIPS_MARKER, true);
+        
+        //check if the attribute def name is assigned to this group
+        if (recentMemberships != null) {
+          hasRecentMemberships = GuiGroup.this.group.getAttributeDelegate().hasAttribute(recentMemberships);
+        }
+        
+        return hasRecentMemberships;
+      }
+    });
+  }
+  
+  /**
+   * test if a jexl script loader is assigned to this group
+   * @return true if an attribute GrouperLoader jexl script is assigned.
+   * return false if not
+   */
+  public boolean isHasJexlScriptGrouperLoader() {
+    return (Boolean)GrouperSession.internal_callbackRootGrouperSession(new GrouperSessionHandler() {
+      
+      public Object callback(GrouperSession grouperSession) throws GrouperSessionException {
+        boolean hasJexlScript = false;
+    
+        //first, get the attribute def name
+        AttributeDefName jexlScript = GrouperDAOFactory.getFactory().getAttributeDefName().findByNameSecure(
+            GrouperAbac.jexlScriptStemName() + ":" + GrouperAbac.GROUPER_JEXL_SCRIPT_MARKER, true);
+        
+        //check if the attribute def name is assigned to this group
+        if (jexlScript != null) {
+          hasJexlScript = GuiGroup.this.group.getAttributeDelegate().hasAttribute(jexlScript);
+        }
+        
+        return hasJexlScript;
+      }
+    });
+  }
+  
+  public boolean isTypeRole() {
+    return this.group.getTypeOfGroup() == TypeOfGroup.role;
+  }
+  
+  /**
+   * enabled date label string yyyy/mm/dd hh:mi am/pm
+   * @return the enabled date label string yyyy/mm/dd hh:mi am/pm
+   */
+  public String getEnabledDateLabel() {
+        
+    if (this.group == null || this.group.getEnabledTime() == null) {
+      return null;
+    }
+    
+    return GrouperUtil.formatLocalDateTime(this.group.getEnabledTime());
+  }
+  
+  /**
+   * disabled date label string yyyy/mm/dd hh:mi am/pm
+   * @return the disabled date label string yyyy/mm/dd hh:mi am/pm
+   */
+  public String getDisabledDateLabel() {
+        
+    if (this.group == null || this.group.getDisabledTime() == null) {
+      return null;
+    }
+    
+    return GrouperUtil.formatLocalDateTime(this.group.getDisabledTime());
+  }
+
+  public void setRulesDeleteCount(int rulesDeleteCount) {
+    this.rulesDeleteCount = rulesDeleteCount; 
+  }
+
+  
+  public int getRulesDeleteCount() {
+    return rulesDeleteCount;
+  }
+  
+  private Set<GuiRuleDefinition> rulesToBeDeleted;
+
+  
+  public Set<GuiRuleDefinition> getRulesToBeDeleted() {
+    return rulesToBeDeleted;
+  }
+
+  
+  public void setRulesToBeDeleted(Set<GuiRuleDefinition> rulesToBeDeleted) {
+    this.rulesToBeDeleted = rulesToBeDeleted;
+  }
+  
+}

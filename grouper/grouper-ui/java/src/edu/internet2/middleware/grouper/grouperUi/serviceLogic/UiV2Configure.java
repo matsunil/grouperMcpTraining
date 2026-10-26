@@ -1,0 +1,2328 @@
+package edu.internet2.middleware.grouper.grouperUi.serviceLogic;
+
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.PrintWriter;
+import java.io.Reader;
+import java.io.StringReader;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+import org.apache.commons.fileupload.FileItem;
+import org.apache.commons.lang3.exception.ExceptionUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.logging.Log;
+
+import org.quartz.JobKey;
+
+import edu.internet2.middleware.grouper.GrouperSession;
+import edu.internet2.middleware.grouper.app.config.check.GrouperConfigurationCheckEngine;
+import edu.internet2.middleware.grouper.app.loader.GrouperLoader;
+import edu.internet2.middleware.grouper.app.loader.GrouperLoaderType;
+import edu.internet2.middleware.grouper.app.upgradeTasks.UpgradeTasks;
+import edu.internet2.middleware.grouper.app.upgradeTasks.UpgradeTasksInterface;
+import edu.internet2.middleware.grouper.app.upgradeTasks.UpgradeTasksJob;
+import edu.internet2.middleware.grouper.app.upgradeTasks.UpgradeTasksJob.UpgradeTaskStatus;
+import edu.internet2.middleware.grouper.cfg.dbConfig.ConfigFileMetadata;
+import edu.internet2.middleware.grouper.cfg.dbConfig.ConfigFileName;
+import edu.internet2.middleware.grouper.cfg.dbConfig.ConfigItemMetadata;
+import edu.internet2.middleware.grouper.cfg.dbConfig.ConfigSectionMetadata;
+import edu.internet2.middleware.grouper.cfg.dbConfig.DbConfigEngine;
+import edu.internet2.middleware.grouper.cfg.dbConfig.GrouperConfigHibernate;
+import edu.internet2.middleware.grouper.ddl.GrouperDdlCompare;
+import edu.internet2.middleware.grouper.ddl.GrouperDdlCompareResult;
+import edu.internet2.middleware.grouper.grouperUi.beans.config.GuiConfigFile;
+import edu.internet2.middleware.grouper.grouperUi.beans.config.GuiConfigProperty;
+import edu.internet2.middleware.grouper.grouperUi.beans.config.GuiConfigSection;
+import edu.internet2.middleware.grouper.grouperUi.beans.config.GuiPITGrouperConfigHibernate;
+import edu.internet2.middleware.grouper.grouperUi.beans.json.GuiPaging;
+import edu.internet2.middleware.grouper.grouperUi.beans.json.GuiResponseJs;
+import edu.internet2.middleware.grouper.grouperUi.beans.json.GuiScreenAction;
+import edu.internet2.middleware.grouper.grouperUi.beans.json.GuiScreenAction.GuiMessageType;
+import edu.internet2.middleware.grouper.grouperUi.beans.ui.ConfigurationContainer;
+import edu.internet2.middleware.grouper.grouperUi.beans.ui.GrouperRequestContainer;
+import edu.internet2.middleware.grouper.grouperUi.beans.ui.GuiUpgradeTask;
+import edu.internet2.middleware.grouper.grouperUi.beans.ui.TextContainer;
+import edu.internet2.middleware.grouper.hibernate.AuditControl;
+import edu.internet2.middleware.grouper.hibernate.GrouperTransactionType;
+import edu.internet2.middleware.grouper.hibernate.HibernateHandler;
+import edu.internet2.middleware.grouper.hibernate.HibernateHandlerBean;
+import edu.internet2.middleware.grouper.hibernate.HibernateSession;
+import edu.internet2.middleware.grouper.internal.dao.GrouperDAOException;
+import edu.internet2.middleware.grouper.internal.dao.QueryOptions;
+import edu.internet2.middleware.grouper.internal.dao.hib3.Hib3DAOFactory;
+import edu.internet2.middleware.grouper.j2ee.GrouperRequestWrapper;
+import edu.internet2.middleware.grouper.misc.GrouperCheckConfig;
+import edu.internet2.middleware.grouper.misc.GrouperDAOFactory;
+import edu.internet2.middleware.grouper.misc.GrouperVersion;
+import edu.internet2.middleware.grouper.pit.PITGrouperConfigHibernate;
+import edu.internet2.middleware.grouper.ui.GrouperUiFilter;
+import edu.internet2.middleware.grouper.ui.exceptions.ControllerDone;
+import edu.internet2.middleware.grouper.ui.tags.GrouperPagingTag2;
+import edu.internet2.middleware.grouper.ui.util.GrouperUiConfig;
+import edu.internet2.middleware.grouper.util.GrouperUtil;
+import edu.internet2.middleware.grouperClient.collections.MultiKey;
+import edu.internet2.middleware.grouperClient.config.ConfigPropertiesCascadeBase;
+import edu.internet2.middleware.grouperClient.config.GrouperUiApiTextConfig;
+import edu.internet2.middleware.grouper.cache.GrouperCacheDatabase;
+import edu.internet2.middleware.grouperClient.config.db.ConfigDatabaseLogic;
+import edu.internet2.middleware.subject.Subject;
+
+/**
+ * 
+ */
+public class UiV2Configure {
+
+  /**
+   * 
+   */
+  protected static Log LOG = edu.internet2.middleware.grouper.util.GrouperUtil.getLog(UiV2Configure.class);
+
+  /**
+   * GRP-7347: a config import used to emit one success line per property, so the response, and the
+   * memory needed to build it, grew with the size of the import. An import of more than this many
+   * properties reports the summary line only. Anything that went wrong is still listed in full, and
+   * an import of this size or smaller is unchanged.
+   */
+  private static final int IMPORT_SUMMARY_ONLY_THRESHOLD = 50;
+
+  /**
+   * if allowed to view the configuration landing screen (the list of links) and other read-only
+   * configuration screens.  This is the lighter check: the registry config UI must be enabled and
+   * the user must be a sysadmin (wheel/root).  It intentionally does NOT enforce the source IP
+   * allowlist - that restriction only applies to screens that actually change configuration
+   * (see allowedToViewConfiguration()).  The configuration landing page and the read-only DDL
+   * deep check use this lighter check.
+   * @return true if allowed to view the configuration landing screen
+   */
+  public boolean allowedToViewConfigurationIndex() {
+
+    GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+
+    final boolean uiConfigurationEnabled = GrouperUiConfig.retrieveConfig().propertyValueBoolean("grouperUi.configuration.enabled", true);
+    if (!uiConfigurationEnabled) {
+      guiResponseJs.addAction(GuiScreenAction.newMessage(GuiMessageType.error,
+          TextContainer.retrieveFromRequest().getText().get("configurationNotEnabled")));
+      return false;
+    }
+
+    final boolean configureShow = GrouperRequestContainer.retrieveFromRequestOrCreate().getConfigurationContainer().isConfigureShow();
+
+    if (!configureShow) {
+      guiResponseJs.addAction(GuiScreenAction.newMessage(GuiMessageType.error,
+          TextContainer.retrieveFromRequest().getText().get("configurationNotAllowedToView")));
+      return false;
+    }
+
+    return true;
+  }
+
+  /**
+   * if allowed to change configuration.  This is the stricter check used by the screens that actually
+   * change config: in addition to the registry config UI being enabled and the user being a sysadmin
+   * (see allowedToViewConfigurationIndex()), the request must come from an allowed source IP
+   * (grouperUi.configurationEditor.sourceIpAddresses).
+   * @return true if allowed to change configuration
+   */
+  public boolean allowedToViewConfiguration() {
+
+    Map<String, Object> debugMap = null;
+
+    if (LOG.isDebugEnabled()) {
+      debugMap = new LinkedHashMap<String, Object>();
+      debugMap.put("method", "allowedToViewConfiguration");
+    }
+    try {
+
+      // enabled + sysadmin check (this does not enforce the source IP restriction)
+      if (!allowedToViewConfigurationIndex()) {
+        return false;
+      }
+
+      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+
+      String networks = GrouperUiConfig.retrieveConfig().propertyValueString("grouperUi.configurationEditor.sourceIpAddresses", "127.0.0.1/32");
+
+      if (debugMap != null) {
+        debugMap.put("allowFromNetworks", networks);
+      }
+
+      if (!StringUtils.isBlank(networks)) {
+
+        String sourceIp = GrouperUiFilter.retrieveHttpServletRequest().getRemoteAddr();
+        
+        if (debugMap != null) {
+          debugMap.put("sourceIp", sourceIp);
+        }
+
+        Boolean allowed = null;
+        
+        if (allowed == null) {
+          if (!StringUtils.isBlank(sourceIp) && GrouperUtil.ipOnNetworks(sourceIp, networks)) {
+
+            if (debugMap != null) {
+              debugMap.put("ipOnNetworks", true);
+            }
+
+            allowed = true;
+          } else {
+            if (!StringUtils.isBlank(sourceIp)) {
+              if (debugMap != null) {
+                debugMap.put("ipOnNetworks", false);
+              }
+              
+            }
+            allowed = false;
+          }
+        }
+        if (debugMap != null) {
+          debugMap.put("allowed", allowed);
+        }
+        if (allowed != Boolean.TRUE) {
+          guiResponseJs.addAction(GuiScreenAction.newMessage(GuiMessageType.error, 
+              TextContainer.retrieveFromRequest().getText().get("configurationNotAllowedBySourceIp")));
+          return false;
+        }
+      }
+      
+      if (debugMap != null) {
+        debugMap.put("allowed", true);
+      }
+      return true;
+    } finally {
+      if (LOG.isDebugEnabled()) {
+        LOG.debug(GrouperUtil.mapToString(debugMap));
+      }
+    }
+
+  }
+  
+  /**
+   * configure
+   * @param request
+   * @param response
+   */
+  public void index(HttpServletRequest request, HttpServletResponse response) {
+  
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+  
+    GrouperSession grouperSession = null;
+  
+    try {
+  
+      grouperSession = GrouperSession.start(loggedInSubject);
+
+      // landing page is read-only, so it does not require the source IP restriction
+      if (!allowedToViewConfigurationIndex()) {
+        return;
+      }
+
+      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+
+      guiResponseJs.addAction(GuiScreenAction.newInnerHtmlFromJsp("#grouperMainContentDivId",
+          "/WEB-INF/grouperUi2/configure/configureIndex.jsp"));
+    
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+  }
+  
+  /**
+   * draw the database DDL deep check screen with the run button (no compare is run on this GET,
+   * the compare runs when the user presses the button which posts to ddlDeepCheckSubmit).
+   * @param request
+   * @param response
+   */
+  public void ddlDeepCheck(HttpServletRequest request, HttpServletResponse response) {
+
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+
+    GrouperSession grouperSession = null;
+
+    try {
+
+      grouperSession = GrouperSession.start(loggedInSubject);
+
+      // read-only deep check, so it does not require the source IP restriction
+      if (!allowedToViewConfigurationIndex()) {
+        return;
+      }
+
+      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+
+      guiResponseJs.addAction(GuiScreenAction.newInnerHtmlFromJsp("#grouperMainContentDivId",
+          "/WEB-INF/grouperUi2/configure/configureDdlDeepCheck.jsp"));
+
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+  }
+
+  /**
+   * run a read-only deep DDL check comparing the live database schema against the schema expected by
+   * this Grouper version, and show the result.  This is the same comparison as gsh -registry -deep -check.
+   * @param request
+   * @param response
+   */
+  public void ddlDeepCheckSubmit(HttpServletRequest request, HttpServletResponse response) {
+
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+
+    GrouperSession grouperSession = null;
+
+    try {
+
+      grouperSession = GrouperSession.start(loggedInSubject);
+
+      // read-only deep check, so it does not require the source IP restriction
+      if (!allowedToViewConfigurationIndex()) {
+        return;
+      }
+
+      ConfigurationContainer configurationContainer = GrouperRequestContainer.retrieveFromRequestOrCreate().getConfigurationContainer();
+
+      // read-only compare, no DDL is run against the database
+      GrouperDdlCompareResult grouperDdlCompareResult = new GrouperDdlCompare().compareDatabase();
+      configurationContainer.setDdlCompareResult(grouperDdlCompareResult);
+
+      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+
+      // redraw the whole screen, now the results section will show since the result is populated
+      guiResponseJs.addAction(GuiScreenAction.newInnerHtmlFromJsp("#grouperMainContentDivId",
+          "/WEB-INF/grouperUi2/configure/configureDdlDeepCheck.jsp"));
+
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+  }
+
+  /**
+   * draw the configuration review screen with the run button (no checks are run on this GET; the
+   * findings are computed when the user presses the button which posts to configurationReviewSubmit).
+   * @param request
+   * @param response
+   */
+  public void configurationReview(HttpServletRequest request, HttpServletResponse response) {
+
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+
+    GrouperSession grouperSession = null;
+
+    try {
+
+      grouperSession = GrouperSession.start(loggedInSubject);
+
+      // read-only review screen, so it does not require the source IP restriction
+      if (!allowedToViewConfigurationIndex()) {
+        return;
+      }
+
+      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+
+      guiResponseJs.addAction(GuiScreenAction.newInnerHtmlFromJsp("#grouperMainContentDivId",
+          "/WEB-INF/grouperUi2/configure/configureConfigurationReview.jsp"));
+
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+  }
+
+  /**
+   * run the read-only configuration review checks against the current effective configuration and
+   * database, and show the findings.  No configuration is changed.
+   * @param request
+   * @param response
+   */
+  public void configurationReviewSubmit(HttpServletRequest request, HttpServletResponse response) {
+
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+
+    GrouperSession grouperSession = null;
+
+    try {
+
+      grouperSession = GrouperSession.start(loggedInSubject);
+
+      // read-only review, so it does not require the source IP restriction
+      if (!allowedToViewConfigurationIndex()) {
+        return;
+      }
+
+      ConfigurationContainer configurationContainer = GrouperRequestContainer.retrieveFromRequestOrCreate().getConfigurationContainer();
+
+      configurationContainer.setConfigurationCheckResults(GrouperConfigurationCheckEngine.checkConfiguration());
+
+      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+
+      // redraw the whole screen, now the results section will show since the results are populated
+      guiResponseJs.addAction(GuiScreenAction.newInnerHtmlFromJsp("#grouperMainContentDivId",
+          "/WEB-INF/grouperUi2/configure/configureConfigurationReview.jsp"));
+
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+  }
+
+  /**
+   * draw the upgrade tasks screen with the load button (no work is done on this GET; the table of
+   * tasks and their status is built when the user presses the button which posts to upgradeTasksSubmit).
+   * @param request
+   * @param response
+   */
+  public void upgradeTasks(HttpServletRequest request, HttpServletResponse response) {
+
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+
+    GrouperSession grouperSession = null;
+
+    try {
+
+      grouperSession = GrouperSession.start(loggedInSubject);
+
+      // read-only screen, so it does not require the source IP restriction
+      if (!allowedToViewConfigurationIndex()) {
+        return;
+      }
+
+      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+
+      guiResponseJs.addAction(GuiScreenAction.newInnerHtmlFromJsp("#grouperMainContentDivId",
+          "/WEB-INF/grouperUi2/configure/configureUpgradeTasks.jsp"));
+
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+  }
+
+  /**
+   * build the table of all upgrade tasks (the UpgradeTasks enum) with their completed/not-completed
+   * status read from the metadata group.  This is the cheap status (no live DDL applicability check),
+   * which the per-row "check status" action refines on demand.
+   * @param request
+   * @param response
+   */
+  public void upgradeTasksSubmit(HttpServletRequest request, HttpServletResponse response) {
+
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+
+    GrouperSession grouperSession = null;
+
+    try {
+
+      grouperSession = GrouperSession.start(loggedInSubject);
+
+      if (!allowedToViewConfigurationIndex()) {
+        return;
+      }
+
+      // cheap status (no per-row DDL schema check) for the initial table
+      upgradeTasksStoreAndForward(buildGuiUpgradeTasks(null));
+
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+  }
+
+  /**
+   * run the live DDL applicability check for a single upgrade task (the expensive
+   * doesUpgradeTaskHaveDdlWorkToDo check) and redraw the table with that row's status refined to
+   * "not applicable" and a detail message where appropriate.
+   * @param request
+   * @param response
+   */
+  public void upgradeTasksCheckStatus(HttpServletRequest request, HttpServletResponse response) {
+
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+
+    GrouperSession grouperSession = null;
+
+    try {
+
+      grouperSession = GrouperSession.start(loggedInSubject);
+
+      if (!allowedToViewConfigurationIndex()) {
+        return;
+      }
+
+      int version = GrouperUtil.intValue(request.getParameter("version"));
+
+      // rebuild all rows (cheap), deep-checking just the requested version for the table badges
+      upgradeTasksStoreAndForward(buildGuiUpgradeTasks(version));
+
+      // report the live DDL applicability of this task in the message.  We run the check directly
+      // (not via the table status, which short-circuits to COMPLETE for a recorded-complete version)
+      // so that a recorded-complete DDL task whose schema has since drifted - e.g. a manually dropped
+      // table - is still reported as having work to do.
+      UpgradeTasks upgradeTask = UpgradeTasksJob.retrieveUpgradeTask(version);
+      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+      TextContainer textContainer = TextContainer.retrieveFromRequest();
+
+      if (upgradeTask == null) {
+        // unknown version - just acknowledge the check ran
+        guiResponseJs.addAction(GuiScreenAction.newMessage(GuiMessageType.info,
+            textContainer.getText().get("configurationUpgradeTasksCheckedStatusMessage") + " V" + version));
+      } else if (upgradeTask.upgradeTask().upgradeTaskIsDdl()) {
+        // DDL task: live, drift-aware schema check (catches a recorded-complete task whose schema drifted)
+        boolean ddlWorkToDo = UpgradeTasksJob.upgradeTaskHasDdlWorkToDo(upgradeTask.upgradeTask());
+        guiResponseJs.addAction(GuiScreenAction.newMessage(ddlWorkToDo ? GuiMessageType.info : GuiMessageType.success,
+            textContainer.getText().get(ddlWorkToDo
+                ? "configurationUpgradeTasksCheckedStatusWorkToDoMessage"
+                : "configurationUpgradeTasksCheckedStatusNoWorkMessage") + " V" + version));
+      } else {
+        // non-DDL (data/maintenance) task: there is no live schema check, so the thing to check is whether
+        // it has been recorded complete - not recorded complete means it still needs to run.
+        boolean notRun = !UpgradeTasksJob.getDBVersions().contains(version);
+        guiResponseJs.addAction(GuiScreenAction.newMessage(notRun ? GuiMessageType.info : GuiMessageType.success,
+            textContainer.getText().get(notRun
+                ? "configurationUpgradeTasksCheckedStatusNotRunMessage"
+                : "configurationUpgradeTasksCheckedStatusAlreadyRunMessage") + " V" + version));
+      }
+
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+  }
+
+  /**
+   * run a single upgrade task against the database (this MUTATES the database - it runs the task's DDL
+   * or data work) and, on success, records it complete.  Then redraw the table.
+   * @param request
+   * @param response
+   */
+  public void upgradeTasksRun(HttpServletRequest request, HttpServletResponse response) {
+
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+
+    GrouperSession grouperSession = null;
+
+    try {
+
+      grouperSession = GrouperSession.start(loggedInSubject);
+
+      if (!allowedToViewConfigurationIndex()) {
+        return;
+      }
+
+      int version = GrouperUtil.intValue(request.getParameter("version"));
+
+      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+
+      try {
+        // this runs the task's work against the database and marks it complete on success
+        UpgradeTasksJob.runUpgradeTask(version);
+        guiResponseJs.addAction(GuiScreenAction.newMessage(GuiMessageType.success,
+            TextContainer.retrieveFromRequest().getText().get("configurationUpgradeTasksRanMessage") + " V" + version));
+      } catch (RuntimeException e) {
+        LOG.error("Error running upgrade task V" + version, e);
+        guiResponseJs.addAction(GuiScreenAction.newMessage(GuiMessageType.error,
+            TextContainer.retrieveFromRequest().getText().get("configurationUpgradeTasksRanErrorMessage")
+            + " V" + version + ": " + GrouperUtil.xmlEscape(ExceptionUtils.getRootCauseMessage(e))));
+      }
+
+      upgradeTasksStoreAndForward(buildGuiUpgradeTasks(null));
+
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+  }
+
+  /**
+   * mark a single upgrade task complete WITHOUT running it (adds the version to the metadata group so
+   * Grouper will skip it).  Then redraw the table.
+   * @param request
+   * @param response
+   */
+  public void upgradeTasksMarkComplete(HttpServletRequest request, HttpServletResponse response) {
+
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+
+    GrouperSession grouperSession = null;
+
+    try {
+
+      grouperSession = GrouperSession.start(loggedInSubject);
+
+      if (!allowedToViewConfigurationIndex()) {
+        return;
+      }
+
+      int version = GrouperUtil.intValue(request.getParameter("version"));
+
+      UpgradeTasksJob.markUpgradeTaskComplete(version);
+
+      GuiResponseJs.retrieveGuiResponseJs().addAction(GuiScreenAction.newMessage(GuiMessageType.success,
+          TextContainer.retrieveFromRequest().getText().get("configurationUpgradeTasksMarkedCompleteMessage") + " V" + version));
+
+      upgradeTasksStoreAndForward(buildGuiUpgradeTasks(null));
+
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+  }
+
+  /**
+   * mark a single upgrade task NOT complete (removes the version from the metadata group so Grouper will
+   * run it again).  Then redraw the table.
+   * @param request
+   * @param response
+   */
+  public void upgradeTasksMarkNotComplete(HttpServletRequest request, HttpServletResponse response) {
+
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+
+    GrouperSession grouperSession = null;
+
+    try {
+
+      grouperSession = GrouperSession.start(loggedInSubject);
+
+      if (!allowedToViewConfigurationIndex()) {
+        return;
+      }
+
+      int version = GrouperUtil.intValue(request.getParameter("version"));
+
+      UpgradeTasksJob.markUpgradeTaskNotComplete(version);
+
+      GuiResponseJs.retrieveGuiResponseJs().addAction(GuiScreenAction.newMessage(GuiMessageType.success,
+          TextContainer.retrieveFromRequest().getText().get("configurationUpgradeTasksMarkedNotCompleteMessage") + " V" + version));
+
+      upgradeTasksStoreAndForward(buildGuiUpgradeTasks(null));
+
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+  }
+
+  /**
+   * Build the upgrade task rows for the Configure -&gt; Upgrade tasks screen, sorted ascending by version
+   * (the natural upgrade order).  The completed-version set is read once and shared across all rows.
+   * Status is the cheap one (COMPLETE / NOT_COMPLETE straight from the metadata group) for every row,
+   * except that the single row matching versionToDeepCheck (if any) additionally runs the expensive live
+   * DDL applicability check and gets a detail message.
+   * @param versionToDeepCheck the one version to run the live DDL check for, or null for none
+   * @return the list of gui upgrade task rows
+   */
+  private List<GuiUpgradeTask> buildGuiUpgradeTasks(Integer versionToDeepCheck) {
+
+    Set<Integer> completedVersions = UpgradeTasksJob.getDBVersions();
+
+    List<GuiUpgradeTask> guiUpgradeTasks = new ArrayList<GuiUpgradeTask>();
+
+    for (UpgradeTasks upgradeTask : UpgradeTasks.values()) {
+
+      int version = GrouperUtil.intValue(upgradeTask.name().substring(1));
+      UpgradeTasksInterface upgradeTasksInterface = upgradeTask.upgradeTask();
+
+      GuiUpgradeTask guiUpgradeTask = new GuiUpgradeTask();
+      guiUpgradeTask.setVersion(version);
+      guiUpgradeTask.setDescription(upgradeTasksInterface.description());
+      guiUpgradeTask.setDdl(upgradeTasksInterface.upgradeTaskIsDdl());
+      GrouperVersion grouperVersion = upgradeTasksInterface.versionIntroduced();
+      guiUpgradeTask.setReleasedInVersion(grouperVersion == null ? null : grouperVersion.toString());
+
+      boolean deepCheckThisRow = versionToDeepCheck != null && versionToDeepCheck.intValue() == version;
+      UpgradeTaskStatus status = UpgradeTasksJob.retrieveUpgradeTaskStatus(version, completedVersions, deepCheckThisRow);
+      guiUpgradeTask.setStatus(status);
+
+      // for the row we just live-checked, leave a detail breadcrumb of what the check found
+      if (deepCheckThisRow && status == UpgradeTaskStatus.NOT_APPLICABLE) {
+        guiUpgradeTask.setDetail(TextContainer.retrieveFromRequest().getText().get("configurationUpgradeTasksDetailNoDdlWork"));
+      } else if (deepCheckThisRow && status == UpgradeTaskStatus.NOT_COMPLETE && guiUpgradeTask.isDdl()) {
+        guiUpgradeTask.setDetail(TextContainer.retrieveFromRequest().getText().get("configurationUpgradeTasksDetailDdlWorkToDo"));
+      }
+
+      guiUpgradeTasks.add(guiUpgradeTask);
+    }
+
+    // surface any "unexpected" tasks: versions recorded complete in the database's attribute assignments
+    // for which this Grouper jar has no matching UpgradeTasks enum constant (e.g. the database was written
+    // by a newer Grouper than the running code, or a task was removed).  There is no code to run for them,
+    // so they are shown for awareness with only a cleanup (mark not complete) action.
+    for (Integer completedVersion : completedVersions) {
+      if (UpgradeTasksJob.retrieveUpgradeTask(completedVersion.intValue()) != null) {
+        continue;
+      }
+      GuiUpgradeTask guiUpgradeTask = new GuiUpgradeTask();
+      guiUpgradeTask.setVersion(completedVersion.intValue());
+      guiUpgradeTask.setUnexpected(true);
+      guiUpgradeTask.setStatus(UpgradeTaskStatus.UNEXPECTED);
+      guiUpgradeTask.setDescription(TextContainer.retrieveFromRequest().getText().get("configurationUpgradeTasksUnexpectedDescription"));
+      guiUpgradeTask.setDetail(TextContainer.retrieveFromRequest().getText().get("configurationUpgradeTasksDetailUnexpected"));
+      guiUpgradeTasks.add(guiUpgradeTask);
+    }
+
+    // sort ascending by version so the table follows the natural upgrade order
+    guiUpgradeTasks.sort((guiUpgradeTask1, guiUpgradeTask2) -> Integer.compare(guiUpgradeTask1.getVersion(), guiUpgradeTask2.getVersion()));
+
+    return guiUpgradeTasks;
+  }
+
+  /**
+   * store the upgrade task rows on the configuration container and (re)draw the upgrade tasks screen.
+   * @param guiUpgradeTasks the rows to show
+   */
+  private void upgradeTasksStoreAndForward(List<GuiUpgradeTask> guiUpgradeTasks) {
+
+    ConfigurationContainer configurationContainer = GrouperRequestContainer.retrieveFromRequestOrCreate().getConfigurationContainer();
+    configurationContainer.setGuiUpgradeTasks(guiUpgradeTasks);
+
+    GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+    guiResponseJs.addAction(GuiScreenAction.newInnerHtmlFromJsp("#grouperMainContentDivId",
+        "/WEB-INF/grouperUi2/configure/configureUpgradeTasks.jsp"));
+  }
+
+  /**
+   * edit config submit
+   * @param request
+   * @param response
+   */
+  public void configurationFileItemEditSubmit(final HttpServletRequest request, HttpServletResponse response) {
+    GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+
+    boolean success = configurationFileAddEditHelper(request, response);
+        
+    if (success) {
+
+      // the model is still needed to find the property that changed, but it is the rendering of
+      // every section that was expensive, not this
+      buildConfigFileAndMetadata(null, null);
+
+      ConfigurationContainer configurationContainer = GrouperRequestContainer.retrieveFromRequestOrCreate().getConfigurationContainer();
+
+      Integer index = GrouperUtil.intObjectValue(request.getParameter("index"), true);
+      String propertyName = request.getParameter("propertyNameName");
+
+      GuiConfigProperty guiConfigProperty = index == null || StringUtils.isBlank(propertyName) ? null
+          : configurationContainer.getGuiConfigFile().findGuiConfigProperty(propertyName, false);
+
+      if (guiConfigProperty != null) {
+
+        // GRP-7351: re-render only the row that changed, instead of redrawing the whole listing.
+        // The edit form row is removed first, then the row itself is replaced in place.
+        configurationContainer.setCurrentGuiConfigProperty(guiConfigProperty);
+        configurationContainer.setCurrentIndex(index);
+
+        guiResponseJs.addAction(GuiScreenAction.newScript("$('.configFormRow').remove();"));
+
+        guiResponseJs.addAction(GuiScreenAction.newInnerHtmlFromJsp("#row_" + index,
+            "/WEB-INF/grouperUi2/configure/configurationFileRowSingle.jsp"));
+
+      } else {
+
+        // could not identify the row, so fall back to redrawing the listing
+        guiResponseJs.addAction(GuiScreenAction.newInnerHtmlFromJsp("#grouperMainContentDivId", 
+            "/WEB-INF/grouperUi2/configure/configure.jsp"));
+      }
+
+    }
+
+  }
+
+  /**
+   * add config submit
+   * @param request
+   * @param response
+   */
+  public void configurationFileAddConfigSubmit(final HttpServletRequest request, HttpServletResponse response) {
+    
+    GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+
+    boolean success = configurationFileAddEditHelper(request, response);
+        
+    if (success) {
+      guiResponseJs.addAction(GuiScreenAction.newInnerHtmlFromJsp("#grouperMainContentDivId", 
+        "/WEB-INF/grouperUi2/configure/configurationFileAddEntry.jsp"));
+    }
+
+  }
+
+  /**
+   * 
+   * @param request
+   * @param response
+   * @return true if success
+   */
+  private boolean configurationFileAddEditHelper(final HttpServletRequest request, HttpServletResponse response) {
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+    
+    GrouperSession grouperSession = null;
+  
+    try {
+  
+      grouperSession = GrouperSession.start(loggedInSubject);
+  
+      if (!allowedToViewConfiguration()) {
+        return false;
+      }
+      
+      boolean success = (Boolean)HibernateSession.callbackHibernateSession(GrouperTransactionType.READ_WRITE_OR_USE_EXISTING, AuditControl.WILL_AUDIT, new HibernateHandler() {
+        
+        @Override
+        public Object callback(HibernateHandlerBean hibernateHandlerBean)
+            throws GrouperDAOException {
+
+          String configFileString = request.getParameter("configFile");
+          String propertyNameString = StringUtils.trim(request.getParameter("propertyNameName"));
+          String expressionLanguageString = request.getParameter("expressionLanguageName");
+          String valueString = request.getParameter("valueName");
+          // this could be blank I guess
+//          if (StringUtils.isBlank(valueString)) {
+//            guiResponseJs.addAction(GuiScreenAction.newValidationMessage(GuiMessageType.error, "#valueId", 
+//                TextContainer.retrieveFromRequest().getText().get("configurationFilesAddEntryPropertyValueRequired")));
+//            return false;
+//          }
+          String passwordString = request.getParameter("passwordName");
+          
+          // if not sent, thats a problem
+          if (StringUtils.isBlank(passwordString)) {
+            throw new RuntimeException("Why is password blank!");
+          }
+          
+          // is this a password or not?
+          boolean isPassword = GrouperUtil.booleanValue(passwordString);
+
+          if (isPassword) {
+            valueString = request.getParameter("passwordValueName");
+          } else {
+            if (valueString != null) {
+              // convert newlines
+              valueString = GrouperUtil.whitespaceNormalizeNewLines(valueString);
+              valueString = GrouperUtil.trim(valueString);
+            }
+          }
+
+          StringBuilder message = new StringBuilder();
+          
+          Boolean[] added = new Boolean[1];
+          Boolean[] error = new Boolean[1];
+          
+          ConfigFileName configFileName = ConfigFileName.valueOfIgnoreCase(configFileString, true);
+          ConfigFileMetadata configFileMetadata = configFileName.configFileMetadata();
+
+          Set<MultiKey> configFileNameAndKeys = GrouperUtil.toSet(new MultiKey(configFileName.getConfigFileName(), propertyNameString));
+
+          Map<String, Set<GrouperConfigHibernate>> keyToConfigHibernate = GrouperDAOFactory.getFactory().getConfig().findByFileAndKey(configFileNameAndKeys);
+
+          String thePropertyNameString = GrouperUtil.stripSuffix(propertyNameString, ".elConfig");
+          Set<GrouperConfigHibernate> grouperConfigHibernates = keyToConfigHibernate.get(thePropertyNameString);
+          
+          String propertyNameStringEl = thePropertyNameString + ".elConfig";
+          Set<GrouperConfigHibernate> grouperConfigHibernatesEl = keyToConfigHibernate.get(propertyNameStringEl);
+          
+          boolean result = configurationFileAddEditHelper2(configFileName, configFileString, configFileMetadata, propertyNameString,
+              expressionLanguageString, valueString, isPassword, message, added, error, true, null, grouperConfigHibernates, grouperConfigHibernatesEl);
+
+          GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+
+          guiResponseJs.addAction(GuiScreenAction.newMessage((added[0] != null && error[0] == null) ? GuiMessageType.success : ((error[0] == null || !error[0]) ? GuiMessageType.info : GuiMessageType.error), message.toString()));
+          ConfigPropertiesCascadeBase.clearCache();
+          GrouperUiApiTextConfig.clearCache();
+
+          return result;
+        }
+      });
+      return success;
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+  }
+  
+  /**
+   * add config
+   * @param request
+   * @param response
+   */
+  public void configurationFileAddConfig(HttpServletRequest request, HttpServletResponse response) {
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+    
+    GrouperSession grouperSession = null;
+  
+    try {
+  
+      grouperSession = GrouperSession.start(loggedInSubject);
+  
+      if (!allowedToViewConfiguration()) {
+        return;
+      }
+      
+      ConfigurationContainer configurationContainer = GrouperRequestContainer.retrieveFromRequestOrCreate().getConfigurationContainer();
+
+      
+      String configFileString = request.getParameter("configFile");
+      ConfigFileName configFileName = ConfigFileName.valueOfIgnoreCase(configFileString, false);
+      configurationContainer.setConfigFileName(configFileName);
+      
+      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+  
+      guiResponseJs.addAction(GuiScreenAction.newInnerHtmlFromJsp("#grouperMainContentDivId", 
+          "/WEB-INF/grouperUi2/configure/configurationFileAddEntry.jsp"));
+    
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+
+  }
+  
+  /**
+   * import config
+   * @param request
+   * @param response
+   */
+  public void configurationFileImport(HttpServletRequest request, HttpServletResponse response) {
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+    
+    GrouperSession grouperSession = null;
+  
+    try {
+  
+      grouperSession = GrouperSession.start(loggedInSubject);
+  
+      if (!allowedToViewConfiguration()) {
+        return;
+      }
+      
+      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+  
+      guiResponseJs.addAction(GuiScreenAction.newInnerHtmlFromJsp("#grouperMainContentDivId", 
+          "/WEB-INF/grouperUi2/configure/configurationFileImport.jsp"));
+    
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+
+  }
+  
+  
+  public void configurationFileExport(HttpServletRequest request, HttpServletResponse response) {
+    
+    
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+    
+    GrouperSession grouperSession = null;
+  
+    try {
+  
+      grouperSession = GrouperSession.start(loggedInSubject);
+  
+      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+      
+      if (!allowedToViewConfiguration()) {
+        return;
+      }
+      ConfigurationContainer configurationContainer = GrouperRequestContainer.retrieveFromRequestOrCreate().getConfigurationContainer();
+      
+      final String configFileString = request.getParameter("configFile");
+      ConfigFileName configFileName = ConfigFileName.valueOfIgnoreCase(configFileString, false);
+      configurationContainer.setConfigFileName(configFileName);
+      
+      if (StringUtils.isBlank(configFileString)) {
+        guiResponseJs.addAction(GuiScreenAction.newValidationMessage(GuiMessageType.error, "#configFileSelect", 
+            TextContainer.retrieveFromRequest().getText().get("configurationFileRequired")));
+        return;
+      }
+      
+      String filter = request.getParameter("filter");
+      String configSource = request.getParameter("configSource");
+      
+      
+      buildConfigFileAndMetadata(filter.trim(), configSource);
+      
+      configurationContainer.setFilter(filter.trim());
+      configurationContainer.setConfigSource(configSource);
+      
+      
+      Set<GrouperConfigHibernate> grouperConfigHibernateSet = Hib3DAOFactory.getFactory().getConfig().findAll(configFileName, null, null);
+      
+      Map<String, GrouperConfigHibernate> grouperConfigHibernateMap = new HashMap<String, GrouperConfigHibernate>();
+      
+      for (GrouperConfigHibernate grouperConfigHibernate : GrouperUtil.nonNull(grouperConfigHibernateSet)) {
+        grouperConfigHibernateMap.put(grouperConfigHibernate.getConfigKey(), grouperConfigHibernate);
+      }
+      
+      StringBuilder contents = new StringBuilder();
+      
+      Map<String, String> keyValues = new TreeMap<String, String>();
+      
+      List<GuiConfigSection> guiConfigSections = configurationContainer.getGuiConfigFile().getGuiConfigSections();
+      for (GuiConfigSection guiConfigSection: guiConfigSections) {
+        List<GuiConfigProperty> guiConfigProperties = guiConfigSection.getGuiConfigProperties();
+        for (GuiConfigProperty guiConfigProperty: guiConfigProperties) {
+          
+          String property = guiConfigProperty.getConfigItemMetadata().getKeyOrSampleKey();
+          String value = guiConfigProperty.getPropertyValue();
+          
+          String sourceOfValue = guiConfigProperty.getValueFromWhere();
+          if (StringUtils.isBlank(configSource) && StringUtils.isNotBlank(sourceOfValue) && sourceOfValue.endsWith("base.properties")) {
+            guiResponseJs.addAction(GuiScreenAction.newMessage(GuiMessageType.error, 
+                TextContainer.retrieveFromRequest().getText().get("configurationFileExportBasePropertiesError")));
+            return;
+          }
+          
+          if (guiConfigProperty.isFromDatabase()) {
+            if (grouperConfigHibernateMap.containsKey(property) &&
+                grouperConfigHibernateMap.get(property) != null && grouperConfigHibernateMap.get(property).isConfigEncrypted()) {
+              value = "*******";
+            }
+            value = GrouperUtil.whitespaceNormalizeNewLines(value);
+
+            // escape backslashes
+            value = GrouperUtil.replace(value, "\\", "\\u005C");
+
+            // $
+            value = GrouperUtil.replace(value, "$", "\\u0024");
+            
+            // #
+            value = GrouperUtil.replace(value, "#", "\\u0023");
+            
+            // :
+            value = GrouperUtil.replace(value, ":", "\\u003A");
+            
+            // the end of a newline must be literally: \n\{newline}
+            value = GrouperUtil.replace(value, "\n", "\\n\\\n");
+          }
+          
+          keyValues.put(property, value);
+          
+        }
+      }
+      
+      for (String property: keyValues.keySet()) {        
+        contents.append(property + " = " + keyValues.get(property));
+        contents.append("\n");
+      }
+      
+      
+      response.setContentType("application/octet-stream");
+      response.setHeader ("Content-Disposition", "inline;filename=\"" + configFileName.getConfigFileName() + "\"");
+      
+      try {
+        PrintWriter out = response.getWriter();
+        out.write(contents.toString());
+        out.close();
+      } catch (IOException e) {
+        throw new RuntimeException("Error occured while writing response");
+      }
+      throw new ControllerDone();
+    }
+      
+    finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+    
+  }
+  
+  /**
+   * delete selected db config items
+   * @param request
+   * @param response
+   */
+  public void removeProperties(final HttpServletRequest request, HttpServletResponse response) {
+    
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+    
+    GrouperSession grouperSession = null;
+  
+    try {
+  
+      grouperSession = GrouperSession.start(loggedInSubject);
+  
+      if (!allowedToViewConfiguration()) {
+        return;
+      }
+      
+      final String configFileString = request.getParameter("configFile");
+      
+      final String[] propertyNames = request.getParameterValues("propertyNameName[]");
+
+      ConfigurationContainer configurationContainer = GrouperRequestContainer.retrieveFromRequestOrCreate().getConfigurationContainer();
+
+      ConfigFileName configFileName = ConfigFileName.valueOfIgnoreCase(configFileString, false);
+
+      configurationContainer.setConfigFileName(configFileName);
+
+      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+      
+      StringBuilder successMessageBuilder = new StringBuilder();
+      StringBuilder warnMessageBuilder = new StringBuilder();
+      
+      for (String propertyNameString: propertyNames) {
+        Set<MultiKey> configFileNameAndKeys = GrouperUtil.toSet(new MultiKey(configFileString, propertyNameString));
+        
+        Map<String, Set<GrouperConfigHibernate>> keyToConfigHibernate = GrouperDAOFactory.getFactory().getConfig().findByFileAndKey(configFileNameAndKeys);
+        
+        String thePropertyNameString = GrouperUtil.stripSuffix(propertyNameString, ".elConfig");
+        Set<GrouperConfigHibernate> grouperConfigHibernates = keyToConfigHibernate.get(thePropertyNameString);
+        
+        String propertyNameStringEl = thePropertyNameString + ".elConfig";
+        Set<GrouperConfigHibernate> grouperConfigHibernatesEl = keyToConfigHibernate.get(propertyNameStringEl);
+
+        String result = DbConfigEngine.configurationFileItemDeleteHelper(configFileString, propertyNameString, true, true, new ArrayList<String>(), grouperConfigHibernates, grouperConfigHibernatesEl);
+        
+        if (!StringUtils.isBlank(result)) {
+          if (result.toLowerCase().contains("warn")) {
+            
+            if (warnMessageBuilder.length() > 0) {
+              warnMessageBuilder.append("<br />");
+            }
+            warnMessageBuilder.append(result);
+            
+          } else {
+            
+            if (successMessageBuilder.length() > 0) {
+              successMessageBuilder.append("<br />");
+            }
+            successMessageBuilder.append(result);
+            
+          }
+        }
+      }
+      
+      if (warnMessageBuilder.length() > 0) {
+        guiResponseJs.addAction(GuiScreenAction.newMessage(GuiMessageType.info, warnMessageBuilder.toString()));
+      }
+      if (successMessageBuilder.length() > 0) {
+        guiResponseJs.addAction(GuiScreenAction.newMessage(GuiMessageType.success, successMessageBuilder.toString()));
+      }
+      
+      // GRP-7351: the rows that were just removed are the checked ones, so drop them from the
+      // table instead of rebuilding the model and redrawing the whole listing. The user gets the
+      // success message above and the rows disappear, with no round trip to re-render the screen.
+      guiResponseJs.addAction(GuiScreenAction.newScript(
+          "$('.configCheckbox:checked').closest('tr').remove();"));
+    
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+    
+  }
+  
+  /**
+   * delete config
+   * @param request
+   * @param response
+   */
+  public void configurationFileItemDelete(final HttpServletRequest request, HttpServletResponse response) {
+
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+    
+    GrouperSession grouperSession = null;
+  
+    try {
+  
+      grouperSession = GrouperSession.start(loggedInSubject);
+  
+      if (!allowedToViewConfiguration()) {
+        return;
+      }
+      
+      
+      final String configFileString = request.getParameter("configFile");
+
+      ConfigurationContainer configurationContainer = GrouperRequestContainer.retrieveFromRequestOrCreate().getConfigurationContainer();
+
+      ConfigFileName configFileName = ConfigFileName.valueOfIgnoreCase(configFileString, false);
+
+      configurationContainer.setConfigFileName(configFileName);
+
+      String propertyNameString = StringUtils.trim(request.getParameter("propertyNameName"));
+      
+      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+  
+      Set<MultiKey> configFileNameAndKeys = GrouperUtil.toSet(new MultiKey(configFileString, propertyNameString));
+
+      Map<String, Set<GrouperConfigHibernate>> keyToConfigHibernate = GrouperDAOFactory.getFactory().getConfig().findByFileAndKey(configFileNameAndKeys);
+      
+      String thePropertyNameString = GrouperUtil.stripSuffix(propertyNameString, ".elConfig");
+      Set<GrouperConfigHibernate> grouperConfigHibernates = keyToConfigHibernate.get(thePropertyNameString);
+      
+      String propertyNameStringEl = thePropertyNameString + ".elConfig";
+      Set<GrouperConfigHibernate> grouperConfigHibernatesEl = keyToConfigHibernate.get(propertyNameStringEl);
+
+      String result = DbConfigEngine.configurationFileItemDeleteHelper(configFileString, propertyNameString, true, true, new ArrayList<String>(), grouperConfigHibernates, grouperConfigHibernatesEl);
+      
+      if (!StringUtils.isBlank(result)) {
+        if (result.toLowerCase().contains("warn")) {
+          guiResponseJs.addAction(GuiScreenAction.newMessage(GuiMessageType.info, 
+              result));
+        } else {
+          guiResponseJs.addAction(GuiScreenAction.newMessage(GuiMessageType.success, 
+              result));
+        }
+      }
+      // GRP-7351: just take the deleted row out of the table rather than rebuilding the model and
+      // redrawing the whole listing. The index comes from the delete link in configure.jsp.
+      Integer deletedIndex = GrouperUtil.intObjectValue(request.getParameter("index"), true);
+      if (deletedIndex != null) {
+        guiResponseJs.addAction(GuiScreenAction.newScript(
+            "$('#row_" + deletedIndex + "').remove();"));
+      } else {
+        // no index (e.g. an older link), fall back to redrawing the listing
+        buildConfigFileAndMetadata(null, null);
+        guiResponseJs.addAction(GuiScreenAction.newInnerHtmlFromJsp("#grouperMainContentDivId", "/WEB-INF/grouperUi2/configure/configure.jsp"));
+      }
+    
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+
+  }
+
+  /**
+   * configuration file item delete helper
+   * @param grouperConfigHibernate
+   * @param configFileName 
+   */
+  public static void configurationFileItemDeleteHelper(GrouperConfigHibernate grouperConfigHibernate, 
+      ConfigFileName configFileName, boolean fromUi) {
+  
+    ConfigurationContainer configurationContainer = GrouperRequestContainer.retrieveFromRequestOrCreate().getConfigurationContainer();
+    
+    configurationContainer.setConfigFileName(configFileName);
+
+    String message = DbConfigEngine.configurationFileItemDeleteHelper(grouperConfigHibernate, configFileName, fromUi, new ArrayList<String>());
+    if (!StringUtils.isBlank(message) && fromUi) {
+      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+      
+      guiResponseJs.addAction(GuiScreenAction.newMessage(GuiMessageType.success, 
+          message));
+  
+    }              
+  }
+  
+  /**
+   * GRP-7354: clear the config caches on EVERY node, not just this one. Notifies under the base
+   * config cache name with no config file suffix, which GrouperConfigHibernate.clear treats as
+   * meaning all config (see GRP-7346, which scoped the notification per file and kept the
+   * unscoped name meaning everything). The other nodes pick that up on their next poll, which is
+   * grouper.cache.database.checkIncrementalAfterSeconds, 5 seconds by default. This node is
+   * cleared directly here rather than waiting for its own poll.
+   *
+   * This only clears CONFIG. It is not GrouperCacheUtils.clearAllCaches, which would also flush
+   * ehcache, subject sources and the rest across the whole environment.
+   * @param request
+   * @param response
+   */
+  public void clearConfigCacheAllNodes(HttpServletRequest request, HttpServletResponse response) {
+
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+
+    GrouperSession grouperSession = null;
+
+    try {
+
+      grouperSession = GrouperSession.start(loggedInSubject);
+
+      if (!allowedToViewConfiguration()) {
+        return;
+      }
+
+      // tell the other nodes: no file suffix means all config
+      GrouperCacheDatabase.customNotifyDatabaseOfChanges(ConfigDatabaseLogic.DATABASE_CACHE_KEY);
+
+      // and clear this node now, rather than waiting for it to notice its own notification
+      GrouperConfigHibernate.clearConfigsInMemory();
+
+      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+
+      redrawConfigureScreenAfterClearCache(request, guiResponseJs);
+
+      guiResponseJs.addAction(GuiScreenAction.newMessage(GuiMessageType.success,
+          TextContainer.retrieveFromRequest().getText().get("configurationFilesClearCacheAllNodesSuccess")));
+
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+  }
+
+  /**
+   * GRP-7352: clear the config caches in this UI and redisplay. Showing a config screen no longer
+   * clears these caches, since config changed in this JVM already invalidates itself, config
+   * changed in another JVM arrives through GrouperCacheDatabase, and there is a periodic recheck
+   * besides. This is here for the case where someone knows config changed elsewhere and does not
+   * want to wait for that. Note it clears the cache in THIS ui only, other JVMs have their own.
+   * @param request
+   * @param response
+   */
+  public void clearConfigCache(HttpServletRequest request, HttpServletResponse response) {
+
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+
+    GrouperSession grouperSession = null;
+
+    try {
+
+      grouperSession = GrouperSession.start(loggedInSubject);
+
+      if (!allowedToViewConfiguration()) {
+        return;
+      }
+
+      ConfigPropertiesCascadeBase.clearCache();
+      GrouperUiApiTextConfig.clearCache();
+
+      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+
+      redrawConfigureScreenAfterClearCache(request, guiResponseJs);
+
+      guiResponseJs.addAction(GuiScreenAction.newMessage(GuiMessageType.success,
+          TextContainer.retrieveFromRequest().getText().get("configurationFilesClearCacheSuccess")));
+
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+  }
+
+  /**
+   * GRP-7392: the clear config cache actions are ajax and leave the user on whatever screen they
+   * were on. The client only sends configFile when it is on the configuration files screen with a
+   * file listed, so only then redraw that screen to show the refreshed values.
+   * @param request
+   * @param guiResponseJs
+   */
+  private void redrawConfigureScreenAfterClearCache(HttpServletRequest request, GuiResponseJs guiResponseJs) {
+
+    String configFileString = request.getParameter("configFile");
+
+    if (StringUtils.isBlank(configFileString)) {
+      return;
+    }
+
+    ConfigurationContainer configurationContainer = GrouperRequestContainer.retrieveFromRequestOrCreate().getConfigurationContainer();
+    configurationContainer.setConfigFileName(ConfigFileName.valueOfIgnoreCase(configFileString, false));
+
+    buildConfigFileAndMetadata(null, null);
+
+    guiResponseJs.addAction(GuiScreenAction.newInnerHtmlFromJsp("#grouperMainContentDivId",
+        "/WEB-INF/grouperUi2/configure/configure.jsp"));
+  }
+
+  /**
+   * configure
+   * @param request
+   * @param response
+   */
+  public void configure(HttpServletRequest request, HttpServletResponse response) {
+  
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+  
+    GrouperSession grouperSession = null;
+  
+    try {
+  
+      grouperSession = GrouperSession.start(loggedInSubject);
+  
+      if (!allowedToViewConfiguration()) {
+        return;
+      }
+      
+      ConfigurationContainer configurationContainer = GrouperRequestContainer.retrieveFromRequestOrCreate().getConfigurationContainer();
+      
+      String configFileString = request.getParameter("configFile");
+      ConfigFileName configFileName = ConfigFileName.valueOfIgnoreCase(configFileString, false);
+      configurationContainer.setConfigFileName(configFileName);
+
+      if (!StringUtils.isBlank(configFileString)) {
+      
+        buildConfigFileAndMetadata(null, null);
+
+      }
+
+      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+  
+      guiResponseJs.addAction(GuiScreenAction.newInnerHtmlFromJsp("#grouperMainContentDivId", 
+          "/WEB-INF/grouperUi2/configure/configure.jsp"));
+    
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+  }
+  
+      
+  public void configurationFileSelectPassword(HttpServletRequest request, HttpServletResponse response) {
+    
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+  
+    GrouperSession grouperSession = null;
+  
+    try {
+  
+      grouperSession = GrouperSession.start(loggedInSubject);
+  
+      if (!allowedToViewConfiguration()) {
+        return;
+      }
+      
+      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+  
+      String passwordString = request.getParameter("passwordName");
+      
+      // if not sent, thats a problem
+      if (StringUtils.isBlank(passwordString)) {
+        throw new RuntimeException("Why is password blank!");
+      }
+      
+      // is this a password or not?
+      boolean isPassword = GrouperUtil.booleanValue(passwordString);
+
+      // clear out values
+      guiResponseJs.addAction(GuiScreenAction.newScript("$('#passwordValueId').val('');"));
+      guiResponseJs.addAction(GuiScreenAction.newFormFieldValue("valueName", null));
+
+      // we need to hide or show the password and value
+      if (isPassword) {
+        guiResponseJs.addAction(GuiScreenAction.newScript("$('#passwordValueDivId').show('slow')"));
+        guiResponseJs.addAction(GuiScreenAction.newScript("$('#valueDivId').hide('slow')"));
+      } else {
+        guiResponseJs.addAction(GuiScreenAction.newScript("$('#passwordValueDivId').hide('slow')"));
+        guiResponseJs.addAction(GuiScreenAction.newScript("$('#valueDivId').show('slow')"));
+      }
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+  }
+
+  /**
+   * filter values
+   * @param request
+   * @param response
+   */
+  public void configureFilterSubmit(final HttpServletRequest request, final HttpServletResponse response) {
+    
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+    
+    GrouperSession grouperSession = null;
+  
+    try {
+  
+      grouperSession = GrouperSession.start(loggedInSubject);
+  
+      if (!allowedToViewConfiguration()) {
+        return;
+      }
+      
+      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+  
+      ConfigurationContainer configurationContainer = GrouperRequestContainer.retrieveFromRequestOrCreate().getConfigurationContainer();
+      
+      String configFileString = request.getParameter("configFile");
+      ConfigFileName configFileName = ConfigFileName.valueOfIgnoreCase(configFileString, false);
+      configurationContainer.setConfigFileName(configFileName);
+      
+      // if not sent, thats a problem
+      if (StringUtils.isBlank(configFileString)) {
+        guiResponseJs.addAction(GuiScreenAction.newValidationMessage(GuiMessageType.error, "#configFileSelect", 
+            TextContainer.retrieveFromRequest().getText().get("configurationFileRequired")));
+        return;
+      }
+      
+      String filter = request.getParameter("filter");
+      String configSource = request.getParameter("configSource");
+      
+      buildConfigFileAndMetadata(filter.trim(), configSource);
+      
+      configurationContainer.setFilter(filter.trim());
+      configurationContainer.setConfigSource(configSource);
+      
+      guiResponseJs.addAction(GuiScreenAction.newInnerHtmlFromJsp("#grouperMainContentDivId", 
+          "/WEB-INF/grouperUi2/configure/configure.jsp"));
+    
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+    
+  }
+  
+  /**
+   * configure
+   * @param request
+   * @param response
+   */
+  public void configureSelectFile(HttpServletRequest request, HttpServletResponse response) {
+  
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+  
+    GrouperSession grouperSession = null;
+  
+    try {
+  
+      grouperSession = GrouperSession.start(loggedInSubject);
+  
+      if (!allowedToViewConfiguration()) {
+        return;
+      }
+      
+      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+  
+      ConfigurationContainer configurationContainer = GrouperRequestContainer.retrieveFromRequestOrCreate().getConfigurationContainer();
+      
+      {
+        String configFileString = request.getParameter("configFile");
+        ConfigFileName configFileName = ConfigFileName.valueOfIgnoreCase(configFileString, false);
+        configurationContainer.setConfigFileName(configFileName);
+        
+        // if not sent, thats a problem
+        if (StringUtils.isBlank(configFileString)) {
+          guiResponseJs.addAction(GuiScreenAction.newValidationMessage(GuiMessageType.error, "#configFileSelect", 
+              TextContainer.retrieveFromRequest().getText().get("configurationFileRequired")));
+          return;
+        }
+        
+        buildConfigFileAndMetadata(null, null);
+        
+      }
+      
+      guiResponseJs.addAction(GuiScreenAction.newInnerHtmlFromJsp("#grouperMainContentDivId", 
+          "/WEB-INF/grouperUi2/configure/configure.jsp"));
+    
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+  }
+
+  /**
+   * edit config
+   * @param request
+   * @param response
+   */
+  public void configurationFileItemEdit(final HttpServletRequest request, HttpServletResponse response) {
+  
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+    
+    GrouperSession grouperSession = null;
+  
+    try {
+  
+      grouperSession = GrouperSession.start(loggedInSubject);
+  
+      if (!allowedToViewConfiguration()) {
+        return;
+      }
+      
+      ConfigurationContainer configurationContainer = GrouperRequestContainer.retrieveFromRequestOrCreate().getConfigurationContainer();
+  
+      
+      final String configFileString = request.getParameter("configFile");
+      
+      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+  
+      ConfigFileName configFileName = ConfigFileName.valueOfIgnoreCase(configFileString, false);
+      configurationContainer.setConfigFileName(configFileName);
+  
+      if (StringUtils.isBlank(configFileString)) {
+      
+        throw new RuntimeException("configFile is not being sent!");
+  
+      }
+  
+      String propertyNameString = StringUtils.trim(request.getParameter("propertyNameName"));
+      if (StringUtils.isBlank(propertyNameString)) {
+        throw new RuntimeException("Property name does not exist");
+      }
+      configurationContainer.setCurrentConfigPropertyName(propertyNameString);
+
+      buildConfigFileAndMetadata(null, null);
+      
+      GuiConfigFile guiConfigFile = configurationContainer.getGuiConfigFile();
+      
+      GuiConfigProperty guiConfigProperty = guiConfigFile.findGuiConfigProperty(propertyNameString, true);
+
+      configurationContainer.setCurrentGuiConfigProperty(guiConfigProperty);
+      String sourceOfValue = guiConfigProperty.getValueFromWhere();
+      //this is to make sure a property value can be edited when there's a key in the non-base and also in base.
+      //clone the metadata so we dont mutate the cached ConfigItemMetadata shared across requests
+      if (StringUtils.isNotBlank(sourceOfValue) && !sourceOfValue.endsWith("base.properties")) {
+        ConfigItemMetadata metadataCopy = GrouperUtil.clone(guiConfigProperty.getConfigItemMetadata(),
+            GrouperUtil.fieldNames(ConfigItemMetadata.class, null, null, true, false, false));
+        metadataCopy.setKey(guiConfigProperty.getConfigItemMetadata().getKeyOrSampleKey());
+        guiConfigProperty.setConfigItemMetadata(metadataCopy);
+      }
+      
+      Integer index = GrouperUtil.intObjectValue(request.getParameter("index"), true);
+      if (StringUtils.isBlank(propertyNameString)) {
+        throw new RuntimeException("Index does not exist");
+      }
+      // GRP-7351: remember which row this is, so the submit can re-render just that row
+      configurationContainer.setCurrentIndex(index);
+      // hide existing edit forms
+      guiResponseJs.addAction(GuiScreenAction.newScript("$('.configFormRow').hide('slow');$('.configFormRow').remove()"));
+      
+      // add a row
+      guiResponseJs.addAction(GuiScreenAction.newScript("$('#row_" + index + "').after(\"<tr class='configFormRow' id='configFormRowId_" + index + "'></tr>\");"));
+
+      // replace the inner html of the row with this jsp
+      guiResponseJs.addAction(GuiScreenAction.newInnerHtmlFromJsp("#configFormRowId_" + index , "/WEB-INF/grouperUi2/configure/configurationFileEditEntry.jsp"));
+    
+      //guiResponseJs.addAction(GuiScreenAction.newScript("guiScrollTo('#row_" + index + "');"));
+      
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+  
+  }
+  
+  /**
+   * see the history of db configs
+   * @param request
+   * @param response
+   */
+  public void history(final HttpServletRequest request, final HttpServletResponse response) {
+    
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+    
+    GrouperSession grouperSession = null;
+  
+    try {
+  
+      grouperSession = GrouperSession.start(loggedInSubject);
+  
+      if (!allowedToViewConfiguration()) {
+        return;
+      }
+      
+      historyHelper(request);
+    
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+  }
+  
+  private void historyHelper(final HttpServletRequest request) {
+    
+    ConfigurationContainer configurationContainer = GrouperRequestContainer.retrieveFromRequestOrCreate().getConfigurationContainer();
+    
+    String filter = request.getParameter("filter");
+    if (StringUtils.isNotBlank(filter)) {
+      configurationContainer.setFilter(filter.trim());
+    } else {
+      filter = "";
+    }
+    
+    GuiPaging guiPaging = configurationContainer.getGuiPaging();
+    QueryOptions queryOptions = new QueryOptions();
+
+    GrouperPagingTag2.processRequest(request, guiPaging, queryOptions);
+    
+    GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+    
+    List<PITGrouperConfigHibernate> pitConfigs = Hib3DAOFactory.getFactory().getPITConfig().findPITConfigs(queryOptions, filter.trim());
+    
+    List<GuiPITGrouperConfigHibernate> guiPitConfigs = GuiPITGrouperConfigHibernate.convertFromPITGrouperConfigsHibernate(pitConfigs);
+    
+    configurationContainer.setGuiPitConfigs(guiPitConfigs);
+    
+    guiPaging.setTotalRecordCount(queryOptions.getQueryPaging().getTotalRecordCount());
+    guiResponseJs.addAction(GuiScreenAction.newInnerHtmlFromJsp("#grouperMainContentDivId",
+        "/WEB-INF/grouperUi2/configure/history.jsp"));
+  }
+  
+  /**
+   * search the history of db configs
+   * @param request
+   * @param response
+   */
+//  public void historyFilterSubmit(final HttpServletRequest request, final HttpServletResponse response) {
+//    
+//    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+//    
+//    GrouperSession grouperSession = null;
+//  
+//    try {
+//  
+//      grouperSession = GrouperSession.start(loggedInSubject);
+//  
+//      if (!allowedToViewConfiguration()) {
+//        return;
+//      }
+//      
+//      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+//  
+//      ConfigurationContainer configurationContainer = GrouperRequestContainer.retrieveFromRequestOrCreate().getConfigurationContainer();
+//      
+//      String filter = request.getParameter("filter");
+//      
+//      configurationContainer.setFilter(filter.trim());
+//      
+//      List<PITGrouperConfigHibernate> pitConfigs = Hib3DAOFactory.getFactory().getPITConfig().findPITConfigs(null, filter.trim());
+//      
+//      List<GuiPITGrouperConfigHibernate> guiPitConfigs = GuiPITGrouperConfigHibernate.convertFromPITGrouperConfigsHibernate(pitConfigs);
+//      
+//      configurationContainer.setGuiPitConfigs(guiPitConfigs);
+//      
+//      guiResponseJs.addAction(GuiScreenAction.newInnerHtmlFromJsp("#grouperMainContentDivId",
+//          "/WEB-INF/grouperUi2/configure/history.jsp"));
+//      
+//    } finally {
+//      GrouperSession.stopQuietly(grouperSession);
+//    }
+//  }
+  
+  /**
+   * revert configs to old values
+   * @param request
+   * @param response
+   */
+  public void revertConfigValues(final HttpServletRequest request, final HttpServletResponse response) {
+   
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+    
+    GrouperSession grouperSession = null;
+  
+    try {
+  
+      grouperSession = GrouperSession.start(loggedInSubject);
+  
+      if (!allowedToViewConfiguration()) {
+        return;
+      }
+      
+      GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+  
+      final Set<String> pitIds = new HashSet<String>();
+      
+      for (int i=0;i<1000;i++) {
+        String pitId = request.getParameter("configHistoryRow_" + i + "[]");
+        if (!StringUtils.isBlank(pitId)) {
+          pitIds.add(pitId);
+        }
+      }
+  
+      if (pitIds.size() == 0) {
+        guiResponseJs.addAction(GuiScreenAction.newMessage(GuiMessageType.error, 
+            TextContainer.retrieveFromRequest().getText().get("configurationHistoryRevertNoPropertiesSelects")));
+        return;
+      }
+      
+      StringBuilder message = new StringBuilder();
+      List<String> errorsToDisplay = new ArrayList<String>();
+      Map<String, String> validationErrorsToDisplay = new HashMap<String, String>();
+      
+      Hib3DAOFactory.getFactory().getPITConfig().revertConfigs(pitIds, message, errorsToDisplay, validationErrorsToDisplay);
+      
+      if (errorsToDisplay.size() > 0 || validationErrorsToDisplay.size() > 0) {
+
+        for (String errorToDisplay: errorsToDisplay) {
+          guiResponseJs.addAction(GuiScreenAction.newMessageAppend(GuiMessageType.error, errorToDisplay));
+        }
+        for (String validationKey: validationErrorsToDisplay.keySet()) {
+          guiResponseJs.addAction(GuiScreenAction.newValidationMessage(GuiMessageType.error, validationKey, 
+              validationErrorsToDisplay.get(validationKey)));
+        }
+
+        return;
+
+      }
+      
+      historyHelper(request);
+      
+      guiResponseJs.addAction(GuiScreenAction.newMessageAppend(GuiMessageType.success, 
+          TextContainer.retrieveFromRequest().getText().get("configurationHistoryRevertSuccess")));
+      
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+    
+  }
+
+  /**
+   * import config submit
+   * @param request
+   * @param response
+   */
+  public void configurationFileImportSubmit(final HttpServletRequest request, HttpServletResponse response) {
+    final Subject loggedInSubject = GrouperUiFilter.retrieveSubjectLoggedIn();
+    
+    GrouperSession grouperSession = null;
+  
+    GuiResponseJs guiResponseJs = GuiResponseJs.retrieveGuiResponseJs();
+
+    StringBuilder message = new StringBuilder();
+
+    ConfigurationContainer configurationContainer = GrouperRequestContainer.retrieveFromRequestOrCreate().getConfigurationContainer();
+
+    ConfigFileName configFileName = null;
+    Properties propertiesToImport = new Properties();
+
+    try {
+  
+      grouperSession = GrouperSession.start(loggedInSubject);
+  
+      if (!allowedToViewConfiguration()) {
+        return;
+      }
+      
+      GrouperRequestWrapper grouperRequestWrapper = GrouperRequestWrapper.retrieveGrouperRequestWrapper(request);
+      
+      // get the type first
+      String howToAdd = grouperRequestWrapper.getParameter("configurationImportHowAdd");
+      
+      if (StringUtils.equals(howToAdd, "file")) {
+        if (!grouperRequestWrapper.isMultipart()) {
+          guiResponseJs.addAction(GuiScreenAction.newValidationMessage(GuiMessageType.error, 
+              "#importConfigFileId",
+              TextContainer.retrieveFromRequest().getText().get("configurationFilesImportFileRequired")));
+          return;
+        }
+        
+        FileItem importConfigFile = grouperRequestWrapper.getParameterFileItem("importConfigFile");
+
+        if (importConfigFile == null) {
+          
+          guiResponseJs.addAction(GuiScreenAction.newValidationMessage(GuiMessageType.error, 
+              "#importConfigFileId",
+              TextContainer.retrieveFromRequest().getText().get("configurationFilesImportFileRequired")));
+          return;
+        }
+
+        String fileName = StringUtils.defaultString(importConfigFile == null ? "" : importConfigFile.getName());
+
+        // GRP-2836: Configuration file upload fails on browsers that include full file path
+        if (fileName.contains("/")) {
+          fileName = GrouperUtil.prefixOrSuffix(fileName, "/", false);
+        }
+        if (fileName.contains("\\")) {
+          fileName = GrouperUtil.prefixOrSuffix(fileName, "\\", false);
+        }
+        
+        try {
+          configFileName = ConfigFileName.valueOfIgnoreCase(fileName, false);
+        } catch (Exception e) {
+          // ignore
+        }
+        
+        if (configFileName == null) {
+          
+          guiResponseJs.addAction(GuiScreenAction.newValidationMessage(GuiMessageType.error, 
+              "#importConfigFileId",
+              TextContainer.retrieveFromRequest().getText().get("configurationFilesImportFileNotValid")));
+          return;
+        }
+        
+        Reader reader = null;
+        
+        // load properties from file
+        try {
+          reader = new InputStreamReader(importConfigFile.getInputStream());
+          
+          propertiesToImport.load(reader);
+
+        } catch (Exception e) {
+          throw new RuntimeException("Cant process config import: '" + fileName + "'", e);
+        } finally {
+          GrouperUtil.closeQuietly(reader);
+        }
+
+      } else if (StringUtils.equals(howToAdd, "copyPaste")) {
+
+        String fileName = grouperRequestWrapper.getParameter("configFile");
+        
+        try {
+          configFileName = ConfigFileName.valueOfIgnoreCase(fileName, false);
+        } catch (Exception e) {
+          // ignore
+        }
+        
+        if (configFileName == null) {
+          
+          guiResponseJs.addAction(GuiScreenAction.newValidationMessage(GuiMessageType.error, 
+              "#configFileSelect",
+              TextContainer.retrieveFromRequest().getText().get("configurationImportCopyPasteFileTypeRequired")));
+          return;
+        }
+        
+        String configFileContents = grouperRequestWrapper.getParameter("configInputCopyPasteName");
+        
+        if (StringUtils.isBlank(configFileContents)) {
+          guiResponseJs.addAction(GuiScreenAction.newValidationMessage(GuiMessageType.error, 
+              "#configInputCopyPasteId",
+              TextContainer.retrieveFromRequest().getText().get("configurationImportConfigFileCopyPasteRequired")));
+          return;
+          
+        }
+        configFileContents = GrouperUtil.whitespaceNormalizeNewLines(configFileContents);
+        configFileContents = StringUtils.replace(configFileContents, "\\n\\\n ", "\\n\\\n\u0020");
+        
+        configFileContents = configFileContents.replace(" ", "\\u0020");
+        configFileContents = configFileContents.replace("\t", "\\t");
+        
+        // create a new reader
+        StringReader reader = new StringReader(configFileContents);
+
+        try {
+           // load from input stream
+          propertiesToImport.load(reader);
+        } catch (IOException ioe) {
+          throw new RuntimeException(ioe);
+        }
+      } else {
+        guiResponseJs.addAction(GuiScreenAction.newValidationMessage(GuiMessageType.error, 
+            "#configurationImportHowAddImportFileErrorId",
+            TextContainer.retrieveFromRequest().getText().get("configurationImportHowAddRequired")));
+        return;
+        
+      }
+      
+      
+      
+      configurationfileImportSubmitHelper(message, configFileName, propertiesToImport, true);
+
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+
+    boolean hasUnscheduledLoaderJobs = false;
+    // check if loader config was imported and warn about unscheduled jobs
+    if (configFileName == ConfigFileName.GROUPER_LOADER_PROPERTIES) {
+      try {
+        org.quartz.Scheduler scheduler = GrouperLoader.schedulerFactory().getScheduler();
+        for (Object keyObject : propertiesToImport.keySet()) {
+          String key = ((String) keyObject).trim();
+          String jobName = null;
+
+          Matcher changeLogMatcher = GrouperCheckConfig.grouperLoaderConsumerPattern.matcher(key);
+          if (changeLogMatcher.matches() && "class".equals(changeLogMatcher.group(2))) {
+            jobName = GrouperLoaderType.GROUPER_CHANGE_LOG_CONSUMER_PREFIX + changeLogMatcher.group(1);
+          }
+
+          Matcher otherJobMatcher = GrouperCheckConfig.grouperLoaderOtherJobPattern.matcher(key);
+          if (jobName == null && otherJobMatcher.matches() && "class".equals(otherJobMatcher.group(2))) {
+            jobName = GrouperLoaderType.GROUPER_OTHER_JOB_PREFIX + otherJobMatcher.group(1);
+          }
+
+          Matcher messagingMatcher = GrouperCheckConfig.messagingListenerConsumerPattern.matcher(key);
+          if (jobName == null && messagingMatcher.matches() && key.endsWith(".class")) {
+            jobName = GrouperLoaderType.GROUPER_MESSAGING_LISTENER_PREFIX + messagingMatcher.group(1);
+          }
+
+          if (jobName != null && !scheduler.checkExists(JobKey.jobKey(jobName))) {
+            hasUnscheduledLoaderJobs = true;
+            break;
+          }
+        }
+      } catch (Exception e) {
+        LOG.warn("Error checking scheduler for unscheduled loader jobs after config import", e);
+      }
+    }
+
+    // GRP-7347: this used to call buildConfigFileAndMetadata, which builds a gui object for every
+    // property in the file and renders the whole listing. The import response only reports counts,
+    // GRP-7351: an import reports counts, so it stays on the import screen and shows the summary
+    // rather than sending the browser on to the config listing. That listing is every documented
+    // property of the file, thousands of rows for a typical config file, which is a slow and not
+    // very useful confirmation that an import worked. Use the config files menu to go and look at
+    // the file if you want to. Keep the cache clear that buildConfigFileAndMetadata used to do up
+    // front, so whatever is viewed next sees the imported values.
+    // GRP-7346: clear only the config for the file that was imported. clearConfigsInMemory drops
+    // the database config cache, the config objects built from that file, and that file's entry in
+    // the text config cache. Without this the per property writes are scoped but the one clear at
+    // the end of the import would still throw away every other file's config.
+    GrouperConfigHibernate.clearConfigsInMemory(
+        configurationContainer.getConfigFileName() == null ? null : configurationContainer.getConfigFileName().getConfigFileName());
+
+    boolean success = configurationContainer.getCountSuccess() > 0 && configurationContainer.getCountWarning() == 0 && configurationContainer.getCountError() == 0;
+    boolean error = configurationContainer.getCountWarning() > 0 || configurationContainer.getCountError() > 0;
+
+    guiResponseJs.addAction(GuiScreenAction.newMessage(success ? GuiMessageType.success : (error ? GuiMessageType.error : GuiMessageType.info), message.toString()));
+    
+    if (hasUnscheduledLoaderJobs) {
+      guiResponseJs.addAction(GuiScreenAction.newMessageAppend(GuiMessageType.info, TextContainer.retrieveFromRequest().getText().get("configurationImportLoaderJobsWarning")));
+    }
+
+  }
+
+  /**
+   * @param message
+   * @param configFileName
+   * @param propertiesToImport
+   * @param fromUi true if from UI false if not from UI
+   */
+  public static void configurationfileImportSubmitHelper(StringBuilder message,
+      ConfigFileName configFileName, Properties propertiesToImport, boolean fromUi) {
+    
+    boolean newlyAssignedUseStaticRequestContainer = false;
+    if (!fromUi) {
+      newlyAssignedUseStaticRequestContainer = GrouperRequestContainer.assignUseStaticRequestContainer(true);
+    }
+    try {
+  
+      ConfigurationContainer configurationContainer = GrouperRequestContainer.retrieveFromRequestOrCreate().getConfigurationContainer();
+      
+      configurationContainer.setConfigFileName(configFileName);
+      
+      int countAdded = 0;
+      int countUpdated = 0;
+      int countProperties = 0;
+      int countSuccess = 0;
+      int countUnchanged = 0;
+      int countError = 0;
+      int countWarning = 0;
+  
+      Boolean[] added = new Boolean[1];
+      Boolean[] error = new Boolean[1];
+      
+      ConfigFileMetadata configFileMetadata = configFileName.configFileMetadata();
+      
+      Set<MultiKey> configFileNameAndKeys = new HashSet<MultiKey>();
+      // add all the possible ones
+      for (Object keyObject : propertiesToImport.keySet()) {
+      
+        String key = StringUtils.trim((String)keyObject);
+
+        MultiKey configFileNameAndKey = new MultiKey(configFileName.getConfigFileName(), key);
+        configFileNameAndKeys.add(configFileNameAndKey);
+
+      }
+
+      Map<String, Set<GrouperConfigHibernate>> keyToConfigHibernate = GrouperDAOFactory.getFactory().getConfig().findByFileAndKey(configFileNameAndKeys);
+      
+      // GRP-7298: import writes many properties; without this each write cleared the whole
+      // config cache and the next read rebuilt every config class. Batch the clears into one.
+      ConfigPropertiesCascadeBase.suppressClearCacheStart();
+
+      // GRP-7347: see IMPORT_SUMMARY_ONLY_THRESHOLD
+      boolean summarizeSuccesses = propertiesToImport.size() > IMPORT_SUMMARY_ONLY_THRESHOLD;
+
+      try {
+      for (Object keyObject : propertiesToImport.keySet()) {
+        try {
+        
+          countProperties++;
+          String key = (String)keyObject;
+          String value = propertiesToImport.getProperty(key);
+          key = StringUtils.trim(key);
+
+          String propertyNameString = GrouperUtil.stripSuffix(key, ".elConfig");
+          Set<GrouperConfigHibernate> grouperConfigHibernates = keyToConfigHibernate.get(propertyNameString);
+          
+          String propertyNameStringEl = propertyNameString + ".elConfig";
+          Set<GrouperConfigHibernate> grouperConfigHibernatesEl = keyToConfigHibernate.get(propertyNameStringEl);
+
+          // GRP-7347: collect this property's message on its own so it can be dropped when only the
+          // summary is wanted. A property that errored or warned is always kept, however big the import.
+          StringBuilder propertyMessage = new StringBuilder();
+
+          configurationFileAddEditHelper2(configFileName, configFileName.name(), configFileMetadata, key, 
+              Boolean.toString(key.endsWith(".elConfig")), value, null, propertyMessage, added, error, fromUi, null, grouperConfigHibernates, grouperConfigHibernatesEl);
+
+          if (!summarizeSuccesses || error[0] != null) {
+            message.append(propertyMessage);
+          }
+          
+          // added (first index) will be true if added, false if updated, and null if no change
+          if (added[0] == null) {
+            countUnchanged++;
+          } else if (added[0]) {
+            countAdded++;
+          } else {
+            countUpdated++;
+          }
+          
+          //fatalError true if fatal error, false if non fatal error, null if no error
+          if (error[0] == null) {
+            if (added[0] != null) {
+              countSuccess++;
+            }
+          } else if (error[0]) {
+            countError++;
+          } else {
+            countWarning++;
+          }
+        } catch (Exception e) {
+          final String errorHeader = "Error in import for key '" + keyObject + "': " + configFileName.getConfigFileName();
+          LOG.error(errorHeader, e);
+          message.append(errorHeader + "\n" + ExceptionUtils.getStackTrace(e));
+          countError++;
+        }
+        
+      }
+      } finally {
+        // stop suppression BEFORE clearing, or the clear would suppress itself
+        ConfigPropertiesCascadeBase.suppressClearCacheStop();
+        // single rebuild for the whole import, and in a finally so a failed or partial
+        // import can never leave a stale cache behind
+        ConfigPropertiesCascadeBase.clearCache();
+      }
+  
+      configurationContainer.setCountAdded(countAdded);
+      configurationContainer.setCountUpdated(countUpdated);
+      configurationContainer.setCountProperties(countProperties);
+      configurationContainer.setCountSuccess(countSuccess);
+      configurationContainer.setCountUnchanged(countUnchanged);
+      configurationContainer.setCountError(countError);
+      configurationContainer.setCountWarning(countWarning);
+  
+      // put this at the beginning
+      message.insert(0, TextContainer.retrieveFromRequest().getText().get("configurationFilesImportSummary") + "<br />");
+  
+      // replace newlines
+      if (!fromUi) {
+        String newMessage = message.toString().replace("<br />", "\n");
+        message.setLength(0);
+        message.append(newMessage);
+      }
+      
+      ConfigPropertiesCascadeBase.clearCache();
+      GrouperUiApiTextConfig.clearCache();
+
+    } finally {
+      if (newlyAssignedUseStaticRequestContainer && !fromUi) {
+        GrouperRequestContainer.assignUseStaticRequestContainer(false);
+      }
+    }
+      
+  }
+
+  /**
+   * 
+   * @param configFileString
+   * @param propertyNameString
+   * @param expressionLanguageString
+   * @param valueString
+   * @param userSelectedPassword
+   * @param message
+   * @param added (first index) will be true if added, false if updated, and null if no change
+   * @param error true if fatal error, false if warning, null if no error
+   * @param fromUi true if from UI false if not from UI
+   * @param comment notes about settings
+   * @return true if ok, false if not
+   */
+  public static boolean configurationFileAddEditHelper2(ConfigFileName configFileName, String configFileString, ConfigFileMetadata configFileMetadata, String propertyNameString,
+      String expressionLanguageString, String valueString, Boolean userSelectedPassword,
+      StringBuilder message, Boolean[] added, Boolean[] error, boolean fromUi, String comment,
+      final Set<GrouperConfigHibernate> grouperConfigHibernates, Set<GrouperConfigHibernate> grouperConfigHibernatesEl) {
+
+    GuiResponseJs guiResponseJs = fromUi ? GuiResponseJs.retrieveGuiResponseJs() : null;
+    
+    ConfigurationContainer configurationContainer = GrouperRequestContainer.retrieveFromRequestOrCreate().getConfigurationContainer();
+    
+    configurationContainer.setConfigFileName(configFileName);
+
+    List<String> errorsToDisplay = new ArrayList<String>();
+    Map<String, String> validationErrorsToDisplay = new LinkedHashMap<String, String>();
+    List<String> actionsPerformed = new ArrayList<String>();
+
+    boolean result = DbConfigEngine.configurationFileAddEditHelper2(configFileName, configFileString, configFileMetadata, propertyNameString, 
+        expressionLanguageString, valueString, userSelectedPassword, message, added, error, 
+        fromUi, comment, errorsToDisplay, validationErrorsToDisplay, true, actionsPerformed, grouperConfigHibernates, grouperConfigHibernatesEl);
+    
+    if (fromUi) {
+      for (String errorToDisplay: errorsToDisplay) {
+        guiResponseJs.addAction(GuiScreenAction.newMessageAppend(GuiMessageType.error, errorToDisplay));
+      }
+      for (String validationKey: validationErrorsToDisplay.keySet()) {
+        guiResponseJs.addAction(GuiScreenAction.newValidationMessage(GuiMessageType.error, validationKey, 
+            validationErrorsToDisplay.get(validationKey)));
+      }
+    }
+    return result;
+  } 
+  
+  
+  
+  private static boolean includeProperty(String filter, String configSource, GuiConfigProperty guiConfigProperty) {
+    
+    String sourceOfValue = guiConfigProperty.getValueFromWhere();
+    
+    if (StringUtils.isBlank(filter) && StringUtils.isBlank(configSource)) {
+      return true;
+    }
+    
+    if (StringUtils.isNotBlank(configSource)) {
+      if (configSource.equals("nonBase") && (sourceOfValue == null || sourceOfValue.endsWith("base.properties")) ) {
+        return false;
+      }
+      
+      if (configSource.equals("db") && (sourceOfValue == null || !sourceOfValue.equals("database")) ) {
+        return false;
+      }
+      
+      if (configSource.equals("nonBaseNonDb") && (sourceOfValue == null || sourceOfValue.endsWith("base.properties") || sourceOfValue.equals("database"))) {
+        return false;
+      }
+    }
+    
+    ConfigItemMetadata configItemMetadata = guiConfigProperty.getConfigItemMetadata();
+    
+    boolean found = false;
+    
+    if (configItemMetadata.getKeyOrSampleKey().toLowerCase().contains(filter.toLowerCase())) {
+      found = true;
+    }
+    
+    if (!found && guiConfigProperty.getPropertyValue() != null && guiConfigProperty.getPropertyValue().toLowerCase().contains(filter.toLowerCase())) {
+      found = true;
+    }
+    
+    if (!found && configItemMetadata.getComment() != null && configItemMetadata.getComment().toLowerCase().contains(filter.toLowerCase())) {
+      found = true;
+    }
+    
+    return found;
+  }
+  
+  /**
+   * 
+   */
+  private static void buildConfigFileAndMetadata(String filter, String configSource) {
+    
+    // GRP-7352: this used to clear the config caches first, to "get the latest and greatest".
+    // Those are JVM wide caches, so merely viewing a config screen threw away the configuration
+    // for every thread in this JVM and they all rebuilt it. It was also close to redundant: a
+    // config change here clears the caches itself, a change in another JVM arrives through
+    // GrouperCacheDatabase, and there is a periodic recheck besides. Anyone who knows config
+    // changed elsewhere and does not want to wait can use the Clear config cache action.
+    
+    ConfigurationContainer configurationContainer = GrouperRequestContainer.retrieveFromRequestOrCreate().getConfigurationContainer();
+    
+    ConfigFileName configFileName = configurationContainer.getConfigFileName();
+    
+    ConfigPropertiesCascadeBase configPropertiesCascadeBase = configurationContainer.getConfig();
+    
+    ConfigFileMetadata configFileMetadata = configFileName.configFileMetadata();
+ 
+    List<ConfigSectionMetadata> configSectionMetadatas = configFileMetadata.getConfigSectionMetadataList();
+    
+    GuiConfigFile guiConfigFile = new GuiConfigFile();
+    
+    guiConfigFile.setConfigPropertiesCascadeBase(configPropertiesCascadeBase);
+
+    // keep track of all properties so we can collate them with ad hoc properties
+    Map<String, GuiConfigProperty> keyNameToGuiProperty = new HashMap<String, GuiConfigProperty>();
+
+    // keep track of metadata vs gui objects so we can walk backward for ad hoc properties
+    Map<ConfigSectionMetadata, GuiConfigSection> sectionMetadataToSection = new HashMap<ConfigSectionMetadata, GuiConfigSection>();
+    
+    Set<GrouperConfigHibernate> grouperConfigHibernateSet = Hib3DAOFactory.getFactory().getConfig().findAll(configFileName, null, null);
+    
+    Map<String, GrouperConfigHibernate> grouperConfigHibernateMap = new HashMap<String, GrouperConfigHibernate>();
+    
+    for (GrouperConfigHibernate grouperConfigHibernate : GrouperUtil.nonNull(grouperConfigHibernateSet)) {
+      grouperConfigHibernateMap.put(grouperConfigHibernate.getConfigKey(), grouperConfigHibernate);
+    }
+    
+    for (ConfigSectionMetadata configSectionMetadata : configSectionMetadatas) {
+      
+      GuiConfigSection guiConfigSection = new GuiConfigSection();
+      guiConfigSection.setGuiConfigFile(guiConfigFile);
+      guiConfigSection.setConfigSectionMetadata(configSectionMetadata);
+      sectionMetadataToSection.put(configSectionMetadata, guiConfigSection);
+      
+      for (ConfigItemMetadata configItemMetadata : configSectionMetadata.getConfigItemMetadataList()) {
+        
+        GuiConfigProperty guiConfigProperty = new GuiConfigProperty();
+        keyNameToGuiProperty.put(configItemMetadata.getKeyOrSampleKey(), guiConfigProperty);
+        guiConfigProperty.setGuiConfigSection(guiConfigSection);
+        guiConfigProperty.setConfigItemMetadata(configItemMetadata);
+        
+        if (!includeProperty(filter, configSource, guiConfigProperty) ) {
+          continue;
+        }
+        
+        guiConfigSection.getGuiConfigProperties().add(guiConfigProperty);
+        
+        // see if the current database item has an encrypted value
+        GrouperConfigHibernate grouperConfigHibernate = grouperConfigHibernateMap.get(configItemMetadata.getKeyOrSampleKey());
+        if (grouperConfigHibernate != null && grouperConfigHibernate.isConfigEncrypted()) {
+          guiConfigProperty.setEncryptedInDatabase(true);
+        }
+      }
+      
+      guiConfigFile.getGuiConfigSections().add(guiConfigSection);
+    }
+    
+    configurationContainer.setGuiConfigFile(guiConfigFile);
+    
+    boolean addedRemainingConfigSection = false;
+    
+    if (!configFileName.isUseBaseForConfigFileMetadata()) {
+      return;
+    }
+    
+    Set<String> propertyNames = configPropertiesCascadeBase.propertyNames();
+    
+    lbl: for (String propertyName : propertyNames) {
+      if (keyNameToGuiProperty.containsKey(propertyName)) {
+        continue;
+      }
+      
+      // lets add one
+      GuiConfigProperty guiConfigProperty = new GuiConfigProperty();
+      {
+        ConfigItemMetadata configItemMetadata = new ConfigItemMetadata();
+        configItemMetadata.setKey(propertyName);
+
+        GrouperConfigHibernate grouperConfigHibernate = grouperConfigHibernateMap.get(configItemMetadata.getKeyOrSampleKey());
+        if (grouperConfigHibernate != null && grouperConfigHibernate.isConfigEncrypted()) {
+          guiConfigProperty.setEncryptedInDatabase(true);
+        }
+        
+        guiConfigProperty.setConfigItemMetadata(configItemMetadata);
+        
+      }
+      
+      // lets find a section
+      boolean foundSection = false;
+      OUTER: for (ConfigSectionMetadata configSectionMetadata : configSectionMetadatas) {
+        for (ConfigItemMetadata configItemMetadata : configSectionMetadata.getConfigItemMetadataList()) {
+          if (!StringUtils.isBlank(configItemMetadata.getRegex())) {
+            // GRP-7347: this sits in a triple nested loop over every ad hoc property, every
+            // section and every documented item, and these regexes come from static metadata, so
+            // compiling them here recompiled the same handful of patterns hundreds of thousands
+            // of times. GrouperUtil.patternCompile hands back a cached compiled Pattern.
+            Pattern pattern = GrouperUtil.patternCompile(configItemMetadata.getRegex());
+            Matcher matcher = pattern.matcher(propertyName);
+            if (matcher.matches()) {
+              GuiConfigSection guiConfigSection = sectionMetadataToSection.get(configSectionMetadata);
+              guiConfigProperty.setGuiConfigSection(guiConfigSection);
+              
+              if (!includeProperty(filter, configSource, guiConfigProperty) ) {
+                continue lbl;
+              }
+              
+              guiConfigSection.getGuiConfigProperties().add(guiConfigProperty);
+              foundSection = true;
+              break OUTER;
+            }
+          }
+        }
+      }
+      
+      if (!foundSection) {
+        if (!addedRemainingConfigSection) {
+          
+          GuiConfigSection guiConfigSection = new GuiConfigSection();
+          guiConfigSection.setGuiConfigFile(guiConfigFile);
+          List<GuiConfigProperty> guiConfigProperties = new ArrayList<GuiConfigProperty>();
+          guiConfigSection.setGuiConfigProperties(guiConfigProperties);
+          ConfigSectionMetadata configSectionMetadata = new ConfigSectionMetadata();
+          guiConfigSection.setConfigSectionMetadata(configSectionMetadata);
+          //TODO externalize
+          configSectionMetadata.setTitle("Remaining config");
+          configSectionMetadata.setComment("Any configuration not in another section");
+          addedRemainingConfigSection = true;
+          guiConfigFile.getGuiConfigSections().add(guiConfigSection);
+        }
+        
+        GuiConfigSection guiConfigSection = guiConfigFile.getGuiConfigSections().get(guiConfigFile.getGuiConfigSections().size()-1);
+        guiConfigProperty.setGuiConfigSection(guiConfigSection);
+        if (!includeProperty(filter, configSource, guiConfigProperty) ) {
+          continue lbl;
+        }
+        guiConfigSection.getGuiConfigProperties().add(guiConfigProperty);
+        
+      }
+    }
+  }  
+}

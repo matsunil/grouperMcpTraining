@@ -1,0 +1,49 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>edu.internet2.middleware.grouper</groupId>
+  <artifactId>grouper-container</artifactId>
+  <version>7.0.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+  <name>grouper-container</name>
+
+  <repositories>
+    <repository>
+      <id>central</id>
+      <url>https://repo1.maven.org/maven2</url>
+    </repository>
+    <repository>
+      <id>nexus-releases</id>
+      <url>https://oss.sonatype.org/content/repositories/releases/</url>
+    </repository>
+  </repositories>
+  <properties>
+    <!-- keep in sync with netty.version in grouper-parent/pom.xml (GRP-7504) -->
+    <netty.version>4.2.19.Final</netty.version>
+  </properties>
+
+  <!-- GRP-7504: this pom does not inherit grouper-parent, and Maven does not apply the dependency management of a
+       dependency's pom to its transitives, so import the netty BOM here too.  Otherwise the image gets netty 4.1.72
+       (qpid-jms-client), 4.1.135 (ldaptive) and 4.2.18 (amqp-client) mixed together -->
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>io.netty</groupId>
+        <artifactId>netty-bom</artifactId>
+        <version>${netty.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <!-- Pass in Maven command line parameter -Dgrouper.version=a.b.c ... -->
+  <dependencies>
+    <dependency>
+      <groupId>${project.groupId}</groupId>
+      <artifactId>grouper-ui</artifactId>
+      <version>${grouper.version}</version>
+    </dependency>
+  </dependencies>
+
+</project>

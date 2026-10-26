@@ -1,0 +1,64 @@
+Internet2 Grouper Project
+=========================
+
+http://www.internet2.edu/products-services/trust-identity-middleware/grouper/
+
+## Introduction
+
+Grouper is an enterprise access management system designed for the highly distributed management environment and heterogeneous information technology environment common to Universities. Operating a central access management system that supports both central and distributed IT reduces risk.
+
+### Why Use Grouper?
+- Coordinated Collaboration Grouper helps collaboration happen. You can set up groups, roles, and permissions for many purposes, such as populating and administering standing committees, ad hoc research teams, departments, or classes. Key collaborative applications -- mailing lists, wikis, calendars, etc. -- can use this group, role, and permission information to make authorization decisions.
+- Single Point of Control When using Grouper, once a person is added or removed from a group, the group-related privileges are automatically updated in all of your collaborative applications. Grouper allows efficient management of the membership roster at a single point.
+- Who Can Use Grouper? Anyone needing to manage group access to resources can use Grouper -- from accountants to zoologists. A researcher might create a group and enable members to participate on an email list or view a web site. Students might use Grouper to set up and manage groups for similar applications as they work together on shared projects and class work. Your IT staff can delegate group management and enable those leading collaborations to set up and manage their own groups.
+
+## Download
+
+Grouper releases can be downloaded from [here](https://docs.grouper.internet2.edu/wiki/spaces/Grouper/overview).
+
+## Documentation
+
+* Grouper wiki is available [here](https://docs.grouper.internet2.edu/wiki/spaces/Grouper/overview).
+* API documentation is available [here](https://software.internet2.edu/grouper/doc/).
+* Issue tracking system is available [here](https://bugs.internet2.edu/jira/browse/GRP).
+
+## AI assistant skills
+
+Shared AI skills for Grouper development (cherry-picking between branches, DDL changes,
+MCP tools, new provisioners, Jira/wiki edits, releases) are version-controlled in
+[grouper-misc/grouper-docs/skills](grouper-misc/grouper-docs/skills/README.md). Symlink
+them into `~/.claude/skills/` (rather than copying) so they stay current as you pull, and
+edit them in the repo so improvements are shared. See that README for setup.
+
+## Build [![Build Status](https://api.travis-ci.org/Internet2/grouper.png)](http://travis-ci.org/Internet2/grouper)
+
+Clone the repository and execute the build via:
+
+```bash
+git clone git@github.com:Internet2/grouper.git
+cd grouper-parent
+mvn clean package
+```
+
+### Documentation
+To build the project documentation, execute the following:
+
+```bash
+cd grouper-parent
+mvn site site:deploy
+cd /tmp/grouper-parent
+[launch] index.html
+```
+
+## Profiling
+
+The Grouper development team uses [YourKit Java Profiler](https://www.yourkit.com/java/profiler/)
+to find and fix performance issues in Grouper.
+
+![YourKit logo](https://www.yourkit.com/images/yklogo.png)
+
+YourKit supports open source projects with innovative and intelligent tools for monitoring
+and profiling Java and .NET applications. YourKit is the creator of
+[YourKit Java Profiler](https://www.yourkit.com/java/profiler/),
+[YourKit .NET Profiler](https://www.yourkit.com/dotnet-profiler/), and
+[YourKit YouMonitor](https://www.yourkit.com/youmonitor/).

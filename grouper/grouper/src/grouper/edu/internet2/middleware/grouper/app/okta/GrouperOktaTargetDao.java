@@ -1,0 +1,905 @@
+package edu.internet2.middleware.grouper.app.okta;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import org.apache.commons.lang3.StringUtils;
+
+import edu.internet2.middleware.grouper.app.provisioning.GrouperProvisioningConfigurationAttributeDbCache;
+import edu.internet2.middleware.grouper.app.provisioning.GrouperProvisioningConfigurationAttributeDbCacheSource;
+import edu.internet2.middleware.grouper.app.provisioning.GrouperProvisioningConfigurationAttributeDbCacheType;
+import edu.internet2.middleware.grouper.app.provisioning.GrouperProvisioningLists;
+import edu.internet2.middleware.grouper.app.provisioning.ProvisioningEntity;
+import edu.internet2.middleware.grouper.app.provisioning.ProvisioningGroup;
+import edu.internet2.middleware.grouper.app.provisioning.ProvisioningGroupWrapper;
+import edu.internet2.middleware.grouper.app.provisioning.ProvisioningMembership;
+import edu.internet2.middleware.grouper.app.provisioning.ProvisioningObjectChange;
+import edu.internet2.middleware.grouper.app.provisioning.ProvisioningObjectChangeAction;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.GrouperProvisionerDaoCapabilities;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.GrouperProvisioningTargetDaoPerItemLogic;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.GrouperProvisionerTargetDaoBase;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoDeleteEntityRequest;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoDeleteEntityResponse;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoDeleteGroupRequest;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoDeleteGroupResponse;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoDeleteMembershipRequest;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoDeleteMembershipResponse;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoInsertEntityRequest;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoInsertEntityResponse;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoInsertGroupRequest;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoInsertGroupResponse;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoInsertMembershipRequest;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoInsertMembershipResponse;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveAllDataRequest;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveAllDataResponse;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveAllEntitiesRequest;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveAllEntitiesResponse;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveAllGroupsRequest;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveAllGroupsResponse;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveEntityRequest;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveEntityResponse;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveGroupRequest;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveGroupResponse;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveGroupsRequest;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveGroupsResponse;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveMembershipsByEntityRequest;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveMembershipsByEntityResponse;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveMembershipsByGroupRequest;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveMembershipsByGroupResponse;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoTimingInfo;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoUpdateEntityRequest;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoUpdateEntityResponse;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoUpdateGroupRequest;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoUpdateGroupResponse;
+import edu.internet2.middleware.grouper.util.GrouperHttpClient;
+import edu.internet2.middleware.grouper.util.GrouperHttpClientLog;
+import edu.internet2.middleware.grouper.util.GrouperUtil;
+import edu.internet2.middleware.grouperClient.jdbc.tableSync.GcGrouperSyncErrorCode;
+import edu.internet2.middleware.grouperClient.jdbc.tableSync.GcGrouperSyncGroup;
+
+public class GrouperOktaTargetDao extends GrouperProvisionerTargetDaoBase {
+  
+  @Override
+  public boolean loggingStart() {
+    return GrouperHttpClient.logStart(new GrouperHttpClientLog());
+  }
+
+  @Override
+  public String loggingStop() {
+    return GrouperHttpClient.logEnd();
+  }
+  
+  @Override
+  public TargetDaoInsertGroupResponse insertGroup(TargetDaoInsertGroupRequest targetDaoInsertGroupRequest) {
+    long startNanos = System.nanoTime();
+    ProvisioningGroup targetGroup = targetDaoInsertGroupRequest.getTargetGroup();
+
+    try {
+      GrouperOktaConfiguration oktaConfiguration = (GrouperOktaConfiguration) this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration();
+      
+      // lets make sure we are doing the right thing
+      Set<String> fieldNamesToInsert = new HashSet<String>();
+
+      for (ProvisioningObjectChange provisioningObjectChange : GrouperUtil.nonNull(targetGroup.getInternal_objectChanges())) {
+        String fieldName = provisioningObjectChange.getAttributeName();
+        if (provisioningObjectChange.getProvisioningObjectChangeAction() == ProvisioningObjectChangeAction.insert) {
+          fieldNamesToInsert.add(fieldName);
+        }
+      }
+      
+      fieldNamesToInsert.add("defaultMessageDenyNotificationText");
+      fieldNamesToInsert.add("handleDeletedGroup");
+      fieldNamesToInsert.add("messageModerationLevel");
+      fieldNamesToInsert.add("replyTo");
+      fieldNamesToInsert.add("sendMessageDenyNotification");
+      fieldNamesToInsert.add("spamModerationLevel");
+      
+      GrouperOktaGroup grouperOktaGroup = GrouperOktaGroup.fromProvisioningGroup(targetGroup, null);
+      
+      GrouperOktaGroup createdGAG = GrouperOktaApiCommands.createOktaGroup(oktaConfiguration.getOktaExternalSystemConfigId(), grouperOktaGroup, fieldNamesToInsert);
+
+      targetGroup.setId(createdGAG.getId());
+      targetGroup.setProvisioned(true);
+
+      for (ProvisioningObjectChange provisioningObjectChange : GrouperUtil.nonNull(targetGroup.getInternal_objectChanges())) {
+        provisioningObjectChange.setProvisioned(true);
+      }
+
+      return new TargetDaoInsertGroupResponse();
+    } catch (Exception e) {
+      targetGroup.setProvisioned(false);
+      for (ProvisioningObjectChange provisioningObjectChange : GrouperUtil.nonNull(targetGroup.getInternal_objectChanges())) {
+        provisioningObjectChange.setProvisioned(false);
+      }
+      
+      throw e;
+    } finally {
+      this.addTargetDaoTimingInfo(new TargetDaoTimingInfo("insertGroup", startNanos));
+    }
+  }
+  
+  @Override
+  public TargetDaoRetrieveAllGroupsResponse retrieveAllGroups(TargetDaoRetrieveAllGroupsRequest targetDaoRetrieveAllGroupsRequest) {
+
+    long startNanos = System.nanoTime();
+
+    try {
+
+      GrouperOktaConfiguration oktaConfiguration = (GrouperOktaConfiguration) this
+          .getGrouperProvisioner().retrieveGrouperProvisioningConfiguration();
+
+      List<ProvisioningGroup> results = new ArrayList<ProvisioningGroup>();
+
+      List<GrouperOktaGroup> grouperOktaGroups = GrouperOktaApiCommands.retrieveOktaGroups(oktaConfiguration.getOktaExternalSystemConfigId(),
+          null, null);
+
+      for (GrouperOktaGroup grouperOktaGroup : grouperOktaGroups) {
+        ProvisioningGroup targetGroup = grouperOktaGroup.toProvisioningGroup();
+        results.add(targetGroup);
+        // generic provisioner sync back: native group capture now happens in
+        // GrouperOktaApiCommands.retrieveOktaGroups from the raw JSON (full fidelity), not here.
+      }
+
+      return new TargetDaoRetrieveAllGroupsResponse(results);
+    } finally {
+      this.addTargetDaoTimingInfo(
+          new TargetDaoTimingInfo("retrieveAllGroups", startNanos));
+    }
+  }
+  
+  @Override
+  public TargetDaoRetrieveAllDataResponse retrieveAllData(TargetDaoRetrieveAllDataRequest targetDaoRetrieveAllDataRequest) {
+    
+    TargetDaoRetrieveAllDataResponse targetDaoRetrieveAllDataResponse = new TargetDaoRetrieveAllDataResponse();
+    
+    GrouperProvisioningLists targetData = new GrouperProvisioningLists();
+    
+    targetDaoRetrieveAllDataResponse.setTargetData(targetData);
+    
+    long startNanos = System.nanoTime();
+
+    try {
+      GrouperOktaConfiguration oktaConfiguration = (GrouperOktaConfiguration) this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration();
+      
+      // GRP-7048: when fullSyncGroupsFromSyncBack is on, the framework asks us to skip the group
+      // pull (retrieveGroups=false) and seeds groups from the cache. This is only requested when
+      // memberships are ALSO from cache (both-or-neither), so the per-group member iteration below
+      // -- which needs grouperOktaGroups -- is skipped too, and an empty group list here is safe.
+      boolean retrieveGroups = targetDaoRetrieveAllDataRequest == null || targetDaoRetrieveAllDataRequest.isRetrieveGroups();
+
+      List<ProvisioningGroup> targetGroups = new ArrayList<ProvisioningGroup>();
+      List<GrouperOktaGroup> grouperOktaGroups = new ArrayList<GrouperOktaGroup>();
+      if (retrieveGroups) {
+        edu.internet2.middleware.grouper.util.GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "oktaRetrieveAllGroupsApiCall", 1);
+        grouperOktaGroups = GrouperOktaApiCommands.retrieveOktaGroups(oktaConfiguration.getOktaExternalSystemConfigId(),
+            null, null);
+        for (GrouperOktaGroup grouperOktaGroup : grouperOktaGroups) {
+          ProvisioningGroup targetGroup = grouperOktaGroup.toProvisioningGroup();
+          targetGroups.add(targetGroup);
+          // generic provisioner sync back: native group capture now happens in
+          // GrouperOktaApiCommands.retrieveOktaGroups from the raw JSON (full fidelity), not here.
+        }
+      }
+      targetData.setProvisioningGroups(targetGroups);
+
+      // GRP-7048: when fullSyncUsersFromSyncBack is on, the framework asks us to skip the user
+      // pull (retrieveEntities=false); it seeds the target users from the sync-back cache instead.
+      // In that case we also skip the per-membership missing-user lookup below -- with no users
+      // retrieved, every membership user would otherwise be "missing" and fetched one by one.
+      boolean retrieveEntities = targetDaoRetrieveAllDataRequest == null || targetDaoRetrieveAllDataRequest.isRetrieveEntities();
+
+      List<ProvisioningEntity> targetEntities = new ArrayList<ProvisioningEntity>();
+      if (retrieveEntities) {
+        // GRP-7048: counter so tests (and diagnostics) can confirm the bulk user pull ran or was
+        // skipped when resolving users from the sync-back cache
+        edu.internet2.middleware.grouper.util.GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "oktaRetrieveAllUsersApiCall", 1);
+        List<GrouperOktaUser> oktaUsers = GrouperOktaApiCommands.retrieveOktaUsers(oktaConfiguration.getOktaExternalSystemConfigId());
+        for (GrouperOktaUser oktaUser: oktaUsers) {
+          targetEntities.add(oktaUser.toProvisioningEntity());
+          // generic provisioner sync back: native user capture now happens in
+          // GrouperOktaApiCommands.retrieveOktaUsers from the raw JSON (full fidelity), not here.
+        }
+      }
+      targetData.setProvisioningEntities(targetEntities);
+
+      // GRP-7048: when fullSyncMembershipsFromSyncBack is on, the framework asks us to skip the
+      // (expensive) per-group member iteration (retrieveMemberships=false); it seeds the target
+      // memberships from the sync-back cache instead.
+      boolean retrieveMemberships = targetDaoRetrieveAllDataRequest == null || targetDaoRetrieveAllDataRequest.isRetrieveMemberships();
+
+      List<ProvisioningMembership> targetMemberships = new ArrayList<>();
+
+      if (retrieveMemberships) {
+        // counter so tests (and diagnostics) can confirm the per-group member iteration ran or was
+        // skipped when resolving memberships from the sync-back cache
+        edu.internet2.middleware.grouper.util.GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "oktaRetrieveMembershipsApiCall", 1);
+
+        // Each group's member fetch is an independent Okta API call keyed only on the group id, so
+        // run them across the provisioner thread pool (threadPoolSize) instead of a single thread.
+        // Falls back to inline when the pool is not enabled (threadPoolSize <= 1). The shared
+        // membership list is synchronized here; the native sync-back capture is already synchronized
+        // internally and the current-provisioner thread-local propagates via GrouperCallable.
+        final GrouperOktaConfiguration oktaConfigurationFinal = oktaConfiguration;
+        final List<ProvisioningMembership> targetMembershipsSynchronized = Collections.synchronizedList(targetMemberships);
+        this.retrievePerItemInParallel(grouperOktaGroups, "retrieveOktaGroupMembers",
+            new GrouperProvisioningTargetDaoPerItemLogic<GrouperOktaGroup>() {
+
+              @Override
+              public void processItem(GrouperOktaGroup grouperOktaGroup) {
+                Set<String> groupMemberIds = GrouperOktaApiCommands.retrieveOktaGroupMembers(
+                    oktaConfigurationFinal.getOktaExternalSystemConfigId(), grouperOktaGroup.getId());
+
+                List<ProvisioningMembership> membershipsForGroup = new ArrayList<ProvisioningMembership>(groupMemberIds.size());
+                for (String groupMemberId : groupMemberIds) {
+                  ProvisioningMembership provisioningMembership = new ProvisioningMembership(false);
+                  provisioningMembership.setProvisioningGroupId(grouperOktaGroup.getId());
+                  provisioningMembership.setProvisioningEntityId(groupMemberId);
+                  membershipsForGroup.add(provisioningMembership);
+                }
+                targetMembershipsSynchronized.addAll(membershipsForGroup);
+
+                // generic provisioner sync back: capture (groupId, userId) pairs for this group
+                GrouperOktaProvisioningTargetNativeSync.captureMembershipsForGroupForCurrentProvisioner(
+                    grouperOktaGroup.getId(), groupMemberIds);
+              }
+            });
+      }
+      
+      targetData.setProvisioningMemberships(targetMemberships);
+
+      // collect all entity IDs from the paged user search
+      Set<String> retrievedEntityIds = new HashSet<String>();
+      for (ProvisioningEntity targetEntity : targetEntities) {
+        retrievedEntityIds.add(targetEntity.getId());
+      }
+
+      // find membership user IDs not found in the paged user results
+      Set<String> missingEntityIds = new HashSet<String>();
+      for (ProvisioningMembership targetMembership : targetMemberships) {
+        String entityId = targetMembership.getProvisioningEntityId();
+        if (!retrievedEntityIds.contains(entityId)) {
+          missingEntityIds.add(entityId);
+        }
+      }
+
+      // look up each missing user individually by okta id (skipped when the framework will seed
+      // users from the sync-back cache -- see retrieveEntities guard above)
+      if (retrieveEntities && missingEntityIds.size() > 0) {
+        for (String missingEntityId : missingEntityIds) {
+          GrouperOktaUser oktaUser = GrouperOktaApiCommands.retrieveOktaUserById(oktaConfiguration.getOktaExternalSystemConfigId(), missingEntityId);
+          if (oktaUser != null) {
+            targetEntities.add(oktaUser.toProvisioningEntity());
+            // generic provisioner sync back: native user capture now happens in
+            // GrouperOktaApiCommands.retrieveOktaUserById from the raw JSON (full fidelity), not here.
+          }
+        }
+      }
+
+      return targetDaoRetrieveAllDataResponse;
+    } finally {
+      this.addTargetDaoTimingInfo(new TargetDaoTimingInfo("retrieveAllData", startNanos));
+    }
+    
+  }
+  
+  @Override
+  public TargetDaoRetrieveAllEntitiesResponse retrieveAllEntities(
+      TargetDaoRetrieveAllEntitiesRequest targetDaoRetrieveAllEntitiesRequest) {
+
+    long startNanos = System.nanoTime();
+
+    try {
+
+      GrouperOktaConfiguration oktaConfiguration = (GrouperOktaConfiguration) this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration();
+
+      List<ProvisioningEntity> results = new ArrayList<ProvisioningEntity>();
+
+      List<GrouperOktaUser> grouperOktaUsers = GrouperOktaApiCommands.retrieveOktaUsers(oktaConfiguration.getOktaExternalSystemConfigId());
+
+      for (GrouperOktaUser grouperOktaUser : grouperOktaUsers) {
+        ProvisioningEntity targetEntity = grouperOktaUser.toProvisioningEntity();
+        results.add(targetEntity);
+        // generic provisioner sync back: native user capture now happens in
+        // GrouperOktaApiCommands.retrieveOktaUsers from the raw JSON (full fidelity), not here.
+      }
+
+      return new TargetDaoRetrieveAllEntitiesResponse(results);
+    } finally {
+      this.addTargetDaoTimingInfo(
+          new TargetDaoTimingInfo("retrieveAllEntities", startNanos));
+    }
+  }
+  
+  @Override
+  public TargetDaoRetrieveGroupResponse retrieveGroup(TargetDaoRetrieveGroupRequest targetDaoRetrieveGroupRequest) {
+
+    long startNanos = System.nanoTime();
+
+    try {
+      GrouperOktaConfiguration oktaConfiguration = (GrouperOktaConfiguration) this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration();
+
+      GrouperOktaGroup grouperOktaGroup = null;
+
+      String attributeValue = GrouperUtil.stringValue(targetDaoRetrieveGroupRequest.getSearchAttributeValue());
+      
+      if (StringUtils.equals("id", targetDaoRetrieveGroupRequest.getSearchAttribute())) {
+        grouperOktaGroup = GrouperOktaApiCommands.retrieveOktaGroup(oktaConfiguration.getOktaExternalSystemConfigId(), 
+            attributeValue);
+      } else if (StringUtils.equals("name", targetDaoRetrieveGroupRequest.getSearchAttribute())) {
+      
+        if (StringUtils.isNotBlank(attributeValue)) {
+          List<GrouperOktaGroup> oktaGroups = GrouperOktaApiCommands.retrieveOktaGroups(oktaConfiguration.getOktaExternalSystemConfigId(),
+              "profile.name", attributeValue);
+          if (oktaGroups.size() == 1) {
+            grouperOktaGroup = oktaGroups.get(0);
+          } else if (oktaGroups.size() > 1) {
+            throw new RuntimeException("There are "+oktaGroups.size()+ " groups found for name: "+attributeValue);
+          }
+        
+        }
+      }
+
+      ProvisioningGroup targetGroup = grouperOktaGroup == null ? null : grouperOktaGroup.toProvisioningGroup();
+
+      // generic provisioner sync back: native group capture for this scoped retrieve path (used by
+      // !selectAllGroups and incremental) now happens in GrouperOktaApiCommands.retrieveOktaGroup /
+      // retrieveOktaGroups from the raw JSON (full fidelity), not here.
+
+      return new TargetDaoRetrieveGroupResponse(targetGroup);
+
+    } finally {
+      this.addTargetDaoTimingInfo(new TargetDaoTimingInfo("retrieveGroup", startNanos));
+    }
+  }
+  
+  @Override
+  public TargetDaoRetrieveEntityResponse retrieveEntity(TargetDaoRetrieveEntityRequest targetDaoRetrieveEntityRequest) {
+
+    long startNanos = System.nanoTime();
+
+    try {
+      GrouperOktaConfiguration oktaConfiguration = (GrouperOktaConfiguration) this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration();
+
+      ProvisioningEntity grouperTargetEntity = targetDaoRetrieveEntityRequest.getTargetEntity();
+
+      GrouperOktaUser grouperOktaUser = null;
+
+      String attributeValue = GrouperUtil.stringValue(targetDaoRetrieveEntityRequest.getSearchAttributeValue());
+      
+      if (StringUtils.equals("id", targetDaoRetrieveEntityRequest.getSearchAttribute())) {
+        grouperOktaUser = GrouperOktaApiCommands.retrieveOktaUser(oktaConfiguration.getOktaExternalSystemConfigId(), 
+            "id", attributeValue);
+      } else if (StringUtils.equals("login", targetDaoRetrieveEntityRequest.getSearchAttribute())) {
+        grouperOktaUser = GrouperOktaApiCommands.retrieveOktaUser(oktaConfiguration.getOktaExternalSystemConfigId(), 
+            "profile.login", attributeValue);
+      } else if (StringUtils.startsWith(targetDaoRetrieveEntityRequest.getSearchAttribute(), "profile.")) {
+        grouperOktaUser = GrouperOktaApiCommands.retrieveOktaUser(oktaConfiguration.getOktaExternalSystemConfigId(), 
+            targetDaoRetrieveEntityRequest.getSearchAttribute(), attributeValue);
+      } else if (StringUtils.isNotBlank(grouperTargetEntity.getId())) {
+        grouperOktaUser = GrouperOktaApiCommands.retrieveOktaUser(
+            oktaConfiguration.getOktaExternalSystemConfigId(), "id", grouperTargetEntity.getId());
+      }
+
+      ProvisioningEntity targetEntity = grouperOktaUser == null ? null: grouperOktaUser.toProvisioningEntity();
+
+      // generic provisioner sync back: native user capture for this scoped retrieve path (used by
+      // !selectAllEntities and incremental) now happens in GrouperOktaApiCommands.retrieveOktaUser /
+      // retrieveOktaUserById from the raw JSON (full fidelity), not here.
+
+      return new TargetDaoRetrieveEntityResponse(targetEntity);
+    } finally {
+      this.addTargetDaoTimingInfo(new TargetDaoTimingInfo("retrieveEntity", startNanos));
+    }
+  }
+  
+  @Override
+  public TargetDaoInsertEntityResponse insertEntity(TargetDaoInsertEntityRequest targetDaoInsertEntityRequest) {
+    long startNanos = System.nanoTime();
+    ProvisioningEntity targetEntity = targetDaoInsertEntityRequest.getTargetEntity();
+
+    try {
+      GrouperOktaConfiguration oktaConfiguration = (GrouperOktaConfiguration) this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration();
+      
+      GrouperOktaUser grouperOktaUser = GrouperOktaUser.fromProvisioningEntity(targetEntity, null);
+      
+      GrouperOktaUser createdOktaUser = GrouperOktaApiCommands.createOktaUser(oktaConfiguration.getOktaExternalSystemConfigId(), grouperOktaUser);
+
+      targetEntity.setId(createdOktaUser.getId());
+      targetEntity.setProvisioned(true);
+
+      for (ProvisioningObjectChange provisioningObjectChange : GrouperUtil.nonNull(targetEntity.getInternal_objectChanges())) {
+        provisioningObjectChange.setProvisioned(true);
+      }
+
+      return new TargetDaoInsertEntityResponse();
+    } catch (Exception e) {
+      targetEntity.setProvisioned(false);
+      for (ProvisioningObjectChange provisioningObjectChange : GrouperUtil.nonNull(targetEntity.getInternal_objectChanges())) {
+        provisioningObjectChange.setProvisioned(false);
+      }
+      
+      throw e;
+    } finally {
+      this.addTargetDaoTimingInfo(new TargetDaoTimingInfo("insertEntity", startNanos));
+    }
+  }
+  
+  @Override
+  public TargetDaoInsertMembershipResponse insertMembership(TargetDaoInsertMembershipRequest targetDaoInsertMembershipRequest) {
+    long startNanos = System.nanoTime();
+    ProvisioningMembership targetMembership = targetDaoInsertMembershipRequest.getTargetMembership();
+
+    try {
+      GrouperOktaConfiguration oktaConfiguration = (GrouperOktaConfiguration) this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration();
+
+      boolean success = GrouperOktaApiCommands.createOktaMembership(oktaConfiguration.getOktaExternalSystemConfigId(),
+          targetMembership.getProvisioningGroupId(), targetMembership.getProvisioningEntityId());
+
+      if (!success) {
+        this.getGrouperProvisioner().retrieveGrouperProvisioningValidation().assignMembershipError(
+            targetMembership.getProvisioningMembershipWrapper(), GcGrouperSyncErrorCode.DNE,
+            "User is not in active status in Okta (groupId '" + targetMembership.getProvisioningGroupId()
+                + "', entityId '" + targetMembership.getProvisioningEntityId() + "')");
+        return new TargetDaoInsertMembershipResponse();
+      }
+
+      targetMembership.setProvisioned(true);
+      for (ProvisioningObjectChange provisioningObjectChange : GrouperUtil.nonNull(targetMembership.getInternal_objectChanges())) {
+        provisioningObjectChange.setProvisioned(true);
+      }
+
+      // generic provisioner sync back: track this add in the native membership mirror (no re-read).
+      // Keeps grouper_prov_mship current when the per-group member read is skipped (memberships served
+      // from the sync-back cache during full sync).
+      GrouperOktaProvisioningTargetNativeSync.captureMembershipInsertFromCurrentProvisioner(
+          targetMembership.getProvisioningGroupId(), targetMembership.getProvisioningEntityId());
+
+      return new TargetDaoInsertMembershipResponse();
+    } catch (Exception e) {
+      targetMembership.setProvisioned(false);
+      for (ProvisioningObjectChange provisioningObjectChange : GrouperUtil.nonNull(targetMembership.getInternal_objectChanges())) {
+        provisioningObjectChange.setProvisioned(false);
+      }
+      
+      throw e;
+    } finally {
+      this.addTargetDaoTimingInfo(new TargetDaoTimingInfo("insertMembership", startNanos));
+    }
+  }
+  
+  @Override
+  public TargetDaoDeleteEntityResponse deleteEntity(TargetDaoDeleteEntityRequest targetDaoDeleteEntityRequest) {
+
+    long startNanos = System.nanoTime();
+    ProvisioningEntity targetEntity = targetDaoDeleteEntityRequest.getTargetEntity();
+
+    try {
+      GrouperOktaConfiguration oktaConfiguration = (GrouperOktaConfiguration) this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration();
+
+      GrouperOktaUser grouperOktaUser = GrouperOktaUser.fromProvisioningEntity(targetEntity, null);
+      
+      GrouperOktaApiCommands.deleteOktaUser(oktaConfiguration.getOktaExternalSystemConfigId(), grouperOktaUser.getId());
+
+      targetEntity.setProvisioned(true);
+      for (ProvisioningObjectChange provisioningObjectChange : GrouperUtil.nonNull(targetEntity.getInternal_objectChanges())) {
+        provisioningObjectChange.setProvisioned(true);
+      }
+      
+      return new TargetDaoDeleteEntityResponse();
+    } catch (Exception e) {
+      targetEntity.setProvisioned(false);
+      for (ProvisioningObjectChange provisioningObjectChange : GrouperUtil.nonNull(targetEntity.getInternal_objectChanges())) {
+        provisioningObjectChange.setProvisioned(false);
+      }
+      throw e;
+    } finally {
+      this.addTargetDaoTimingInfo(new TargetDaoTimingInfo("deleteEntity", startNanos));
+    }
+  }
+  
+  @Override
+  public TargetDaoDeleteGroupResponse deleteGroup(TargetDaoDeleteGroupRequest targetDaoDeleteGroupRequest) {
+    
+    long startNanos = System.nanoTime();
+    ProvisioningGroup targetGroup = targetDaoDeleteGroupRequest.getTargetGroup();
+
+    try {
+      GrouperOktaConfiguration oktaConfiguration = (GrouperOktaConfiguration) this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration();
+
+      GrouperOktaGroup grouperOktaGroup = GrouperOktaGroup.fromProvisioningGroup(targetGroup, null);
+      
+      GrouperOktaApiCommands.deleteOktaGroup(oktaConfiguration.getOktaExternalSystemConfigId(), grouperOktaGroup.getId());
+
+      targetGroup.setProvisioned(true);
+      for (ProvisioningObjectChange provisioningObjectChange : GrouperUtil.nonNull(targetGroup.getInternal_objectChanges())) {
+        provisioningObjectChange.setProvisioned(true);
+      }
+      
+      return new TargetDaoDeleteGroupResponse();
+    } catch (Exception e) {
+      targetGroup.setProvisioned(false);
+      for (ProvisioningObjectChange provisioningObjectChange : GrouperUtil.nonNull(targetGroup.getInternal_objectChanges())) {
+        provisioningObjectChange.setProvisioned(false);
+      }
+      throw e;
+    } finally {
+      this.addTargetDaoTimingInfo(new TargetDaoTimingInfo("deleteGroup", startNanos));
+    }
+  }
+  
+  public TargetDaoDeleteMembershipResponse deleteMembership(TargetDaoDeleteMembershipRequest targetDaoDeleteMembershipRequest) {
+    long startNanos = System.nanoTime();
+    
+    ProvisioningMembership targetMembership = targetDaoDeleteMembershipRequest.getTargetMembership();
+
+    try {
+      GrouperOktaConfiguration oktaConfiguration = (GrouperOktaConfiguration) this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration();
+
+      GrouperOktaApiCommands.deleteOktaMembership(oktaConfiguration.getOktaExternalSystemConfigId(),
+          targetMembership.getProvisioningGroupId(), targetMembership.getProvisioningEntityId());
+
+      targetMembership.setProvisioned(true);
+      for (ProvisioningObjectChange provisioningObjectChange : GrouperUtil.nonNull(targetMembership.getInternal_objectChanges())) {
+        provisioningObjectChange.setProvisioned(true);
+      }
+
+      // generic provisioner sync back: drop this membership from the native mirror so the end-of-run
+      // flush deletes its grouper_prov_mship row (keeps the cache current with the per-group member
+      // read skipped -- memberships served from the sync-back cache during full sync).
+      GrouperOktaProvisioningTargetNativeSync.captureMembershipDeleteFromCurrentProvisioner(
+          targetMembership.getProvisioningGroupId(), targetMembership.getProvisioningEntityId());
+
+      return new TargetDaoDeleteMembershipResponse();
+    } catch (Exception e) {
+      targetMembership.setProvisioned(false);
+      for (ProvisioningObjectChange provisioningObjectChange : GrouperUtil.nonNull(targetMembership.getInternal_objectChanges())) {
+        provisioningObjectChange.setProvisioned(false);
+      }
+      throw new RuntimeException("Failed to delete Okta group member (groupId '" + targetMembership.getProvisioningGroupId() + "', member '" + targetMembership.getProvisioningEntityId() + "'", e);
+    } finally {
+      this.addTargetDaoTimingInfo(new TargetDaoTimingInfo("deleteMembership", startNanos));
+    }
+  }
+  
+  @Override
+  public TargetDaoRetrieveMembershipsByGroupResponse retrieveMembershipsByGroup(TargetDaoRetrieveMembershipsByGroupRequest targetDaoRetrieveMembershipsByGroupRequest) {
+    
+    long startNanos = System.nanoTime();
+    ProvisioningGroup targetGroup = targetDaoRetrieveMembershipsByGroupRequest.getTargetGroup();
+
+    try {
+      GrouperOktaConfiguration oktaConfiguration = (GrouperOktaConfiguration) this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration();
+
+      String targetGroupId = resolveTargetGroupId(targetGroup);
+      
+      if (StringUtils.isBlank(targetGroupId)) {
+        return new TargetDaoRetrieveMembershipsByGroupResponse(new ArrayList<ProvisioningMembership>());
+      }
+      
+      Set<String> groupMembers = GrouperOktaApiCommands.retrieveOktaGroupMembers(oktaConfiguration.getOktaExternalSystemConfigId(), targetGroupId);
+      
+      List<ProvisioningMembership> provisioningMemberships = new ArrayList<ProvisioningMembership>(); 
+      
+      for (String userId : groupMembers) {
+
+        ProvisioningMembership targetMembership = new ProvisioningMembership(false);
+        targetMembership.setProvisioningGroupId(targetGroup.getId());
+        targetMembership.setProvisioningEntityId(userId);
+        provisioningMemberships.add(targetMembership);
+
+      }
+
+      // generic provisioner sync back: capture (groupId, userId) pairs for this group.
+      // Okta has no retrieveAllMemberships call -- this per-group fetch is the only place
+      // both ids are co-located on the read path.
+      GrouperOktaProvisioningTargetNativeSync.captureMembershipsForGroupForCurrentProvisioner(
+          targetGroupId, groupMembers);
+
+      return new TargetDaoRetrieveMembershipsByGroupResponse(provisioningMemberships);
+    } finally {
+      this.addTargetDaoTimingInfo(new TargetDaoTimingInfo("retrieveMembershipsByGroup", startNanos));
+    }
+    
+  }
+  
+  /**
+   * GRP-7464: retrieve all memberships of a user via GET users/{id}/groups.  Lets an entity membership
+   * recalc (e.g. user target id change) read only that user's groups instead of every group's roster.
+   */
+  @Override
+  public TargetDaoRetrieveMembershipsByEntityResponse retrieveMembershipsByEntity(
+      TargetDaoRetrieveMembershipsByEntityRequest targetDaoRetrieveMembershipsByEntityRequest) {
+
+    long startNanos = System.nanoTime();
+    ProvisioningEntity targetEntity = targetDaoRetrieveMembershipsByEntityRequest.getTargetEntity();
+
+    try {
+      GrouperOktaConfiguration oktaConfiguration = (GrouperOktaConfiguration) this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration();
+
+      String targetEntityId = resolveTargetEntityId(targetEntity);
+
+      List<ProvisioningMembership> provisioningMemberships = new ArrayList<ProvisioningMembership>();
+
+      if (StringUtils.isBlank(targetEntityId)) {
+        return new TargetDaoRetrieveMembershipsByEntityResponse(provisioningMemberships);
+      }
+
+      Set<String> groupIds = GrouperOktaApiCommands.retrieveOktaUserGroups(oktaConfiguration.getOktaExternalSystemConfigId(), targetEntityId);
+
+      // users/{id}/groups returns every group the user is in (Everyone, directory / app groups, okta groups
+      // grouper does not manage).  Only keep the groups this provisioner tracks so the compare never sees the
+      // others (and so they are not captured into grouper_prov_mship)
+      Set<String> trackedOktaGroupIds = this.retrieveTrackedOktaGroupIds();
+      Set<String> trackedGroupIdsForUser = new HashSet<String>();
+      int untrackedGroupCount = 0;
+
+      for (String groupId : groupIds) {
+        if (!trackedOktaGroupIds.contains(groupId)) {
+          untrackedGroupCount++;
+          continue;
+        }
+        trackedGroupIdsForUser.add(groupId);
+        ProvisioningMembership targetMembership = new ProvisioningMembership(false);
+        targetMembership.setProvisioningGroupId(groupId);
+        targetMembership.setProvisioningEntityId(targetEntityId);
+        provisioningMemberships.add(targetMembership);
+      }
+
+      if (untrackedGroupCount > 0) {
+        Map<String, Object> debugMap = this.getGrouperProvisioner().getDebugMap();
+        synchronized (debugMap) {
+          GrouperUtil.mapAddValue(debugMap, "oktaUserGroupsUntrackedSkipped", untrackedGroupCount);
+        }
+      }
+
+      // generic provisioner sync back: capture (groupId, userId) pairs for this user
+      GrouperOktaProvisioningTargetNativeSync.captureMembershipsForUserForCurrentProvisioner(
+          targetEntityId, trackedGroupIdsForUser);
+
+      return new TargetDaoRetrieveMembershipsByEntityResponse(provisioningMemberships);
+    } finally {
+      this.addTargetDaoTimingInfo(new TargetDaoTimingInfo("retrieveMembershipsByEntity", startNanos));
+    }
+  }
+
+  /**
+   * GRP-7464: okta group ids of the groups this provisioner tracks that are loaded in this run: the
+   * translated grouper group's id, the retrieved target group's id, or the target id cached on the sync group
+   * (e.g. a group the user is no longer in in grouper, which is only loaded from its sync membership)
+   * @return the okta group ids
+   */
+  private Set<String> retrieveTrackedOktaGroupIds() {
+
+    Integer groupIdCacheIndex = null;
+    GrouperProvisioningConfigurationAttributeDbCache[] groupAttributeDbCaches =
+        this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().getGroupAttributeDbCaches();
+    for (int i = 0; i < GrouperUtil.length(groupAttributeDbCaches); i++) {
+      GrouperProvisioningConfigurationAttributeDbCache groupAttributeDbCache = groupAttributeDbCaches[i];
+      if (groupAttributeDbCache != null
+          && groupAttributeDbCache.getSource() == GrouperProvisioningConfigurationAttributeDbCacheSource.target
+          && groupAttributeDbCache.getType() == GrouperProvisioningConfigurationAttributeDbCacheType.attribute
+          && StringUtils.equals("id", groupAttributeDbCache.getAttributeName())) {
+        groupIdCacheIndex = groupAttributeDbCache.getIndex();
+        break;
+      }
+    }
+
+    Set<String> result = new HashSet<String>();
+    for (ProvisioningGroupWrapper provisioningGroupWrapper : GrouperUtil.nonNull(
+        this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningGroupWrappers())) {
+
+      GcGrouperSyncGroup gcGrouperSyncGroup = provisioningGroupWrapper.getGcGrouperSyncGroup();
+
+      // a target only group (e.g. Everyone in a full sync) is not tracked
+      if (provisioningGroupWrapper.getGrouperProvisioningGroup() == null && gcGrouperSyncGroup == null) {
+        continue;
+      }
+      if (provisioningGroupWrapper.getGrouperTargetGroup() != null && StringUtils.isNotBlank(provisioningGroupWrapper.getGrouperTargetGroup().getId())) {
+        result.add(provisioningGroupWrapper.getGrouperTargetGroup().getId());
+      }
+      if (provisioningGroupWrapper.getTargetProvisioningGroup() != null && StringUtils.isNotBlank(provisioningGroupWrapper.getTargetProvisioningGroup().getId())) {
+        result.add(provisioningGroupWrapper.getTargetProvisioningGroup().getId());
+      }
+      if (gcGrouperSyncGroup != null && groupIdCacheIndex != null) {
+        String cachedGroupId = null;
+        if (groupIdCacheIndex == 0) {
+          cachedGroupId = gcGrouperSyncGroup.getGroupAttributeValueCache0();
+        } else if (groupIdCacheIndex == 1) {
+          cachedGroupId = gcGrouperSyncGroup.getGroupAttributeValueCache1();
+        } else if (groupIdCacheIndex == 2) {
+          cachedGroupId = gcGrouperSyncGroup.getGroupAttributeValueCache2();
+        } else if (groupIdCacheIndex == 3) {
+          cachedGroupId = gcGrouperSyncGroup.getGroupAttributeValueCache3();
+        }
+        if (StringUtils.isNotBlank(cachedGroupId)) {
+          result.add(cachedGroupId);
+        }
+      }
+    }
+    return result;
+  }
+
+  private String resolveTargetGroupId(ProvisioningGroup targetGroup) {
+    
+    if (targetGroup == null) {
+      return null;
+    }
+    
+    if (StringUtils.isNotBlank(targetGroup.getId())) {
+      return targetGroup.getId();
+    }
+    
+    TargetDaoRetrieveGroupsRequest targetDaoRetrieveGroupsRequest = new TargetDaoRetrieveGroupsRequest();
+    targetDaoRetrieveGroupsRequest.setTargetGroups(GrouperUtil.toList(targetGroup));
+    targetDaoRetrieveGroupsRequest.setIncludeAllMembershipsIfApplicable(false);
+    TargetDaoRetrieveGroupsResponse targetDaoRetrieveGroupsResponse = this.getGrouperProvisioner().retrieveGrouperProvisioningTargetDaoAdapter().retrieveGroups(
+        targetDaoRetrieveGroupsRequest);
+
+    if (targetDaoRetrieveGroupsResponse == null || GrouperUtil.length(targetDaoRetrieveGroupsResponse.getTargetGroups()) == 0) {
+      return null;
+    }
+    
+    return targetDaoRetrieveGroupsResponse.getTargetGroups().get(0).getId();
+        
+  }
+  
+  
+  @Override
+  public TargetDaoUpdateEntityResponse updateEntity(TargetDaoUpdateEntityRequest targetDaoUpdateEntityRequest) {
+    
+    long startNanos = System.nanoTime();
+    ProvisioningEntity targetEntity = targetDaoUpdateEntityRequest.getTargetEntity();
+
+    try {
+      GrouperOktaConfiguration oktaConfiguration = (GrouperOktaConfiguration) this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration();
+      
+      // lets make sure we are doing the right thing
+      Set<String> fieldNamesToUpdate = new HashSet<String>();
+      for (ProvisioningObjectChange provisioningObjectChange : GrouperUtil.nonNull(targetEntity.getInternal_objectChanges())) {
+        String fieldName = provisioningObjectChange.getAttributeName();
+        fieldNamesToUpdate.add(fieldName);
+      }
+      
+      GrouperOktaUser grouperOktaUser = GrouperOktaUser.fromProvisioningEntity(targetEntity, null);
+      GrouperOktaApiCommands.updateOktaUser(oktaConfiguration.getOktaExternalSystemConfigId(), grouperOktaUser, fieldNamesToUpdate);
+
+      targetEntity.setProvisioned(true);
+
+      for (ProvisioningObjectChange provisioningObjectChange : GrouperUtil.nonNull(targetEntity.getInternal_objectChanges())) {
+        provisioningObjectChange.setProvisioned(true);
+      }
+
+      // sync-back: same as updateGroup -- Okta captures user OBJECTS only on the read path, so mark
+      // this user (null native) for the end-of-run drain re-read to refresh its attributes in
+      // grouper_prov_user under users-from-cache (fullSyncUsersFromSyncBack).
+      this.getGrouperProvisioner().retrieveGrouperProvisioningTargetNativeSync()
+          .recordTargetNativeUserWrite(targetEntity.getId(), null);
+
+      return new TargetDaoUpdateEntityResponse();
+    } catch (Exception e) {
+      targetEntity.setProvisioned(false);
+      for (ProvisioningObjectChange provisioningObjectChange : GrouperUtil.nonNull(targetEntity.getInternal_objectChanges())) {
+        provisioningObjectChange.setProvisioned(false);
+      }
+      
+      throw e;
+    } finally {
+      this.addTargetDaoTimingInfo(new TargetDaoTimingInfo("updateEntity", startNanos));
+    }
+  }
+  
+  @Override
+  public TargetDaoUpdateGroupResponse updateGroup(TargetDaoUpdateGroupRequest targetDaoUpdateGroupRequest) {
+    
+    long startNanos = System.nanoTime();
+    ProvisioningGroup targetGroup = targetDaoUpdateGroupRequest.getTargetGroup();
+
+    try {
+      GrouperOktaConfiguration oktaConfiguration = (GrouperOktaConfiguration) this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration();
+      
+      // lets make sure we are doing the right thing
+      Set<String> fieldNamesToUpdate = new HashSet<String>();
+      for (ProvisioningObjectChange provisioningObjectChange : GrouperUtil.nonNull(targetGroup.getInternal_objectChanges())) {
+        String fieldName = provisioningObjectChange.getAttributeName();
+        fieldNamesToUpdate.add(fieldName);
+      }
+      
+      GrouperOktaGroup grouperOktaGroup = GrouperOktaGroup.fromProvisioningGroup(targetGroup, null);
+      GrouperOktaApiCommands.updateOktaGroup(oktaConfiguration.getOktaExternalSystemConfigId(), grouperOktaGroup, fieldNamesToUpdate);
+
+      targetGroup.setProvisioned(true);
+
+      for (ProvisioningObjectChange provisioningObjectChange : GrouperUtil.nonNull(targetGroup.getInternal_objectChanges())) {
+        provisioningObjectChange.setProvisioned(true);
+      }
+
+      // sync-back: Okta captures group OBJECTS only on the read path, so an attribute update is not
+      // yet reflected in the native mirror. Mark this group (null native) so the end-of-run sync-back
+      // drain re-reads it and captures the new attribute values. This keeps grouper_prov_group current
+      // under groups-from-cache (fullSyncGroupsFromSyncBack), where the bulk group read is skipped and
+      // there is no other place the updated attributes would land. Same primitive the delete path uses.
+      this.getGrouperProvisioner().retrieveGrouperProvisioningTargetNativeSync()
+          .recordTargetNativeGroupWrite(targetGroup.getId(), null);
+
+      return new TargetDaoUpdateGroupResponse();
+    } catch (Exception e) {
+      targetGroup.setProvisioned(false);
+      for (ProvisioningObjectChange provisioningObjectChange : GrouperUtil.nonNull(targetGroup.getInternal_objectChanges())) {
+        provisioningObjectChange.setProvisioned(false);
+      }
+      
+      throw e;
+    } finally {
+      this.addTargetDaoTimingInfo(new TargetDaoTimingInfo("updateGroup", startNanos));
+    }
+  }
+  
+
+  @Override
+  public void registerGrouperProvisionerDaoCapabilities(GrouperProvisionerDaoCapabilities grouperProvisionerDaoCapabilities) {
+    grouperProvisionerDaoCapabilities.setCanDeleteEntity(true);
+    grouperProvisionerDaoCapabilities.setCanDeleteGroup(true);
+    grouperProvisionerDaoCapabilities.setCanDeleteMembership(true);
+    
+    grouperProvisionerDaoCapabilities.setCanInsertEntity(true);
+    grouperProvisionerDaoCapabilities.setCanInsertGroup(true);
+    grouperProvisionerDaoCapabilities.setCanInsertMembership(true);
+    
+    grouperProvisionerDaoCapabilities.setCanRetrieveAllData(true);
+    grouperProvisionerDaoCapabilities.setCanRetrieveAllEntities(true);
+    grouperProvisionerDaoCapabilities.setCanRetrieveAllGroups(true);
+    grouperProvisionerDaoCapabilities.setCanRetrieveEntity(true);
+    grouperProvisionerDaoCapabilities.setCanRetrieveGroup(true);
+    grouperProvisionerDaoCapabilities.setCanRetrieveMembershipsAllByGroup(true);
+    // GRP-7464: GET users/{id}/groups.  With both by-group and by-entity, a user target id change
+    // recalcs just that user's memberships instead of bridging to a full recalc of all of its groups
+    grouperProvisionerDaoCapabilities.setCanRetrieveMembershipsAllByEntity(true);
+    
+    grouperProvisionerDaoCapabilities.setCanUpdateEntity(true);
+    grouperProvisionerDaoCapabilities.setCanUpdateGroup(true);
+    // read path captures groups/users from raw JSON at the GrouperOktaApiCommands seam, and
+    // memberships group-centrically here, all via GrouperOktaProvisioningTargetNativeSync.record*
+    grouperProvisionerDaoCapabilities.setCanSyncBack(true);
+    // GRP-7048: retrieveAllData honors retrieveEntities=false (skips the user pull and the
+    // per-membership missing-user lookup), so fullSyncUsersFromSyncBack can seed users from cache
+    grouperProvisionerDaoCapabilities.setCanFullSyncEntitiesFromSyncBack(true);
+    // GRP-7048: retrieveAllData honors retrieveMemberships=false (skips the per-group member
+    // iteration), so fullSyncMembershipsFromSyncBack can seed memberships from cache
+    grouperProvisionerDaoCapabilities.setCanFullSyncMembershipsFromSyncBack(true);
+    // GRP-7048: retrieveAllData honors retrieveGroups=false (skips the group pull), so
+    // fullSyncGroupsFromSyncBack can seed groups from cache
+    grouperProvisionerDaoCapabilities.setCanFullSyncGroupsFromSyncBack(true);
+  }
+
+  private String resolveTargetEntityId(ProvisioningEntity targetEntity) {
+    
+    if (targetEntity == null) {
+      return null;
+    }
+    
+    if (StringUtils.isNotBlank(targetEntity.getId())) {
+      return targetEntity.getId();
+    }
+    
+    if (StringUtils.isBlank(targetEntity.getEmail())) {
+      return null;
+    }
+    
+    TargetDaoRetrieveEntityRequest targetDaoRetrieveEntityRequest = new TargetDaoRetrieveEntityRequest(targetEntity, false);
+    targetDaoRetrieveEntityRequest.setSearchAttribute("email");
+    targetDaoRetrieveEntityRequest.setSearchAttributeValue(targetEntity.getEmail());
+    TargetDaoRetrieveEntityResponse targetDaoRetrieveEntityResponse = this.retrieveEntity(targetDaoRetrieveEntityRequest);
+    
+    if (targetDaoRetrieveEntityResponse == null || targetDaoRetrieveEntityResponse.getTargetEntity() == null) {
+      return null;
+    }
+    
+    return targetDaoRetrieveEntityResponse.getTargetEntity().getId();
+    
+  }
+
+}

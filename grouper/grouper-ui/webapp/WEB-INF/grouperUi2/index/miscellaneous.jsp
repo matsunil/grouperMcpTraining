@@ -1,0 +1,176 @@
+<%@ include file="../assetsJsp/commonTaglib.jsp"%>
+  ${grouper:title('miscellaneousTitle')}
+
+            <%--<span id="grouperJspId" style="display:none">grouperMiscellaneousPage</span> --%>
+            <grouper:browserPage jspName="miscellaneous" />
+            <div class="bread-header-container">
+              <ul class="breadcrumb">
+                <li><a href="?operation=UiV2Main.indexMain" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Main.indexMain');">${textContainer.text['myServicesHomeBreadcrumb'] }</a><span class="divider"><i class='fa fa-angle-right'></i></span></li>
+                <li class="active">${textContainer.text['miscellaneousBreadcrumb'] }</li>
+              </ul>
+              <div class="page-header blue-gradient">
+                <h1>${textContainer.text['miscellaneousTitle'] }</h1>
+                <p style="margin-top: -1em; margin-bottom: 1em">${textContainer.text['miscellaneousSubtitle']}</p>
+              </div>
+
+            </div>
+            <div class="row-fluid" style="margin-top: -30px"> <%-- since each row pushed down two br's, then start in negative --%>
+              <div class="span12">
+                <div class="row-fluid">
+                  <div class="span1">
+                    
+                    <br /><br /><a id="miscAttestationLink" href="?operation=UiV2Attestation.attestationOverall" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Attestation.attestationOverall');" style="white-space: nowrap;"
+                      >${textContainer.text['miscAttestationLink'] }</a>
+                      
+                    <br /><br /><a id="miscCustomUiLink" href="?operation=UiV2CustomUiConfig.viewCustomUiConfigsForAll" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2CustomUiConfig.viewCustomUiConfigsForAll');" style="white-space: nowrap;"
+                      >${textContainer.text['customUiMiscLinkUser'] }</a>
+                      
+                    <br /><br /><a href="?operation=UiV2EntityDataFields.viewDataFieldAndRowDictionary" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2EntityDataFields.viewDataFieldAndRowDictionary');" style="white-space: nowrap;"
+                      >${textContainer.text['miscAttestationDataFieldAndRowDictionaryLink'] }</a>
+                      
+                      
+                    <c:if test="${grouperRequestContainer.deprovisioningContainer.allowedToDeprovision}">
+                      <br /><br /><a href="?operation=UiV2Deprovisioning.deprovisioningMain" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Deprovisioning.deprovisioningMain');" style="white-space: nowrap;"
+                      >${textContainer.text['deprovisioningMainLink'] }</a>
+                    </c:if>
+                    
+                      <br /><br /><a id="miscFormsLink" href="?operation=UiV2GrouperWorkflow.forms" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2GrouperWorkflow.forms');" style="white-space: nowrap;"
+                      >${textContainer.text['workflowMiscFormsLink'] }</a>
+
+                    <c:if test="${grouperRequestContainer.mcpContainer.canSeeMcpLink}">
+                      <br /><br /><a id="miscMcpLink" href="?operation=UiV2Mcp.mcpInfo" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Mcp.mcpInfo');" style="white-space: nowrap;"
+                        >${textContainer.text['miscMcpLink'] }</a>
+                    </c:if>
+
+                    <c:if test="${grouperRequestContainer.aiAgentContainer.canSeeAiAgentLink}">
+                      <br /><br /><a id="miscAiAgentLink" href="?operation=UiV2AiAgent.aiAgent" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2AiAgent.aiAgent');" style="white-space: nowrap;"
+                        >${textContainer.text['miscAiAgentLink'] }</a>
+                    </c:if>
+
+                    <%-- shown to recipe administrators and to anybody who owns the content of a
+                         recipe, otherwise a delegated editor has a screen they cannot reach.
+                         deliberately NOT in the Administration section below: that whole block is
+                         gated on isWheelOrRoot, which would hide this from both populations this
+                         link exists for, since neither is a Grouper root by design --%>
+                    <c:if test="${grouperRequestContainer.mcpContainer.canSeeMcpRecipesLink}">
+                      <br /><br /><a id="miscMcpRecipesLink" href="?operation=UiV2Mcp.viewMcpRecipes" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Mcp.viewMcpRecipes');" style="white-space: nowrap;"
+                        >${textContainer.text['miscAdminMcpRecipesLink'] }</a>
+                    </c:if>
+
+                    <c:if test="${grouperRequestContainer.rulesContainer.canReadPrivilegeInheritance && grouperRequestContainer.indexContainer.showGlobalInheritedPrivilegesLink}">
+                      <br /><br /><a id="miscInheritedPrivilegesLink" href="?operation=UiV2Main.globalInheritedPrivileges" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Main.globalInheritedPrivileges');" style="white-space: nowrap;"
+                      >${textContainer.text['miscellaneousGlobalInheritedPrivileges'] }</a>
+                    </c:if>
+                    <c:if test="${grouperRequestContainer.adminContainer.instrumentationShow}">
+                      <br /><br /><a  id="miscPanelInstrumentationLink" href="?operation=UiV2Admin.instrumentation" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Admin.instrumentation');" style="white-space: nowrap;"
+                      >${textContainer.text['adminInstrumentationLink'] }</a>
+                    </c:if>
+                    
+                    <c:if test="${grouperRequestContainer.provisionerConfigurationContainer.canViewProvisionerConfiguration}">
+                      <br /><br /><a id="miscProvisioningLink"href="?operation=UiV2ProvisionerConfiguration.viewProvisionerConfigurations" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2ProvisionerConfiguration.viewProvisionerConfigurations');" style="white-space: nowrap;">
+                        ${textContainer.text['adminProvisionerConfigurationsLink'] }</a>
+                    </c:if>
+                    
+                    <c:if test="${grouperRequestContainer.rulesContainer.canViewAllRules}">
+                      <br /><br /><a href="?operation=UiV2Rules.viewAllRules" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Rules.viewAllRules');" style="white-space: nowrap;">
+                        ${textContainer.text['adminRulesConfigurationsLink'] }</a>
+                    </c:if>
+
+                    <br /><br /><a id="miscellaneousUserLifecycleEventsLink" href="?operation=UiV2UserLifecycleEvents.viewUserLifecycleEvents" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2UserLifecycleEvents.viewUserLifecycleEvents');" style="white-space: nowrap;"
+                    >${textContainer.text['miscellaneousUserLifecycleEventsLink'] }</a>
+                    
+                  </div>
+                </div>
+                
+                <c:if test="${grouperRequestContainer.adminContainer.administrationLinksShow}">
+                	<div class="row-fluid">
+                	<%-- GRP-7305 a11y: this section heading under the page h1 was h4 (h1->h4 skip).
+                	     Bumped to h2, size-preserved via grouper-heading-as-h4 so it looks unchanged. --%>
+                	<h2 class="grouper-heading-as-h4" style="color: #1c6070; margin-top: 25px; ">${textContainer.text['miscellaneousPageAdministrationHeader'] }</h2>
+                		
+                	 <c:if test="${grouperRequestContainer.authenticationContainer.canViewAuthentication}">
+                      <br /><a id="miscAuthenticationPrivilegesLink" href="?operation=UiV2AuthenticationConfig.index" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2AuthenticationConfig.index');" style="white-space: nowrap;">
+                        ${textContainer.text['adminAuthenticationLink'] }</a>
+                    </c:if>
+                	
+                	 <c:if test="${grouperRequestContainer.aiAgentContainer.canSeeUsageReportLink}">
+                      <br /><br /><a id="miscAiAgentUsageReportLink" href="?operation=UiV2AiAgent.aiAgentUsageReport" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2AiAgent.aiAgentUsageReport');" style="white-space: nowrap;">
+                        ${textContainer.text['miscAiAgentUsageReportLink'] }</a>
+                    </c:if>
+
+                	 <c:if test="${grouperRequestContainer.configurationContainer.configureShow}">
+                      <br /><br /><a id="miscConfigureLink" href="?operation=UiV2Configure.index" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Configure.index');" style="white-space: nowrap;">
+                      	${textContainer.text['adminConfigureLink'] }</a>
+                    </c:if>
+                    
+                    <c:if test="${grouperRequestContainer.customUiContainer.canViewCustomUiMisc}">
+                      <br /><br /><a id="miscCustomUiLink" href="?operation=UiV2CustomUiConfig.viewCustomUiConfigs" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2CustomUiConfig.viewCustomUiConfigs');" style="white-space: nowrap;"
+                      >${textContainer.text['customUiMiscLink'] }</a>
+                    </c:if>
+                    
+                    
+                    <c:if test="${grouperRequestContainer.adminContainer.daemonJobsShow}">
+                      <br /><br /><a id="miscDaemonJobsLink" href="?operation=UiV2Admin.daemonJobs" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Admin.daemonJobs');" style="white-space: nowrap;"
+                      >${textContainer.text['adminDaemonJobsLink'] }</a>
+                      
+                      <c:if test="${grouperRequestContainer.grouperLoaderContainer.canSeeLoaderOverall}">
+	                      <br /><br /><a id="miscInheritedPrivilegesLink" href="?operation=UiV2GrouperLoader.loaderOverall" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2GrouperLoader.loaderOverall');" style="white-space: nowrap; margin-left: 20px;"
+	                      >${textContainer.text['adminLoaderLink'] }</a>
+                    	</c:if>
+                      
+                    </c:if>
+                    
+                    <c:if test="${grouperRequestContainer.globalAttributeResolverConfigContainer.canViewGlobalAttributeResolverConfig}">
+                      <br /><br /><a id="miscEntityAttributeResolversLink" href="?operation=UiV2GlobalAttributeResolverConfig.viewGlobalAttributeResolverConfigs" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2GlobalAttributeResolverConfig.viewGlobalAttributeResolverConfigs');" style="white-space: nowrap;">
+                        ${textContainer.text['adminGlobalAttributeResolverConfigLink'] }</a>
+                    </c:if>
+                    
+                    <br /><br /><a href="?operation=UiV2EntityDataFields.viewEntityDataFieldsSummary" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2EntityDataFields.viewEntityDataFieldsSummary');" style="white-space: nowrap;"
+                      >${textContainer.text['miscAdminDataFieldsLink'] }</a>
+
+                    <c:if test="${grouperRequestContainer.externalSystemContainer.canViewExternalSystems}">
+                      <br /><br /><a id="miscExternalSystemsLink" href="?operation=UiV2ExternalSystem.viewExternalSystems" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2ExternalSystem.viewExternalSystems');" style="white-space: nowrap;">
+                      	${textContainer.text['adminExternalSystemsLink'] }</a>
+                    </c:if>
+                    
+
+                    <c:if test="${grouperRequestContainer.gshTemplateContainer.canViewGshTemplates}">
+                      <br /><br /><a id="miscGshTemplatesLink" href="?operation=UiV2GshTemplateConfig.viewGshTemplates" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2GshTemplateConfig.viewGshTemplates');" style="white-space: nowrap;"
+                      >${textContainer.text['gshTemplatesMainLink'] }</a>
+                    </c:if>
+                    
+                    <c:if test="${grouperRequestContainer.scriptTesterContainer.canScriptTesterLink}">
+                      <br /><br /><a id="miscJexlScriptTesterLink" href="?operation=UiV2ScriptTester.testScript" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2ScriptTester.testScript');" style="white-space: nowrap;"
+                        >${textContainer.text['scriptTesterLink'] }</a>
+                    </c:if>
+                    
+                     <c:if test="${grouperRequestContainer.grouperReportContainer.canSeeAllReports}">
+                      <br /><br /><a id="miscAllReportsLink" href="?operation=UiV2GrouperReport.viewAllReportConfigs" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2GrouperReport.viewAllReportConfigs');" style="white-space: nowrap;">
+                      ${textContainer.text['miscAllReportsLink'] }</a>
+                     </c:if>
+                    
+                    <c:if test="${grouperRequestContainer.sqlSyncConfigurationContainer.canViewSqlSyncConfigs}">
+                      <br /><br /><a id="miscSqlSyncLink" href="?operation=UiV2SqlSyncConfiguration.viewSqlSyncConfigurations" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2SqlSyncConfiguration.viewSqlSyncConfigurations');" style="white-space: nowrap;"
+                        >${textContainer.text['sqlSyncMainLink'] }</a>
+                    </c:if>
+                    
+                    <c:if test="${grouperRequestContainer.subjectSourceContainer.canViewSubjectSources}">
+                      <br /><br /><a id="miscSubjectSourcesLink" href="?operation=UiV2SubjectSource.viewSubjectSources" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2SubjectSource.viewSubjectSources');" style="white-space: nowrap;"
+                      >${textContainer.text['subjectSourcesMainLink'] }</a>
+                    </c:if>
+                    
+                    <c:if test="${grouperRequestContainer.subjectResolutionContainer.allowedToSubjectResolution}">
+                      <br /><br /><a id="miscUnresolvableSubjectsLink" href="?operation=UiV2SubjectResolution.subjectResolutionMain" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2SubjectResolution.subjectResolutionMain');" style="white-space: nowrap;"
+                      >${textContainer.text['subjectResolutionMainLink'] }</a>
+                    </c:if>
+                    
+                    <br /><br /><a id="miscellaneousGlobalLifecycleEventsLink" href="?operation=UiV2UserLifecycle.viewUserLifecycleSummary" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2UserLifecycle.viewUserLifecycleSummary');" style="white-space: nowrap;"
+                    >${textContainer.text['miscellaneousGlobalMemberhsipLifecycle'] }</a>
+                    
+                    </div>
+                    
+                </c:if>
+                
+              </div>
+            </div>
+

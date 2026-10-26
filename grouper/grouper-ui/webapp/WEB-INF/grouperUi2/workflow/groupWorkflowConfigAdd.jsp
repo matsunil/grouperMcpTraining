@@ -1,0 +1,61 @@
+<%@ include file="../assetsJsp/commonTaglib.jsp"%>
+
+            <%-- for the new group or new stem button --%>
+            <input type="hidden" name="objectStemId" value="${grouperRequestContainer.groupContainer.guiGroup.group.parentUuid}" />
+            
+            <%@ include file="../group/groupHeader.jsp" %>
+            
+            <div class="row-fluid">
+              <div class="span12">
+                <div id="messages"></div>
+                    
+                <div class="tab-interface">
+                  <c:set var="grouperCurrentTab" value="none" />
+                  <%@ include file="../group/groupTabs.jsp" %>
+                </div>
+                <div class="row-fluid">
+						      <div class="lead span9">${textContainer.text['grouperWorkflowGroupConfigDescription'] }</div>
+						      <div class="span3" id="grouperWorkflowGroupMoreActionsButtonContentsDivId">
+						        <%@ include file="grouperWorkflowGroupMoreActionsButtonContents.jsp"%>
+						      </div>
+						    </div>
+                
+                <c:if test="${fn:length(grouperRequestContainer.workflowContainer.errors) > 0}">
+                  <div class="workflowConfigErrors alert alert-error">
+                   <button type="button" class="close" data-dismiss="alert" aria-label="Close">x</button>
+                   <c:forEach var="error" items="${grouperRequestContainer.workflowContainer.errors}">
+                    <div>${grouper:escapeHtml(error)}</div>
+                   </c:forEach>
+                  </div>
+                </c:if>
+                
+                <form class="form-inline form-small form-filter" id="addWorkflowConfigFormId">
+                  <input type="hidden" name="groupId" value="${grouperRequestContainer.groupContainer.guiGroup.group.id}" />
+                  <table class="table table-condensed table-striped">
+                    <tbody>
+                      <%@ include file="workflowConfigObjectAddHelper.jsp" %>
+                      <tr>
+                        <td>
+                          <input type="hidden" name="mode" value="add">
+                        </td>
+                        <td
+                          style="white-space: nowrap; padding-top: 2em; padding-bottom: 2em;">
+                          <input type="submit" class="btn btn-primary"
+                          aria-controls="workflowConfigSubmitId" id="submitId"
+                          value="${textContainer.text['workflowAddConfigButtonSave'] }"
+                          onclick="ajax('../app/UiV2GrouperWorkflow.workflowConfigAddSubmit?groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}', {formIds: 'addWorkflowConfigFormId'}); return false;">
+                          &nbsp; <a class="btn btn-cancel" role="button"
+                          onclick="return guiV2link('operation=UiV2GrouperWorkflow.viewForms&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                          >${textContainer.text['workflowConfigButtonCancel'] }</a>
+                        </td>
+                      </tr>
+
+                    </tbody>
+                  </table>
+                  
+                </form>
+              </div>
+            </div>
+            <c:if test="${grouperRequestContainer.indexContainer.menuRefreshOnView}">
+              <script>dojoInitMenu(${grouperRequestContainer.indexContainer.menuRefreshOnView});</script>
+            </c:if>

@@ -1,0 +1,62 @@
+<!-- Start: externalSubjectSelfRegister/externalSubjectSelfRegister.jsp: main page -->
+
+<%@ include file="../assetsJsp/commonTaglib.jsp"%>
+${grouper:title('externalSubjectSelfRegister.registerTitle')}
+
+<div class="bread-header-container">
+
+  <div class="page-header blue-gradient">
+    <h4>${textContainer.text['externalSubjectSelfRegister.registerTitle'] }</h4>
+  </div>
+
+ </div>
+   
+<div style="margin-top: 20px; width: 800px; text-align: right">
+  <span class="requiredIndicator">*</span> ${textContainer.text['externalSubjectSelfRegister.indicatesRequiredField'] }
+</div>
+   
+<div class="row-fluid">
+  <div class="span12">
+    <form id="selfRegisterFormId" class="form-horizontal">
+    
+ 	  <c:forEach items="${externalRegisterContainer.registerFields}" var="registerField" varStatus="loopStatus">
+
+        <div class="control-group">
+ 		  <label class="control-label"<c:if test="${!registerField.readonly}"> for="selfRegisterField_${loopStatus.index}"</c:if>>${registerField.label}
+ 		    <c:if test="${registerField.required}">
+			  <span class="requiredIndicator">*</span>
+            </c:if>
+ 		  </label>
+
+          <div class="controls">
+            <c:choose>
+          	  <c:when test="${registerField.readonly}">
+                <span><c:out value="${registerField.value}"></c:out></span>
+              </c:when>
+          	  <c:otherwise>
+                <input type="text" id="selfRegisterField_${loopStatus.index}" name="${registerField.paramName}" value="${registerField.value}" />
+            	<span class="help-block">${registerField.tooltip }</span>
+          	  </c:otherwise>
+            </c:choose>
+       
+          </div>
+        </div>
+      </c:forEach>
+   
+
+   <div class="form-actions">
+   
+     <c:if test="${externalRegisterContainer.showDeleteButton}">
+       <a href="#" 
+	     onclick="if(confirm('${grouper:escapeJavascript(navMap['inviteExternalSubjects.confirmDelete'])}')) {ajax('../app/UiV2ExternalSubjectSelfRegister.delete', {formIds: 'selfRegisterFormId'});} return false;" 
+	     class="btn btn-cancel redButton">${navMap['externalSubjectSelfRegister.deleteRecordButtonText']}</a>        
+     </c:if>
+   
+     <button type="button" class="btn btn-primary"
+  	   onclick="ajax('../app/UiV2ExternalSubjectSelfRegister.submit', {formIds: 'selfRegisterFormId'}); return false;">
+  	     ${navMap['externalSubjectSelfRegister.submitButtonText']}</button> 
+   </div> 
+ </form></div>
+</div>
+
+<!-- End: externalSubjectSelfRegister/externalSubjectSelfRegister.jsp: main page -->

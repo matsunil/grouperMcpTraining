@@ -1,0 +1,120 @@
+<%@ include file="../assetsJsp/commonTaglib.jsp"%>
+${grouper:titleFromKeyAndText('roleInheritanceEditTitle', grouperRequestContainer.groupContainer.guiGroup.group.displayName)}
+
+            <%-- for the new group or new stem button --%>
+            <input type="hidden" name="objectStemId" value="${grouperRequestContainer.groupContainer.guiGroup.group.parentUuid}" />
+
+            <div class="bread-header-container">
+              ${grouperRequestContainer.groupContainer.guiGroup.breadcrumbs}
+
+              <div class="page-header blue-gradient">
+                <h1> <i aria-hidden="true" class="fa fa-group"></i> ${grouper:escapeHtml(grouperRequestContainer.groupContainer.guiGroup.group.displayExtension)}
+                <br /><small>${textContainer.text['roleInheritanceEditTitle'] }</small></h1>
+              </div>
+
+            </div>
+            <div class="row-fluid">
+              <div class="span12">
+                <form id="editRoleInheritanceForm" class="form-horizontal">
+
+                  <input type="hidden" name="groupId" value="${grouperRequestContainer.groupContainer.guiGroup.group.id}" />
+                  
+                  <div class="control-group">
+                    <label for="roleInhertianceRoleComboId" class="control-label">${textContainer.text['editRoleInheritanceLabel'] }</label>
+                    
+                    <div class="controls">
+                      <input type="hidden" name="typeOfGroup" value="role" />
+	                    <grouper:combobox2 idBase="roleInhertianceRoleCombo" style="width: 30em"
+	                       filterOperation="../app/UiV2Group.groupUpdateFilter"
+	                       additionalFormElementNames="typeOfGroup" />
+                    </div>
+                    <br />
+                    <div class="control-group" style="margin-bottom: 5px">
+	                    <div class="controls">
+	                      <a href="#" 
+	                        onclick="ajax('../app/UiV2Role.addRoleImplies', {formIds: 'editRoleInheritanceForm'}); return false;"
+	                        class="btn bulk-add-another-group" role="button">
+	                        <grouper:message key="roleInheritanceEditRolesThatImplyButtonText">
+                            <grouper:param>${grouper:escapeHtml(grouperRequestContainer.groupContainer.guiGroup.group.displayExtension)}</grouper:param>
+                          </grouper:message>
+	                        </a>
+	                        
+	                      <a href="#" 
+	                        onclick="ajax('../app/UiV2Role.addRoleImpliedBy', {formIds: 'editRoleInheritanceForm'}); return false;"
+	                        class="btn bulk-add-another-group" role="button">
+	                         <grouper:message key="roleInheritanceEditRolesImpliedByButtonText">
+                            <grouper:param>${grouper:escapeHtml(grouperRequestContainer.groupContainer.guiGroup.group.displayExtension)}</grouper:param>
+                          </grouper:message>  
+	                      </a>
+	                        
+	                    </div>
+                    </div>
+                    
+                  </div>
+                  
+                  <div class="control-group">
+                    <label class="control-label">
+                      <grouper:message key="roleInheritanceEditRolesThatImply">
+                        <grouper:param>${grouper:escapeHtml(grouperRequestContainer.groupContainer.guiGroup.group.displayExtension)}</grouper:param>
+                      </grouper:message>
+                    </label>
+                    <div class="controls" style="padding-top: 5px;">
+                      <c:forEach items="${grouperRequestContainer.roleInheritanceContainer.rolesThatImplyThis}" var="roleThatImply">
+                        ${grouper:escapeHtml(roleThatImply.displayExtension)}
+                        <br/>
+                      </c:forEach>
+                    </div>
+                  </div>
+                  
+                  <div class="control-group">
+                    <label class="control-label">
+                      <grouper:message key="roleInheritanceEditRolesThatImmediatelyImply">
+                        <grouper:param>${grouper:escapeHtml(grouperRequestContainer.groupContainer.guiGroup.group.displayExtension)}</grouper:param>
+                      </grouper:message>
+                    </label>
+                    <div class="controls" style="padding-top: 5px;">
+                      <c:forEach items="${grouperRequestContainer.roleInheritanceContainer.rolesThatImplyThisImmediate}" var="roleThatImmediatelyImply">
+                        ${grouper:escapeHtml(roleThatImmediatelyImply.extension)}
+                        <%-- role="button" + aria-label give this icon-only remove link an accessible name (GRP-7095) --%>
+                        <a class="grouper-icon-btn" href="#" role="button" aria-label="Remove role ${grouper:escapeHtml(roleThatImmediatelyImply.extension)}" onclick="ajax('../app/UiV2Role.deleteRoleImplies?roleId=${roleThatImmediatelyImply.id}', {formIds: 'editRoleInheritanceForm'}); return false;"><i class="fa fa-times" style="color: #aaaaaa" aria-hidden="true"></i></a>
+                         <br />
+                      </c:forEach>
+                    </div>
+                  </div>
+                  
+                  <div class="control-group">
+                    <label class="control-label">
+                      <grouper:message key="roleInheritanceEditRolesImpliedBy">
+                        <grouper:param>${grouper:escapeHtml(grouperRequestContainer.groupContainer.guiGroup.group.displayExtension)}</grouper:param>
+                      </grouper:message>
+                    </label>
+                    <div class="controls" style="padding-top: 5px;">
+                      <c:forEach items="${grouperRequestContainer.roleInheritanceContainer.rolesImpliedByThis}" var="roleImpliedBy">
+                        ${grouper:escapeHtml(roleImpliedBy.extension)}
+                        <br/>
+                      </c:forEach>
+                    </div>
+                  </div>
+                  
+                  <div class="control-group">
+                    <label class="control-label">
+                      <grouper:message key="roleInheritanceEditRolesImpliedByImmediate">
+                        <grouper:param>${grouper:escapeHtml(grouperRequestContainer.groupContainer.guiGroup.group.displayExtension)}</grouper:param>
+                      </grouper:message>
+                    </label>
+                    <div class="controls" style="padding-top: 5px;">
+                      <c:forEach items="${grouperRequestContainer.roleInheritanceContainer.rolesImpliedByThisImmediate}" var="roleImpliedByImmediate">
+                        ${grouper:escapeHtml(roleImpliedByImmediate.extension)}
+                        <%-- role="button" + aria-label give this icon-only remove link an accessible name (GRP-7095) --%>
+                        <a class="grouper-icon-btn" href="#" role="button" aria-label="Remove role ${grouper:escapeHtml(roleImpliedByImmediate.extension)}" onclick="ajax('../app/UiV2Role.deleteRoleImpliedBy?roleId=${roleImpliedByImmediate.id}', {formIds: 'editRoleInheritanceForm'}); return false;"><i class="fa fa-times" style="color: #aaaaaa" aria-hidden="true"></i></a>
+                         <br />
+                      </c:forEach>
+                    </div>
+                  </div>
+                  
+                </form>
+              </div>
+            </div>
+            
+            
+            

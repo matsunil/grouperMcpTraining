@@ -1,0 +1,244 @@
+package edu.internet2.middleware.grouper.abac;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import edu.internet2.middleware.grouperClient.collections.MultiKey;
+import edu.internet2.middleware.grouperClient.util.GrouperClientUtils;
+
+public class GrouperJexlScriptPart {
+
+  /**
+   * Role of this part in the tree of script parts. LEAF parts are method calls
+   * (memberOf / hasRow / hasAttribute / ...). AND and OR parts are compounds whose
+   * children are the other parts that name them as parentPart.
+   */
+  public enum Connective { LEAF, AND, OR }
+
+
+  /**
+   * 
+   */
+  @Override
+  public String toString() {
+    return GrouperClientUtils.toStringReflection(this, null);
+  }
+
+  /**
+   * 
+   */
+  @Override
+  protected GrouperJexlScriptPart clone() {
+    GrouperJexlScriptPart clone = new GrouperJexlScriptPart();
+    for (MultiKey argument : this.arguments) {
+      clone.arguments.add(new MultiKey(argument.getKeys()));
+    }
+    clone.displayDescription.append(this.displayDescription);
+    clone.whereClause.append(this.whereClause);
+    return clone;
+  }
+
+  public GrouperJexlScriptPart() {
+  }
+
+  /**
+   * arguments for SQL (bind vars)
+   */
+  private List<MultiKey> arguments = new ArrayList<MultiKey>();
+
+  /**
+   * arguments for SQL (bind vars)
+   * @return
+   */
+  public List<MultiKey> getArguments() {
+    return arguments;
+  }
+
+  /**
+   * arguments for SQL (bind vars)
+   * @param arguments
+   */
+  public void setArguments(List<MultiKey> arguments) {
+    this.arguments = arguments;
+  }
+
+  /**
+   * where clause for SQL
+   */
+  private StringBuilder whereClause = new StringBuilder();
+
+  /**
+   * where clause for SQL
+   * @return
+   */
+  public StringBuilder getWhereClause() {
+    return whereClause;
+  }
+
+  /**
+   * where clause for SQL
+   * @param whereClause
+   */
+  public void setWhereClause(StringBuilder whereClause) {
+    this.whereClause = whereClause;
+  }
+
+  /**
+   * description of this scriptlet
+   */
+  private StringBuilder displayDescription = new StringBuilder();
+
+  /**
+   * description of this scriptlet
+   * @return
+   */
+  public StringBuilder getDisplayDescription() {
+    return displayDescription;
+  }
+
+  /**
+   * description of this scriptlet
+   * @param displayDescription
+   */
+  public void setDisplayDescription(StringBuilder displayDescription) {
+    this.displayDescription = displayDescription;
+  }
+
+  private int populationCount = -1;
+  
+  
+  public int getPopulationCount() {
+    return populationCount;
+  }
+
+  
+  public void setPopulationCount(int populationCount) {
+    this.populationCount = populationCount;
+  }
+
+  
+  public boolean isContainsSubject() {
+    return containsSubject;
+  }
+
+  
+  public void setContainsSubject(boolean containsSubject) {
+    this.containsSubject = containsSubject;
+  }
+
+  private boolean containsSubject = false;
+
+  /**
+   * whether this part represents a negated (NOT) condition
+   */
+  private boolean negated = false;
+
+  public boolean isNegated() {
+    return negated;
+  }
+
+  public void setNegated(boolean negated) {
+    this.negated = negated;
+  }
+
+  /**
+   * Connective for this part. Default LEAF means this is a terminal method-call part.
+   * Set to AND or OR when the analyzer encounters an ASTAndNode / ASTOrNode while this
+   * part is the accumulator — i.e. when this part's combined description is being built
+   * from AND'd or OR'd children.
+   */
+  private Connective connective = Connective.LEAF;
+
+  public Connective getConnective() {
+    return connective;
+  }
+
+  public void setConnective(Connective connective) {
+    this.connective = connective;
+  }
+
+  /**
+   * For a hasRow leaf part: true when the inner row predicate's top-level connective is OR
+   * (so the column siblings should be joined with " or " in the terse rendering instead of
+   * the default " and "). False otherwise.
+   */
+  private boolean rowInnerOr;
+
+  public boolean isRowInnerOr() {
+    return rowInnerOr;
+  }
+
+  public void setRowInnerOr(boolean rowInnerOr) {
+    this.rowInnerOr = rowInnerOr;
+  }
+
+  /**
+   * The part that owns this one in the analysis tree. Null for the root part.
+   * Computed in a post-analysis pass that walks each part's AST node upward in the
+   * combined outer + per-hasRow inner ASTs.
+   */
+  private GrouperJexlScriptPart parentPart;
+
+  public GrouperJexlScriptPart getParentPart() {
+    return parentPart;
+  }
+
+  public void setParentPart(GrouperJexlScriptPart parentPart) {
+    this.parentPart = parentPart;
+  }
+
+  /**
+   * true when this part uses a comparison operator (less-than / greater-than family) whose
+   * terse visualization label cannot be told apart from a plain equals check by looking at
+   * the SQL arguments alone. The terse renderer falls back to the verbose description.
+   */
+  private boolean terseUnsupportedOperator = false;
+
+  public boolean isTerseUnsupportedOperator() {
+    return terseUnsupportedOperator;
+  }
+
+  public void setTerseUnsupportedOperator(boolean terseUnsupportedOperator) {
+    this.terseUnsupportedOperator = terseUnsupportedOperator;
+  }
+
+  /**
+   * true when this part should appear in the analysis table (with its own population count)
+   * but should NOT be wired into the AbacReference visualization tree. Set on the inner-NOT
+   * clone in row predicates that sit inside an enclosing AND/OR — the enclosing loop already
+   * creates a clone for the whole !-expression, and including this one too would render as
+   * a duplicate node in the graph.
+   */
+  private boolean skipInVisualizationTree = false;
+
+  public boolean isSkipInVisualizationTree() {
+    return skipInVisualizationTree;
+  }
+
+  public void setSkipInVisualizationTree(boolean skipInVisualizationTree) {
+    this.skipInVisualizationTree = skipInVisualizationTree;
+  }
+
+  /**
+   * true when this row should be hidden from the analysis-screen table. A negated LEAF part
+   * inside an AND/OR compound (has a parentPart) reports the un-negated inner-condition count
+   * next to a "Not …" description — the number and the text describe different populations.
+   * That divergence is deliberate (see the ASTNotNode branch's {@code isThisClonesOwnNot}
+   * skip: it exists so a script like {@code !memberOf('smallGroup')} against a two-million
+   * directory doesn't show "1,765,754 Not member of group smallGroup" on the analysis screen)
+   * but the row itself reads confusingly, so we hide it. The enclosing compound row still
+   * shows the whole expression, and the visualization renders the negated edge, so no
+   * information is lost.
+   *
+   * A standalone negated root (e.g. a script that is just {@code !memberOf('X')} on its own)
+   * has {@code parentPart == null}, so this returns false — that lone row is the only place
+   * the user could see the population and it is not hidden.
+   * @return true if the analysis-table row for this part should be suppressed
+   */
+  public boolean isHideFromAnalysisTable() {
+    return this.negated
+        && this.connective == Connective.LEAF
+        && this.parentPart != null;
+  }
+
+}

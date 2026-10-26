@@ -1,0 +1,18 @@
+package edu.internet2.middleware.grouper.app.datadog;
+
+import junit.framework.Test;
+import junit.framework.TestCase;
+import junit.framework.TestSuite;
+
+public class AllDatadogProvisionerTests extends TestCase {
+
+  public static Test suite() {
+    TestSuite suite = new TestSuite(AllDatadogProvisionerTests.class.getName());
+    //$JUnit-BEGIN$
+    suite.addTestSuite(DatadogProvisionerTest.class);
+    suite.addTestSuite(DatadogProvisioningTargetNativeSyncTest.class);
+    //$JUnit-END$
+    return suite;
+  }
+
+}

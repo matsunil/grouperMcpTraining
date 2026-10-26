@@ -1,0 +1,575 @@
+/*******************************************************************************
+ * Copyright 2012 Internet2
+ * 
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ * 
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ * 
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ ******************************************************************************/
+package edu.internet2.middleware.grouper.ws.coresoap;
+
+import java.util.LinkedHashSet;
+import java.util.Set;
+import java.util.TreeSet;
+
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.builder.ToStringBuilder;
+
+import edu.internet2.middleware.grouper.GrouperSession;
+import edu.internet2.middleware.grouper.Member;
+import edu.internet2.middleware.grouper.SubjectFinder;
+import edu.internet2.middleware.grouper.misc.GrouperVersion;
+import edu.internet2.middleware.grouper.pit.PITMember;
+import edu.internet2.middleware.grouper.util.GrouperUtil;
+import edu.internet2.middleware.grouper.ws.GrouperWsConfig;
+import edu.internet2.middleware.grouper.ws.util.GrouperServiceUtils;
+import edu.internet2.middleware.grouper.ws.util.GrouperWsVersionUtils;
+import edu.internet2.middleware.grouperClient.util.GrouperClientUtils;
+import edu.internet2.middleware.subject.SourceUnavailableException;
+import edu.internet2.middleware.subject.Subject;
+import edu.internet2.middleware.subject.SubjectNotFoundException;
+import edu.internet2.middleware.subject.SubjectNotUniqueException;
+
+/**
+ * subject bean for web services
+ * 
+ * @author mchyzer
+ * 
+ */
+public class WsSubject implements Comparable<WsSubject> {
+
+  /** if lookedup by identifier, this is that identifier */
+  private String identifierLookup;
+
+  /**
+   * identifier used to lookup subject
+   * @return the identifier
+   */
+  public String getIdentifierLookup() {
+    return this.identifierLookup;
+  }
+
+  /**
+   * return the identifier looked up
+   * @param identifierLookup1
+   */
+  public void setIdentifierLookup(String identifierLookup1) {
+    this.identifierLookup = identifierLookup1;
+  }
+
+  /**
+   * make sure this is an explicit toString
+   */
+  @Override
+  public String toString() {
+    return ToStringBuilder.reflectionToString(this);
+  }
+
+  /**
+   * result code of a request
+   */
+  public static enum WsSubjectResultCode {
+
+    /** found the stem (or not) */
+    SUCCESS,
+
+    /** cant find subject */
+    SUBJECT_NOT_FOUND,
+
+    /** duplicate subject records found */
+    SUBJECT_DUPLICATE,
+
+    /** source was unavailable */
+    SOURCE_UNAVAILABLE,
+
+    /** subject is in member table, but cant be found from subject source */
+    UNRESOLVABLE;
+
+    /**
+     * if this is a successful result
+     * 
+     * @return true if success
+     */
+    public boolean isSuccess() {
+      return this == SUCCESS;
+    }
+  }
+
+  /**
+   * convert members to subject results
+   * @param attributeNames to get from subjects
+   * @param memberSet
+   * @param includeSubjectDetail 
+   * @return the subject results
+   */
+  public static WsSubject[] convertMembers(Set<Member> memberSet, String[] attributeNames, boolean includeSubjectDetail) {
+    int memberSetLength = GrouperUtil.length(memberSet);
+    if (memberSetLength == 0) {
+      return null;
+    }
+
+    WsSubject[] wsSubjectResults = new WsSubject[memberSetLength];
+    int index = 0;
+    for (Member member : memberSet) {
+      wsSubjectResults[index++] = new WsSubject(member, attributeNames, null, includeSubjectDetail);
+    }
+    return wsSubjectResults;
+  }
+
+  /** can be SUCCESS (T) or UNRESOLVABLE (F) */
+  private String resultCode;
+
+  /** T or F */
+  private String success;
+
+  /**
+   * 
+   */
+  private static final String TYPE = "type";
+
+  /**
+   * 
+   */
+  private static final String NAME = "name";
+
+  /**
+   * 
+   */
+  private static final String DESCRIPTION = "description";
+
+  /** prefix of attribute that refers to subject: subject. */
+  public static final String SUBJECT_ATTRIBUTE_PREFIX = "subject.";
+
+  /**
+   * constructor
+   */
+  public WsSubject() {
+    // blank
+  }
+
+  /**
+   * this is a temporary constructor to just put the lookup info here
+   * in case there is an error retrieving the subject
+   * constructor
+   * @param wsSubjectLookup to be based on (assuming subject not found,
+   * just copy the fields
+   */
+  public WsSubject(WsSubjectLookup wsSubjectLookup) {
+    this.id = StringUtils.defaultIfEmpty(wsSubjectLookup.getSubjectId(),
+        wsSubjectLookup.getSubjectIdentifier());
+    this.sourceId = wsSubjectLookup.getSubjectSourceId();
+  }
+
+  /**
+   * constructor to convert jdbc subject to a ws subject
+   * 
+   * @param subject (can be null)
+   * @param subjectAttributeNames (should be calculated based on if detail or not)
+   * @param wsSubjectLookup can be null, else the lookup which got the subject
+   */
+  public WsSubject(Subject subject, String[] subjectAttributeNames, WsSubjectLookup wsSubjectLookup) {
+    this.assignSubjectData(subject, subjectAttributeNames);
+    if (wsSubjectLookup != null) {
+      //if the lookup has info, and it isnt in the wssubject, put it there
+      if (!StringUtils.isBlank(wsSubjectLookup.getSubjectIdentifier())) {
+        this.identifierLookup = wsSubjectLookup.getSubjectIdentifier();      
+      }
+      if (StringUtils.isBlank(this.getId()) && !StringUtils.isBlank(wsSubjectLookup.getSubjectId())) {
+        this.setId(wsSubjectLookup.getSubjectId());
+      }
+      if (StringUtils.isBlank(this.getSourceId()) && !StringUtils.isBlank(wsSubjectLookup.getSubjectSourceId())) {
+        this.setSourceId(wsSubjectLookup.getSubjectSourceId());
+      }
+      
+    }
+  }
+
+  /**
+  * construct with member to set internal fields
+  * 
+  * @param member
+  * @param subjectAttributeNames are the attributes the user is getting (either requested or in config)
+  * (should be calculated for is detail or not)
+   * @param subjectLookup 
+   * @param includeSubjectDetails 
+  * @param retrieveExtendedSubjectDataBoolean
+  *            true to retrieve subject info (more than just the id)
+  */
+  public WsSubject(Member member, String[] subjectAttributeNames, WsSubjectLookup subjectLookup, boolean includeSubjectDetails) {
+    this.setMemberId(member.getId());
+    this.setId(member.getSubjectId());
+    this.setSourceId(member.getSubjectSource().getId());
+
+    int attributesLength = GrouperUtil.length(subjectAttributeNames);
+
+    if (subjectLookup != null && StringUtils.isNotBlank(subjectLookup.getSubjectIdentifier())) {
+      this.identifierLookup = subjectLookup.getSubjectIdentifier();
+    }
+
+    // if getting the subject data (extra queries)
+    if (attributesLength > 0 || includeSubjectDetails) {
+      Subject subject = null;
+      try {
+        subject = member.getSubject();
+      } catch (SubjectNotFoundException snfe) {
+        // I guess just ignore if not found, fields will be null
+        if (snfe.getCause() instanceof SubjectNotUniqueException) {
+          this.assignResultCode(WsSubjectResultCode.SUBJECT_DUPLICATE);
+        } else if (snfe.getCause() instanceof SourceUnavailableException) {
+          this.assignResultCode(WsSubjectResultCode.SOURCE_UNAVAILABLE);
+        } else {
+          this.assignResultCode(WsSubjectResultCode.UNRESOLVABLE);
+        }
+        return;
+      }
+      this.assignSubjectData(subject, subjectAttributeNames);
+    } else {
+      //if no other data, then success
+      this.assignResultCode(WsSubjectResultCode.SUCCESS);
+    }
+  }
+  
+  /**
+   * construct with member to set internal fields
+   * 
+   * @param pitMember
+   * @param subjectAttributeNames are the attributes the user is getting (either requested or in config)
+   * (should be calculated for is detail or not)
+   * @param subjectLookup 
+   * @param includeSubjectDetails 
+   */
+   public WsSubject(PITMember pitMember, String[] subjectAttributeNames, WsSubjectLookup subjectLookup, boolean includeSubjectDetails) {
+     this.setMemberId(pitMember.getSourceId());
+     this.setId(pitMember.getSubjectId());
+     this.setSourceId(pitMember.getSubjectSourceId());
+
+     int attributesLength = GrouperUtil.length(subjectAttributeNames);
+
+     if (subjectLookup != null && StringUtils.isNotBlank(subjectLookup.getSubjectIdentifier())) {
+       this.identifierLookup = subjectLookup.getSubjectIdentifier();
+     }
+
+     // if getting the subject data (extra queries)
+     if (attributesLength > 0 || includeSubjectDetails) {
+       Subject subject = null;
+       try {
+         String subjectId = pitMember.getSubjectId();
+         subject = SubjectFinder.findById(subjectId, true);
+       } catch (SubjectNotFoundException snfe) {
+         // I guess just ignore if not found, fields will be null
+         if (snfe.getCause() instanceof SubjectNotUniqueException) {
+           this.assignResultCode(WsSubjectResultCode.SUBJECT_DUPLICATE);
+         } else if (snfe.getCause() instanceof SourceUnavailableException) {
+           this.assignResultCode(WsSubjectResultCode.SOURCE_UNAVAILABLE);
+         } else {
+           this.assignResultCode(WsSubjectResultCode.UNRESOLVABLE);
+         }
+         return;
+       }
+       this.assignSubjectData(subject, subjectAttributeNames);
+     } else {
+       //if no other data, then success
+       this.assignResultCode(WsSubjectResultCode.SUCCESS);
+     }
+   }
+
+  /** v6 client version where subject attribute values are multivalued and encoded (GRP-5430) */
+  private static final GrouperVersion MULTIVALUED_ATTRIBUTE_VALUES_CLIENT_VERSION_V6 = GrouperVersion.valueOfIgnoreCase("v6_7_000");
+
+  /** v7 starts here, 7.0 to 7.8 clients do not encode */
+  private static final GrouperVersion CLIENT_VERSION_V7 = GrouperVersion.valueOfIgnoreCase("v7_0_000");
+
+  /** v7 client version where subject attribute values are multivalued and encoded (GRP-5430) */
+  private static final GrouperVersion MULTIVALUED_ATTRIBUTE_VALUES_CLIENT_VERSION_V7 = GrouperVersion.valueOfIgnoreCase("v7_9_000");
+
+  /**
+   * if the client version gets all values of multivalued subject attributes, encoded with
+   * GrouperClientUtils.wsSubjectAttributeValuesEncode (GRP-5430).  This is in v6 and v7 only (not v4), so the client
+   * versions are 6.7 up to (not including) 7.0, and 7.9+.  The same range is in the v6 and v7 branches so a client gets
+   * the same format from either server.  If no client version (not a WS request), then no
+   * @return true if encoding
+   */
+  static boolean encodeMultivaluedAttributeValues() {
+    GrouperVersion clientVersion = GrouperWsVersionUtils.retrieveCurrentClientVersion();
+    if (clientVersion == null) {
+      return false;
+    }
+    if (clientVersion.greaterOrEqualToArg(MULTIVALUED_ATTRIBUTE_VALUES_CLIENT_VERSION_V7)) {
+      return true;
+    }
+    return clientVersion.greaterOrEqualToArg(MULTIVALUED_ATTRIBUTE_VALUES_CLIENT_VERSION_V6)
+        && clientVersion.lessThanArg(CLIENT_VERSION_V7);
+  }
+
+  /**
+   * assign subject data
+   * @param subject to assign from , can be null
+   * @param retrieveExtendedSubjectDataBoolean true to retrieve extended subject data
+   * @param subjectAttributeNames to retrieve, can be empty or null
+   */
+  private void assignSubjectData(Subject subject, String[] subjectAttributeNames) {
+
+    //see if nothing to assign
+    if (subject == null) {
+      this.assignResultCode(WsSubjectResultCode.SUBJECT_NOT_FOUND);
+      return;
+    }
+
+    this.setId(subject.getId());
+    this.setSourceId(subject.getSource().getId());
+
+    this.setName(subject.getName());
+    
+    int attributesLength = GrouperUtil.length(subjectAttributeNames);
+
+    String subjectAttributesForDecorator = GrouperWsConfig.retrieveConfig().propertyValueString("ws.subject.attributes.for.decorator");
+    Set<String> subjectAttributesForDecoratorSet = null;
+    
+    //see if there are any attributes which need to be sent to the subject customizer
+    if (!StringUtils.isBlank(subjectAttributesForDecorator) && GrouperUtil.length(subjectAttributeNames) > 0) {
+      
+      Set<String> subjectAttributesForDecoratorSetFromConfig = GrouperUtil.splitTrimToSet(subjectAttributesForDecorator, ",");
+      
+      for (String subjectAttributeName : subjectAttributeNames) {
+        
+        if (subjectAttributesForDecoratorSetFromConfig.contains(subjectAttributeName)) {
+          if(subjectAttributesForDecoratorSet == null) {
+            subjectAttributesForDecoratorSet = new LinkedHashSet<String>();
+          }
+          subjectAttributesForDecoratorSet.add(subjectAttributeName);
+        }
+      }
+    }
+    
+    //if there are customizer attributes, then run the customizer
+    if (GrouperUtil.length(subjectAttributesForDecoratorSet) > 0) {
+      
+      Set<Subject> subjects = GrouperUtil.toSet(subject);
+      SubjectFinder.decorateSubjects(GrouperSession.staticGrouperSession(), subjects, subjectAttributesForDecoratorSet);
+      
+    }
+    
+    // if getting the subject data (extra queries)
+    if (attributesLength > 0) {
+
+      // GRP-5430: client version 6.7 to 6.x or 7.9+ gets all values of multivalued attributes, encoded (see
+      // GrouperClientUtils.wsSubjectAttributeValuesEncode), older clients get the first value unencoded as before
+      boolean encodeMultivalued = encodeMultivaluedAttributeValues();
+
+      //extended means add description or name (or custom)
+      this.attributeValues = new String[attributesLength];
+      int index = 0;
+      for (String attributeName : subjectAttributeNames) {
+        String attributeValue = null;
+        Set<String> multipleValues = null;
+        if (encodeMultivalued) {
+          // sort so the order is the same each call (sources often store values in a HashSet)
+          multipleValues = new TreeSet<String>();
+          for (String value : GrouperUtil.nonNull(subject.getAttributeValues(attributeName))) {
+            if (value != null) {
+              multipleValues.add(value);
+            }
+          }
+        } else {
+          attributeValue = subject.getAttributeValue(attributeName);
+        }
+
+        // type, description, and name might be in getter (note, this might go away in next subject api)
+        boolean noValue = encodeMultivalued ? multipleValues.size() == 0 : StringUtils.isBlank(attributeValue);
+        if (noValue) {
+          if (StringUtils.equals(TYPE, attributeName)) {
+            attributeValue = subject.getType().getName();
+          } else if (StringUtils.equals(DESCRIPTION, attributeName)) {
+            attributeValue = subject.getDescription();
+          } else if (StringUtils.equals(NAME, attributeName)) {
+            attributeValue = subject.getName();
+          }
+          if (encodeMultivalued && attributeValue != null) {
+            multipleValues.add(attributeValue);
+          }
+        }
+        if (encodeMultivalued) {
+          attributeValue = GrouperClientUtils.wsSubjectAttributeValuesEncode(multipleValues);
+        }
+
+        //NOTE: dont send nulls, it might mess up XML, only send empty string if not there
+        this.attributeValues[index] = StringUtils.defaultString(attributeValue);
+        index++;
+      }
+    }
+    this.assignResultCode(WsSubjectResultCode.SUCCESS);
+
+  }
+
+  /**
+   * member id
+   */
+  private String memberId;
+  
+  /** id of subject, note if no subject found, and identifier was passed in,
+   * that will be placed here */
+  private String id;
+
+  /** name of subject */
+  private String name;
+
+  /** source of subject */
+  private String sourceId;
+
+  /**
+   * attribute data of subjects in group (in same order as attributeNames)
+   */
+  private String[] attributeValues;
+
+  /**
+   * subject id, note if no subject found, and identifier was passed in,
+   * that will be placed here
+   * @return the id
+   */
+  public String getId() {
+    return this.id;
+  }
+
+  /**
+   * subject id, note if no subject found, and identifier was passed in,
+   * that will be placed here
+   * @param id1
+   */
+  public void setId(String id1) {
+    this.id = id1;
+  }
+
+  /**
+   * @return the name
+   */
+  public String getName() {
+    return this.name;
+  }
+
+  /**
+   * @param name1
+   *            the name to set
+   */
+  public void setName(String name1) {
+    this.name = name1;
+  }
+
+  /**
+   * if attributes are being sent back per config in the grouper.properties,
+   * this is attribute0 value, this is extended subject data
+   * 
+   * @return the attribute0
+   */
+  public String[] getAttributeValues() {
+    return this.attributeValues;
+  }
+
+  /**
+   * attribute data of subjects in group (in same order as attributeNames)
+   * 
+   * @param attributesa
+   *            the attributes to set
+   */
+  public void setAttributeValues(String[] attributesa) {
+    this.attributeValues = attributesa;
+  }
+
+  /**
+   * @return the source
+   */
+  public String getSourceId() {
+    return this.sourceId;
+  }
+
+  /**
+   * @param source1 the source to set
+   */
+  public void setSourceId(String source1) {
+    this.sourceId = source1;
+  }
+  
+  /**
+   * @return the memberId
+   */
+  public String getMemberId() {
+    return this.memberId;
+  }
+
+  /**
+   * @param memberId1 the uuid to set
+   */
+  public void setMemberId(String memberId1) {
+    this.memberId = memberId1;
+  }
+
+  /**
+   * @return the resultCode
+   */
+  public String getResultCode() {
+    return this.resultCode;
+  }
+
+  /**
+   * @param resultCode1 the resultCode to set
+   */
+  public void setResultCode(String resultCode1) {
+    this.resultCode = resultCode1;
+  }
+
+  /**
+   * assign the code from the enum
+   * 
+   * @param wsSubjectResultCode
+   */
+  public void assignResultCode(WsSubjectResultCode wsSubjectResultCode) {
+    this.setResultCode(wsSubjectResultCode == null ? null : wsSubjectResultCode.name());
+    this.setSuccess(GrouperServiceUtils.booleanToStringOneChar(wsSubjectResultCode
+        .isSuccess()));
+  }
+
+  /**
+   * T or F for success
+   * @return the success
+   */
+  public String getSuccess() {
+    return this.success;
+  }
+
+  /**
+   * T or F for success
+   * @param success1 the success to set
+   */
+  public void setSuccess(String success1) {
+    this.success = success1;
+  }
+
+  /**
+   * @see java.lang.Comparable#compareTo(java.lang.Object)
+   */
+  public int compareTo(WsSubject o2) {
+    if (this == o2) {
+      return 0;
+    }
+    //lets by null safe here
+    if (this == null) {
+      return -1;
+    }
+    if (o2 == null) {
+      return 1;
+    }
+    int compare = GrouperUtil.compare(this.getSourceId(), o2.getSourceId());
+    if (compare != 0) {
+      return compare;
+    }
+    return GrouperUtil.compare(this.getId(), o2.getId());
+
+  }
+
+}

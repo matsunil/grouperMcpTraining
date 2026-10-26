@@ -1,0 +1,528 @@
+package edu.internet2.middleware.grouper.app.provisioning.targetDao;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+
+import edu.internet2.middleware.grouper.app.loader.GrouperDaemonUtils;
+import edu.internet2.middleware.grouper.app.provisioning.GrouperProvisioner;
+import edu.internet2.middleware.grouper.app.provisioning.ProvisioningEntity;
+import edu.internet2.middleware.grouper.app.provisioning.ProvisioningGroup;
+import edu.internet2.middleware.grouper.app.provisioning.ProvisioningMembership;
+import edu.internet2.middleware.grouper.util.GrouperCallable;
+import edu.internet2.middleware.grouper.util.GrouperUtil;
+
+
+/**
+ * generally when you deal with insert/update/delete/retrieve
+ * you should use the "matchingId" of the parameter to the method.
+ * Note: when you retrieve the data, you should not set the matchingId,
+ * you should let the provisioning framework set that.
+ * 
+ * The results of retrieving a few objects should be in the same format
+ * as when you retrieve all at once.
+ * 
+ */
+public abstract class GrouperProvisionerTargetDaoBase {
+
+  /**
+   * start logging the source low level actions
+   * @return true if the logging was started (i.e. can be stopped), or false if already started (in which case 
+   * somewhere up the stack with stop it so dont stop it)
+   */
+  public boolean loggingStart() {
+    return false;
+  }
+
+  /**
+   * stop logging and get the output
+   * only call this if you successfully started the logging
+   */
+  public String loggingStop() {
+    return null;
+  }
+
+  private GrouperProvisionerDaoCapabilities grouperProvisionerDaoCapabilities = new GrouperProvisionerDaoCapabilities();
+  
+  
+  public GrouperProvisionerDaoCapabilities getGrouperProvisionerDaoCapabilities() {
+    return grouperProvisionerDaoCapabilities;
+  }
+  
+  public void setGrouperProvisionerDaoCapabilities(
+      GrouperProvisionerDaoCapabilities grouperProvisionerDaoCapabilities) {
+    this.grouperProvisionerDaoCapabilities = grouperProvisionerDaoCapabilities;
+  }
+
+  public abstract void registerGrouperProvisionerDaoCapabilities(GrouperProvisionerDaoCapabilities grouperProvisionerDaoCapabilities);
+
+  /**
+   * GRP-7490: filter the target users reconstructed from the sync-back cache (fullSyncUsersFromSyncBack)
+   * before they enter the compare, so a full sync served from the cache applies the same rules as a
+   * live retrieve (e.g. an ignore list, or treating a disabled / deactivated account as absent).  The
+   * sync-back mirror is the full view of the target and keeps the filtered users.  A filtered-out
+   * user that Grouper provisions is then "missing", and is re-read live through retrieveEntity, which
+   * applies the live filtering.  Default: no filtering.
+   * @param targetEntities the reconstructed target users (not null)
+   * @return the users to use as the target view
+   */
+  public List<ProvisioningEntity> filterTargetEntitiesFromSyncBack(List<ProvisioningEntity> targetEntities) {
+    return targetEntities;
+  }
+
+  /**
+   * GRP-7490: groups analogue of {@link #filterTargetEntitiesFromSyncBack(List)} (fullSyncGroupsFromSyncBack).
+   * Default: no filtering.
+   * @param targetGroups the reconstructed target groups (not null)
+   * @return the groups to use as the target view
+   */
+  public List<ProvisioningGroup> filterTargetGroupsFromSyncBack(List<ProvisioningGroup> targetGroups) {
+    return targetGroups;
+  }
+
+  /**
+   * GRP-7490: memberships analogue of {@link #filterTargetEntitiesFromSyncBack(List)}
+   * (fullSyncMembershipsFromSyncBack), e.g. to drop memberships of users or groups a live retrieve
+   * would not return.  Called after the users and groups have been seeded.  Default: no filtering.
+   * @param targetMemberships the reconstructed target memberships (not null)
+   * @return the memberships to use as the target view
+   */
+  public List<ProvisioningMembership> filterTargetMembershipsFromSyncBack(List<ProvisioningMembership> targetMemberships) {
+    return targetMemberships;
+  }
+
+  private List<TargetDaoTimingInfo> targetDaoTimingInfos = new ArrayList<TargetDaoTimingInfo>();
+  
+  public void addTargetDaoTimingInfo(TargetDaoTimingInfo targetDaoTimingInfo) {
+    this.targetDaoTimingInfos.add(targetDaoTimingInfo);
+  }
+  
+  
+  public List<TargetDaoTimingInfo> getTargetDaoTimingInfos() {
+    return targetDaoTimingInfos;
+  }
+
+  
+  public void setTargetDaoTimingInfos(List<TargetDaoTimingInfo> targetDaoTimingInfos) {
+    this.targetDaoTimingInfos = targetDaoTimingInfos;
+  }
+
+  public TargetDaoRetrieveAllGroupsResponse retrieveAllGroups(TargetDaoRetrieveAllGroupsRequest targetDaoRetrieveAllGroupsRequest) {
+    throw new UnsupportedOperationException();
+  }
+  
+  /**
+   * dont return null
+   * @param targetDaoRetrieveAllEntitiesRequest
+   * @return
+   */
+  public TargetDaoRetrieveAllEntitiesResponse retrieveAllEntities(TargetDaoRetrieveAllEntitiesRequest targetDaoRetrieveAllEntitiesRequest) {
+    throw new UnsupportedOperationException();
+  }
+  
+ 
+  public TargetDaoRetrieveAllMembershipsResponse retrieveAllMemberships(TargetDaoRetrieveAllMembershipsRequest targetDaoRetrieveAllMembershipsRequest) {
+    throw new UnsupportedOperationException();
+  }
+  
+  /**
+   * set each provisioning object as "provisioned" after the insert/update/delete is done
+   * e.g. targetObject.setProvisioned(true)
+   * @paProvisioningGrouproup
+   */
+  public TargetDaoDeleteGroupResponse deleteGroup(TargetDaoDeleteGroupRequest targetDaoDeleteGroupRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * set each provisioning object as "provisioned" after the insert/update/delete is done
+   * e.g. targetObject.setProvisioned(true)
+   * @paProvisioningGrouproup
+   */
+  public TargetDaoInsertGroupResponse insertGroup(TargetDaoInsertGroupRequest targetDaoInsertGroupRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * reference back up to the provisioner
+   */
+  private GrouperProvisioner grouperProvisioner = null;
+
+  /**
+   * reference back up to the provisioner
+   * @return the provisioner
+   */
+  public GrouperProvisioner getGrouperProvisioner() {
+    return this.grouperProvisioner;
+  }
+
+  /**
+   * reference back up to the provisioner
+   * @param grouperProvisioner1
+   */
+  public void setGrouperProvisioner(GrouperProvisioner grouperProvisioner1) {
+    this.grouperProvisioner = grouperProvisioner1;
+  }
+
+  /**
+   * Run one unit of independent, parallelizable work per item across the provisioner thread pool.
+   * This is the generic threading primitive for connector retrieve loops where each item is an
+   * independent target call (e.g. fetching the members of one group in {@code retrieveAllData}).
+   *
+   * The work is submitted to the provisioner's {@link GrouperProvisioner#retrieveExecutorService()},
+   * which is sized by the provisioner's configured {@code threadPoolSize}. When the pool is not
+   * enabled (threadPoolSize &lt;= 1) or there is only a single item,
+   * {@link GrouperUtil#executorServiceSubmit(ExecutorService, List)} runs the work inline on the
+   * current thread, so callers get the same behavior as a plain sequential loop in that case.
+   *
+   * The current provisioner thread-local propagates to the pool threads via {@link GrouperCallable},
+   * so per-item logic can use it (e.g. native sync-back capture keyed on the current provisioner).
+   * Implementations of {@code perItemLogic} must synchronize any shared collections they write to.
+   *
+   * @param <T> the item type
+   * @param items the items to process; null/empty is a no-op
+   * @param logLabel short label for the callable (config id and instance id are appended)
+   * @param perItemLogic the logic to run for each item, potentially concurrently
+   */
+  public <T> void retrievePerItemInParallel(List<T> items, String logLabel,
+      GrouperProvisioningTargetDaoPerItemLogic<T> perItemLogic) {
+
+    if (GrouperUtil.length(items) == 0) {
+      return;
+    }
+
+    final GrouperProvisioner theGrouperProvisioner = this.getGrouperProvisioner();
+    ExecutorService executorService = theGrouperProvisioner == null ? null : theGrouperProvisioner.retrieveExecutorService();
+
+    String callableLabel = logLabel + (theGrouperProvisioner == null ? ""
+        : ("_" + theGrouperProvisioner.getConfigId() + "_" + theGrouperProvisioner.getInstanceId()));
+
+    List<GrouperCallable<Void>> grouperCallables = new ArrayList<GrouperCallable<Void>>();
+
+    for (T item : items) {
+      GrouperDaemonUtils.stopProcessingIfJobPaused();
+      final T itemFinal = item;
+      GrouperCallable<Void> grouperCallable = new GrouperCallable<Void>(callableLabel) {
+
+        @Override
+        public Void callLogic() {
+          perItemLogic.processItem(itemFinal);
+          return null;
+        }
+      };
+      grouperCallables.add(grouperCallable);
+    }
+
+    GrouperUtil.executorServiceSubmit(executorService, grouperCallables);
+  }
+
+
+  /**
+   * set each provisioning object as "provisioned" after the insert/update/delete is done
+   * e.g. targetObject.setProvisioned(true)
+   * @param targetDaoSendChangesToTargetRequest
+   * @return
+   */
+  public TargetDaoSendChangesToTargetResponse sendChangesToTarget(TargetDaoSendChangesToTargetRequest targetDaoSendChangesToTargetRequest) {
+
+    throw new UnsupportedOperationException();
+
+  }
+
+  /**
+   * set each provisioning object as "provisioned" after the insert/update/delete is done
+   * e.g. targetObject.setProvisioned(true)
+   * @param targetDaoSendGroupChangesToTargetRequest
+   * @return
+   */
+  public TargetDaoSendGroupChangesToTargetResponse sendGroupChangesToTarget(TargetDaoSendGroupChangesToTargetRequest targetDaoSendGroupChangesToTargetRequest) {
+
+    throw new UnsupportedOperationException();
+
+  }
+
+  /**
+   * set each provisioning object as "provisioned" after the insert/update/delete is done
+   * e.g. targetObject.setProvisioned(true)
+   * insert all these groups and either throw exception for all or mark each one with an exception
+   */
+  public TargetDaoUpdateGroupsResponse updateGroups(TargetDaoUpdateGroupsRequest targetDaoUpdateGroupsRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * delete all these Memberships and either throw exception for all or mark each one with an exception
+   * set each provisioning object as "provisioned" after the insert/update/delete is done
+   * e.g. targetObject.setProvisioned(true)
+   */
+  public TargetDaoDeleteMembershipsResponse deleteMemberships(TargetDaoDeleteMembershipsRequest targetDaoDeleteMembershipsRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * retrieve all data from the target
+   */
+  public TargetDaoRetrieveAllDataResponse retrieveAllData(TargetDaoRetrieveAllDataRequest targetDaoRetrieveAllDataRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * retrieve all incremental data from the target from the matching ids of the grouper translated and indexed target groups
+   */
+  public TargetDaoRetrieveIncrementalDataResponse retrieveIncrementalData(
+      TargetDaoRetrieveIncrementalDataRequest targetDaoRetrieveIncementalDataRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * bulk retrieve target provisioning groups, generally use the matching Ids in the targetGroups
+   * @return the target provisioning groups
+   */
+  public TargetDaoRetrieveGroupsResponse retrieveGroups(TargetDaoRetrieveGroupsRequest targetDaoRetrieveGroupsRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * bulk retrieve all target provisioning Memberships related to these groups, generally use the matching Ids in the targetGroups
+   * @return the target provisioning memberships
+   */
+  public TargetDaoRetrieveMembershipsByGroupsResponse retrieveMembershipsByGroups(TargetDaoRetrieveMembershipsByGroupsRequest targetDaoRetrieveMembershipsByGroupsRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * bulk retrieve all target provisioning Memberships related to these group
+   * @param targetGroup
+   * @return the memberships
+   */
+  public TargetDaoRetrieveMembershipsByGroupResponse retrieveMembershipsByGroup(
+      TargetDaoRetrieveMembershipsByGroupRequest targetDaoRetrieveMembershipsByGroupRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * bulk retrieve target provisioning Memberships, generally use the matching Ids in the targetEntities
+   * @return the target provisioning memberships
+   */
+  public TargetDaoRetrieveMembershipsByEntitiesResponse retrieveMembershipsByEntities(
+      TargetDaoRetrieveMembershipsByEntitiesRequest targetDaoRetrieveMembershipsByEntitiesRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * bulk retrieve all target provisioning Memberships related to these entity
+   * @param targetEntity
+   * @return the memberships
+   */
+  public TargetDaoRetrieveMembershipsByEntityResponse retrieveMembershipsByEntity(TargetDaoRetrieveMembershipsByEntityRequest targetDaoRetrieveMembershipsByEntityRequest) {
+    throw new UnsupportedOperationException();
+  }
+  
+  /**
+   * bulk retrieve target provisioning Memberships, generally use the matching Ids in the targetMemberships
+   * @param targetDaoRetrieveMembershipsRequest
+   * @return the target provisioning Memberships
+   */
+  public TargetDaoRetrieveMembershipsResponse retrieveMemberships(TargetDaoRetrieveMembershipsRequest targetDaoRetrieveMembershipsRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * bulk retrieve target provisioning Entities, generally use the matching Ids in the targetEntities
+   * @param targetEntities
+   * @return the target provisioning Entities
+   */
+  public TargetDaoRetrieveEntitiesResponse retrieveEntities(TargetDaoRetrieveEntitiesRequest targetDaoRetrieveEntitiesRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * return a group by matching id of grouper target group, or null if not found
+   * @param targetGroup
+   * @return the target provisioning group or null if not found
+   */
+  public TargetDaoRetrieveGroupResponse retrieveGroup(TargetDaoRetrieveGroupRequest targetDaoRetrieveGroupRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * return a Entity by matching id of grouper target Entity, or null if not found
+   * @param targetEntity
+   * @return the target provisioning Entity or null if not found
+   */
+  public TargetDaoRetrieveEntityResponse retrieveEntity(TargetDaoRetrieveEntityRequest targetDaoRetrieveEntityRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * return a Membership by matching id of grouper target Membership, or null if not found
+   * @param targetMembership
+   * @return the target provisioning Membership or null if not found
+   */
+  public TargetDaoRetrieveMembershipResponse retrieveMembership(TargetDaoRetrieveMembershipRequest targetDaoRetrieveMembershipRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * set each provisioning object as "provisioned" after the insert/update/delete is done
+   * e.g. targetObject.setProvisioned(true)
+   * @paProvisioningGrouproup
+   */
+  public TargetDaoUpdateGroupResponse updateGroup(TargetDaoUpdateGroupRequest targetDaoUpdateGroupRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * insert all these groups and either throw exception for all or mark each one with an exception
+   * set each provisioning object as "provisioned" after the insert/update/delete is done
+   * e.g. targetObject.setProvisioned(true)
+   */
+  public TargetDaoInsertGroupsResponse insertGroups(TargetDaoInsertGroupsRequest targetDaoInsertGroupsRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * set each provisioning object as "provisioned" after the insert/update/delete is done
+   * e.g. targetObject.setProvisioned(true)
+   * @paProvisioningEntity
+   */
+  public TargetDaoDeleteEntityResponse deleteEntity(TargetDaoDeleteEntityRequest targetDaoDeleteEntityRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * delete all these entities and either throw exception for all or mark each one with an exception
+   * set each provisioning object as "provisioned" after the insert/update/delete is done
+   * e.g. targetObject.setProvisioned(true)
+   */
+  public TargetDaoDeleteEntitiesResponse deleteEntities(TargetDaoDeleteEntitiesRequest targetDaoDeleteEntitiesRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * set each provisioning object as "provisioned" after the insert/update/delete is done
+   * e.g. targetObject.setProvisioned(true)
+   * @paProvisioningGrouproup
+   */
+  public TargetDaoInsertEntityResponse insertEntity(TargetDaoInsertEntityRequest targetDaoInsertEntityRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * insert all these groups and either throw exception for all or mark each one with an exception
+   * set each provisioning object as "provisioned" after the insert/update/delete is done
+   * e.g. targetObject.setProvisioned(true)
+   * @param targetEntityInserts
+   */
+  public TargetDaoInsertEntitiesResponse insertEntities(TargetDaoInsertEntitiesRequest targetDaoInsertEntitiesRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * set each provisioning object as "provisioned" after the insert/update/delete is done
+   * e.g. targetObject.setProvisioned(true)
+   * @paProvisioningEntity
+   */
+  public TargetDaoUpdateEntityResponse updateEntity(TargetDaoUpdateEntityRequest targetDaoUpdateEntityRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * insert all these Entities and either throw exception for all or mark each one with an exception
+   * set each provisioning object as "provisioned" after the insert/update/delete is done
+   * e.g. targetObject.setProvisioned(true)
+   * @param targetEntityInserts
+   */
+  public TargetDaoUpdateEntitiesResponse updateEntities(TargetDaoUpdateEntitiesRequest targetDaoUpdateEntitiesRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * set each provisioning object as "provisioned" after the insert/update/delete is done
+   * e.g. targetObject.setProvisioned(true)
+   * @paProvisioningMembership
+   */
+  public TargetDaoDeleteMembershipResponse deleteMembership(TargetDaoDeleteMembershipRequest targetDaoDeleteMembershipRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * delete all these groups and either throw exception for all or mark each one with an exception
+   * set each provisioning object as "provisioned" after the insert/update/delete is done
+   * e.g. targetObject.setProvisioned(true)
+   * @param targetGroupDeletes
+   */
+  public TargetDaoDeleteGroupsResponse deleteGroups(TargetDaoDeleteGroupsRequest targetDaoDeleteGroupsRequest ) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * set each provisioning object as "provisioned" after the insert/update/delete is done
+   * e.g. targetObject.setProvisioned(true)
+   * @paProvisioningMembership
+   */
+  public TargetDaoInsertMembershipResponse insertMembership(TargetDaoInsertMembershipRequest targetDaoInsertMembershipRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * replace a groups memberships with this list
+   * @param targetDaoReplaceGroupMembershipsRequest
+   * @return the response
+   */
+  public TargetDaoReplaceGroupMembershipsResponse replaceGroupMemberships(TargetDaoReplaceGroupMembershipsRequest targetDaoReplaceGroupMembershipsRequest) {
+    throw new UnsupportedOperationException();
+  }
+  
+  /**
+   * insert all these Memberships and either throw exception for all or mark each one with an exception
+   * set each provisioning object as "provisioned" after the insert/update/delete is done
+   * e.g. targetObject.setProvisioned(true)
+   */
+  public TargetDaoInsertMembershipsResponse insertMemberships(TargetDaoInsertMembershipsRequest targetDaoInsertMembershipsRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * set each provisioning object as "provisioned" after the insert/update/delete is done
+   * e.g. targetObject.setProvisioned(true)
+   * @paProvisioningMembership
+   */
+  public TargetDaoUpdateMembershipResponse updateMembership(TargetDaoUpdateMembershipRequest targetDaoUpdateMembershipRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * update all these Memberships and either throw exception for all or mark each one with an exception
+   * set each provisioning object as "provisioned" after the insert/update/delete is done
+   * e.g. targetObject.setProvisioned(true)
+   */
+  public TargetDaoUpdateMembershipsResponse updateMemberships(TargetDaoUpdateMembershipsRequest targetDaoUpdateMembershipsRequest) {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * set each provisioning object as "provisioned" after the insert/update/delete is done
+   * e.g. targetObject.setProvisioned(true)
+   * @param ta
+   * @return 
+   */
+  public TargetDaoSendEntityChangesToTargetResponse sendEntityChangesToTarget(TargetDaoSendEntityChangesToTargetRequest targetDaoSendEntityChangesToTargetRequest) {
+
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * set each provisioning object as "provisioned" after the insert/update/delete is done
+   * e.g. targetObject.setProvisioned(true)
+   * @param targetDaoSendMembershipChangesToTargetRequest
+   * @return
+   */
+  public TargetDaoSendMembershipChangesToTargetResponse sendMembershipChangesToTarget(
+      TargetDaoSendMembershipChangesToTargetRequest targetDaoSendMembershipChangesToTargetRequest) {
+    
+    throw new UnsupportedOperationException();
+
+  }
+  
+}

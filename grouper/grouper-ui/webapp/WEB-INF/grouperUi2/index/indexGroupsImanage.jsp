@@ -1,0 +1,23 @@
+<%@ include file="../assetsJsp/commonTaglib.jsp"%>
+                    <!-- start indexGroupsIManage.jsp -->
+                    <h3 class="grouper-heading-as-h4">${textContainer.text['indexMyGroupsTitle'] }</h3>
+                    <c:choose>
+                      <c:when test="${grouperRequestContainer.indexContainer.groupsImanageRetrieved}">
+                        <ul class="unstyled list-widget">
+                          <c:forEach items="${grouperRequestContainer.indexContainer.guiGroupsUserManagesAbbreviated}" var="guiGroup">
+                            <li>
+                            ${guiGroup.shortLinkWithIconAndPath }
+                            </li>
+                          </c:forEach>
+                        </ul>
+                      </c:when>
+                      <c:otherwise>
+                        <button type="button" class="grouper-linkbutton" onclick="ajax('UiV2Main.indexColGroupsImanage?col=${col}&storePref=false'); return false;">${textContainer.text['indexMyGroupsTitleLoad'] }</button>
+                        <br /><br /><br /><br/>
+                      </c:otherwise>
+                    </c:choose>
+                    
+                    <p><strong><a href="?operation=UiV2MyGroups.myGroups"
+                  onclick="return handleGuiV2LinkClick(event, 'operation=UiV2MyGroups.myGroups');">${textContainer.text['indexMyGroupsViewAllGroups'] }</a>  </strong></p>
+                    <!-- end indexGroupsIManage.jsp -->
+                    

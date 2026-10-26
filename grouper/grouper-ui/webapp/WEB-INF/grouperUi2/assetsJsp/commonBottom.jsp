@@ -1,0 +1,32 @@
+<%-- note this wont work for token per page --%>
+<input type="hidden" name="<csrf:token-name/>" value="<csrf:token-value />"/>
+
+
+<%-- note: jquery script are included in commonHead --%>
+
+<script src="../../grouperExternal/public/assets/js/footable-0.1.js"></script>
+<script src="../../grouperExternal/public/assets/js/jquery.form.js"></script>
+<script src="../../grouperExternal/public/assets/js/jstree.min.js"></script>
+<script src="../../grouperExternal/public/assets/js/grouper.js"></script>
+<script src="../../grouperExternal/public/assets/js/native.history.js"></script>
+<script src="../../grouperExternal/public/assets/js/grouperUi.js?ver=7.9.0"></script>
+<script src="../../grouperExternal/public/assets/js/jquery.blockUI.js"></script>
+<script src="../../grouperExternal/public/assets/nifty/niftycube.js"></script>
+
+<script type="text/javascript">
+  var grouperCopiedToClipboardText = "${textContainer.text['copiedToClipboardMessage']}";
+  $().ajaxStop($.unblockUI);
+  // a11y item 11: the blockUI spinner is the only loading indicator during ajax. Wrap it in a
+  // role=status live region with visually-hidden "Loading" text so screen readers announce the
+  // loading state, and make the spinner image decorative (empty alt) so it is not read as "busy".
+  $.blockUI.defaults.message = "<div role='status'><img src='../../grouperExternal/public/assets/images/busy.gif' alt=''/><span class='visually-hidden'>${textContainer.textEscapeXml['guiLoading']}</span></div>";
+  $.blockUI.defaults.css.border = 'none';
+  $.blockUI.defaults.css.backgroundColor = 'transparent';
+  $.blockUI.defaults.overlayCSS.opacity = '0.02';
+  $.blockUI.defaults.fadeIn = '200';
+  $.blockUI.defaults.fadeOut = '400';
+  $.blockUI.defaults.timeout = '180000';
+  //MCH 20132626: this used to be 1000, but the UI v2 modal window is zindex 1050
+  $.blockUI.defaults.baseZ = '10000';
+  
+</script>

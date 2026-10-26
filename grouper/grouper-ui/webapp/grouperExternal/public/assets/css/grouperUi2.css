@@ -1,0 +1,829 @@
+
+/* move the text next to group icons over a little bit
+   note, shouldnt there be a space here?  Myabe not used? */
+.dijitTreeIcon.fa-group {
+  
+  margin-right: 2px;
+  
+}
+
+.grouperUiTooltip {
+  /*white-space: nowrap; */
+  word-wrap: break-word;
+}
+
+table.attributeDefAssignToTable td {
+  padding-left: 5px;
+  padding-right: 5px;
+}
+
+.compositeInfo {
+  margin-bottom: 1.3em;
+}
+
+.compositeInfo .compositeFactors {
+  
+  padding-left: 3em;
+  
+}
+
+.description {
+  font-size: 90%;
+}
+
+.requiredField {
+  font-size: 200%;
+  color: #CE3031;
+  font-weight: bold;
+  vertical-align: middle;
+  margin-left: 0.2em;
+}
+
+.requiredIndicator {
+  font-weight: bold;
+  color: #931100;
+}
+
+.control-label.no-padding {
+	padding: 0px;
+}
+
+.table-condensed td.top-vertical-align {
+	vertical-align: top;
+}
+
+.deprovisioning-more-actions {
+	margin-bottom: 10px;
+}
+
+/* Visualization frame for the SVG canvas */
+.vis-graph-svg-outer {
+  display: none;
+  background: white;
+  border: 1px solid gray;
+  height: 500px;
+  width: 100%;
+}
+
+.vis-fullscreen-open {
+  float: right;
+}
+
+/* Visualization lightbox */
+.vis-graph-modal {
+  display: none;
+  position: fixed;
+  z-index: 101; /* the breadcrumb menu has z-index 100 so we need a higher number to push it behind */
+  padding-top: 50px;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  background-color: black;
+}
+
+.vis-graph-modal-content {
+  position: relative;
+  background-color: #fefefe;
+  margin: auto;
+  padding: 0;
+  width: 95%;
+  /* max-width: 1200px; */
+}
+
+.vis-fullscreen-close {
+  color: white;
+  position: absolute;
+  top: 10px;
+  right: 25px;
+  font-size: 35px;
+  font-weight: bold;
+}
+
+.vis-fullscreen-close:hover,
+.vis-fullscreen-close:focus {
+  color: #999;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+/* Visualization text mode formatting */
+div.visualization-text-node {
+	margin-bottom: 10px;
+}
+.grouperTableRowOdd {
+  background-color: #f5f5f5;
+}
+.grouperTableRowEven {
+  background-color: #ffffff;
+}
+/*
+.table-striped4 tbody > tr:nth-child(odd) > td,
+.table-striped4 tbody > tr:nth-child(odd) > th {
+  background-color: #f5f5f5;
+}
+.table-striped4 tbody > tr:nth-child(even) > td,
+.table-striped4 tbody > tr:nth-child(even) > th {
+  background-color: #ffffff;
+}
+*/
+/*.table-striped4 tbody > tr:nth-child(4n+1) > td,
+.table-striped4 tbody > tr:nth-child(4n+1) > th,
+.table-striped4 tbody > tr:nth-child(4n+2) > td,
+.table-striped4 tbody > tr:nth-child(4n+2) > th {
+  background-color: #f5f5f5;
+}
+
+.table-striped4 tbody > tr:nth-child(4n+3) > td,
+.table-striped4 tbody > tr:nth-child(4n+3) > th,
+.table-striped4 tbody > tr:nth-child(4n+4) > td,
+.table-striped4 tbody > tr:nth-child(4n+4) > th {
+  background-color: #cccccc;
+}*/
+
+/* misc -> job history chart */
+#jobHistoryChartPaneDiv .chart {
+  font-family: Arial, sans-serif;
+  font-size: 12px;
+}
+
+#jobHistoryChartPaneDiv .axis path, #jobHistoryChartPaneDiv .axis line {
+  fill: none;
+  stroke: #000;
+  shape-rendering: crispEdges;
+}
+
+#jobHistoryChartPaneDiv .status-started {
+  fill: blue;
+}
+
+#jobHistoryChartPaneDiv .status-running {
+  fill: purple;
+}
+
+#jobHistoryChartPaneDiv .status-config_error {
+  fill: red;
+}
+
+#jobHistoryChartPaneDiv .status-subject_problems {
+  fill: darkorange;
+}
+
+#jobHistoryChartPaneDiv .status-success {
+  fill: green;
+}
+
+#jobHistoryChartPaneDiv .status-warning {
+  fill: orange;
+}
+
+#jobHistoryChartPaneDiv .status-error {
+  fill: red;
+}
+
+/*#jobHistoryChartPaneDiv .d3tooltip {*/
+.d3tooltip {
+  color: white;
+  position: absolute;
+  text-align: center;
+  padding: 2px;
+  font: 12px sans-serif;
+  background: rgba(0,0,0,.8);
+  border: 2px solid black;
+  pointer-events: none;
+}
+
+div.c3.instrumentationGraph  {
+  max-height: 320px;
+}
+.grouper-menu-subheader {
+  padding-top: 10px;
+  padding-right: 5px;
+  padding-bottom: 5px;
+  padding-left: 5px;
+  color: #666666;
+}
+
+.visually-hidden,
+.visually-hidden-focusable:not(:focus):not(:focus-within):not(caption),
+.visually-hidden:not(caption) {
+  width: 1px!important;
+  height: 1px!important;
+  padding: 0!important;
+  margin: -1px!important;
+  overflow: hidden!important;
+  clip: rect(0,0,0,0)!important;
+  white-space: nowrap!important;
+  border: 0!important;
+}
+
+.visually-hidden-focusable:not(:focus):not(:focus-within):not(caption), .visually-hidden:not(caption) {
+  position: absolute!important;
+}
+
+/* Skip link (WCAG 2.4.1 Bypass Blocks).  Rendered by assetsJsp/skipLink.jsp as the first
+   focusable element in the body of every page shell.  Parked off screen rather than with
+   display:none, since display:none would take it out of the tab order entirely. */
+.grouper-skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+}
+
+/* On keyboard focus it becomes visible, pinned to the top left.  position:fixed (rather
+   than absolute) so it is in view even if the page happens to be scrolled.  The outline
+   is an explicit high contrast one so this link does not inherit the low contrast focus
+   ring used elsewhere. */
+.grouper-skip-link:focus,
+.grouper-skip-link:focus-visible {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 2000;
+  padding: 10px 16px;
+  background-color: #ffffff;
+  color: #1c6070;
+  border: 2px solid #1c6070;
+  border-radius: 0 0 4px 0;
+  font-weight: bold;
+  text-decoration: underline;
+  outline: 3px solid #1c6070;
+  outline-offset: 2px;
+}
+
+/* The main landmark is a PROGRAMMATIC focus target only: it carries tabindex="-1" purely
+   so that activating the skip link moves focus into it, and it can never be reached with
+   Tab.  Without this rule the browser draws its default focus ring around the whole page
+   content area when the skip link is used, which looks like a rendering bug.
+   This does not cost a visible focus indicator: no keyboard user can land here, and the
+   next Tab moves to the first real control inside main, which has its own indicator. */
+main[tabindex="-1"]:focus {
+  outline: none;
+}
+
+input::placeholder { /* Chrome, Firefox, Opera, Safari 10.1+ */
+  color: #757575 !important;
+  opacity: 1 !important; /* Firefox */
+}
+
+input:-ms-input-placeholder { /* Internet Explorer 10-11 */
+  color: #757575;
+}
+
+input::-ms-input-placeholder { /* Microsoft Edge */
+  color: #757575;
+}
+
+/* bootstrap 2's alert and warning text is too light on its own backgrounds for WCAG AA (4.5:1).
+   these are bootstrap 3's darker shades of the same colors.  the plain .alert rule comes first so
+   the colored ones after it win, with the same specificity as bootstrap's, so css.additional can
+   still override them */
+.alert,
+.alert h4 {
+  color: #8a6d3b;
+}
+
+.alert-info,
+.alert-info h4 {
+  color: #31708f;
+}
+
+.alert-success,
+.alert-success h4 {
+  color: #3c763d;
+}
+
+.alert.alert-error,
+.alert-error h4,
+.alert-danger,
+.alert-danger h4 {
+  color: #58151c;
+}
+
+.text-warning {
+  color: #8a6d3b;
+}
+
+/* uncomment to add underlines to hyperlinks for accessibility */
+/*
+a:not(.btn):not([role]) {
+  text-decoration: underline !important;
+}
+.nav a:not(.btn):not([role]) {
+  text-decoration: none !important;
+}
+*/
+
+span > .config-first-radio-button-label {
+  display: inline-block;
+  width: 120px;
+}
+
+span > .config-radio-button-label {
+  margin-right: 10px;
+}
+
+span > .config-radio-button {
+  margin-right:3px;
+  margin-top:0px;
+}
+
+td > .config-el-checkbox {
+  vertical-align: top; 
+  min-height: 10px;
+  margin-right: 2px;
+}
+
+td > .config-el-label {
+  border-bottom: 1px dotted #000;
+}
+
+
+
+/* Green banner bar */
+.grouper-env-announce-outer {
+  padding: 3px;
+  text-align: center;
+}
+.grouper-env-announce-inner {
+  background-color: #E7FAD2; 
+  border: 3px dashed #6BA539;
+  margin: 0 auto;
+  font-weight: 400;
+  color: #232d4b;
+}
+.grouper-env-announce-inner a {
+  color: #232d4b;
+  text-decoration: underline !important;
+  padding: 3px;
+}
+
+
+/* Pink banner bar */
+.grouper-env-banner-outer {
+  padding: 3px;
+  text-align: center;
+}
+.grouper-env-banner-inner {
+  background-color: #ffd6de; 
+  border: 4px dashed #1c6070;
+  margin: 0 auto;
+  font-weight: 500;
+  color: #232d4b;
+  padding: 3px;
+}
+.grouper-env-banner-inner a {
+  color: #232d4b;
+  text-decoration: underline;
+}
+
+/* tom select padding on combobox should be reduced */
+.ts-control {
+  padding: 4px 4px;
+}
+
+/* let dropdown expand wider than the input so long results are not truncated */
+.ts-dropdown {
+  width: auto;
+  min-width: 100%;
+}
+.ts-dropdown [data-selectable] {
+  overflow: visible;
+}
+
+/* Hide the selected “item chip” while the user is typing in a Grouper TomSelect */
+.grouper-ts-typing .ts-control .item {
+  display: none !important;
+}
+/* jsTree expander -> Font Awesome boxed +/- (FA 4.x) */
+.jstree-default .jstree-ocl {
+  background: none !important;   /* remove theme sprite */
+  width: 14px !important; /* smaller hit area = less gap (try 12–16) */
+}
+
+.jstree-default .jstree-ocl:before {
+  font-family: FontAwesome;
+  content: "\f196";              /* fa-plus-square-o */
+  display: inline-block;
+  width: 16px;
+  text-align: center;
+  font-style: normal;
+  font-weight: normal;
+  /* Bigger + lighter (more gray) for jsTree expand/collapse */
+  font-size: 14px;   /* was ~12px; bump as desired */
+  color: #999;       /* lighter gray; try #777 / #888 / #999 */
+}
+
+.jstree-default .jstree-open > .jstree-ocl:before {
+  content: "\f147";              /* fa-minus-square-o */
+}
+
+.jstree-default .jstree-leaf > .jstree-ocl:before {
+  content: "";                   /* no box for leaf nodes */
+}
+/* Ensure Font Awesome icons in jsTree are not italic */
+#folderTree i.fa,
+#folderTree .fa,
+#folderTree .jstree-icon {
+  font-style: normal !important;
+  font-weight: normal !important;
+}
+
+
+/* Reduce per-level indentation (default theme) */
+.jstree-default .jstree-node {
+  margin-left: 16px;   /* default is larger; try 14–18px */
+}
+
+/* Keep the very top node flush left */
+.jstree-default > .jstree-container-ul > .jstree-node {
+  margin-left: 0;
+}
+
+/* Make the left tree pane scroll instead of overlapping main pane */
+#folderTreeContainerId {
+  overflow-y: auto;
+  overflow-x: auto;          /* <-- horizontal scrollbar */
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+/* Don’t wrap node labels (so long names force horizontal scroll) */
+#folderTreeContainerId .jstree-anchor {
+  white-space: nowrap;
+}
+
+/* Ensure the tree can grow wider than the container (so overflow-x activates) */
+#folderTreeContainerId .jstree-container-ul {
+  display: inline-block;
+  min-width: 100%;
+}
+
+/**
+ * Subtle, icon-only dropdown trigger (no button styling).
+ * Used when we want the old small-triangle affordance instead of a full Bootstrap button.
+ */
+.grouperDropdownToggleIconOnly {
+  padding: 0;
+  margin-left: 0.25em;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  text-decoration: none;
+  display: inline-block;
+  line-height: 1;
+}
+
+.grouperDropdownToggleIconOnly:hover,
+.grouperDropdownToggleIconOnly:focus {
+  background: transparent;
+  text-decoration: none;
+  outline: none;
+}
+
+/* font awesome icons dont show in jstree for some reason
+   so dont show any icons and just have the icon in the label */
+.jstree-default .grouper-jstree-no-icon {
+  display: none;
+}
+
+/* Replace the legacy jsTree sprite folder icons with flat Font Awesome folders */
+#folderTree .jstree-default .jstree-icon.jstree-themeicon,
+#folderTreeContainerId .jstree-default .jstree-icon.jstree-themeicon {
+  background-image: none !important;
+  position: relative;
+}
+#folderTree .jstree-default .jstree-icon.jstree-themeicon:before,
+#folderTreeContainerId .jstree-default .jstree-icon.jstree-themeicon:before {
+  font-family: "Font Awesome 5 Free";
+  font-weight: 900;
+  content: "\f07b";          /* fa-folder (closed) */
+  color: #eecf69;          /* match the classic jsTree manila-folder yellow */
+  font-size: 14px;
+  line-height: 24px;
+  position: absolute;
+  left: 3px;
+  top: 0;
+}
+#folderTree .jstree-default .jstree-open > .jstree-anchor > .jstree-icon.jstree-themeicon:before,
+#folderTreeContainerId .jstree-default .jstree-open > .jstree-anchor > .jstree-icon.jstree-themeicon:before {
+  content: "\f07c";          /* fa-folder-open */
+}
+/* Pull the label 1px closer to the folder icon */
+#folderTree .jstree-default .jstree-icon.jstree-themeicon,
+#folderTreeContainerId .jstree-default .jstree-icon.jstree-themeicon {
+  margin-right: -1px;
+}
+
+/* Bootstrap defaults inline <code> to bright red (#d14), which fails
+   accessibility contrast on our light gray background and reads as an
+   error to users. Use a neutral dark color and let long tokens wrap. */
+code {
+  color: #2d2d2d;
+  background-color: #f5f5f5;
+  border: 1px solid #e1e1e8;
+  white-space: normal;
+}
+
+/* GRP-7091 accessibility: global keyboard focus indicator. outline-offset adds
+   a small gap between the outline and the text so the ring is legible and does
+   not crowd the link glyphs. */
+a:focus {
+  outline: 2px solid #1c6070 !important;
+  outline-offset: 2px;
+}
+
+/* GRP-7092 accessibility: the page-header subtitle (the <small> under the
+   "Grouper" title, e.g. "Grouper demo server v6") inherits Bootstrap's
+   #999999, which is only ~2.85:1 on the #e5eef1 header background and fails
+   WCAG AA. Recolor just the header subtitle to the title teal #1c6070
+   (~6:1 on that background), matching the "Grouper" title above it. Scoped
+   to .page-header so we do not restyle every heading <small> app-wide. */
+.page-header h1 small {
+  color: #1c6070;
+}
+
+/* GRP-7093 accessibility: header and nav color contrast. Four related fixes,
+   all overriding low-contrast defaults that live in bootstrap.css. grouperUi2.css
+   loads after bootstrap.css (see commonHead.jsp) so these equal-specificity
+   rules win without needing !important. */
+
+/* 1. The active (current) breadcrumb sits on the teal #1c6070 breadcrumb bar
+   but bootstrap colors it #999999 (~2.3:1, fails WCAG AA). Recolor it white so
+   it is legible. Emphasis convention: the clickable (link) crumbs are bold to
+   signal they are navigable, and the current/non-clickable crumb is left
+   normal weight. */
+.main-content .breadcrumb a {
+  font-weight: bold;
+}
+.main-content .breadcrumb .active {
+  color: #fff;
+  font-weight: normal;
+}
+
+/* 2. The primary/warning action buttons (e.g. "Add folder", "Log in as") use
+   white text on an orange #faa732 gradient, which fails contrast. Flatten the
+   gradient to a solid #ffc107 amber and switch the label to black text
+   (~10:1). Cover the hover/active/disabled states too so they do not revert to
+   the old orange, and drop bootstrap's dark text-shadow which is meant for
+   light-on-dark buttons. */
+.btn-primary,
+.btn-warning {
+  color: #000 !important;
+  text-shadow: none;
+  background-color: #ffc107;
+  background-image: none;
+  border-color: #d39e00;
+}
+.btn-primary:hover,
+.btn-primary:focus,
+.btn-primary:active,
+.btn-primary.active,
+.btn-primary.disabled,
+.btn-primary[disabled],
+.btn-warning:hover,
+.btn-warning:focus,
+.btn-warning:active,
+.btn-warning.active,
+.btn-warning.disabled,
+.btn-warning[disabled] {
+  color: #000 !important;
+  background-color: #e0a800;
+  background-image: none;
+  border-color: #c69500;
+}
+/* The Font Awesome icon inside these buttons (e.g. the "+" on "Add to a group")
+   is forced white by a more-specific bootstrap rule
+   (a.btn-primary [class*=" fa-"] { color: white }), so it does not inherit the
+   black label color above. Recolor the icon to black to match the text. */
+.btn-primary [class^="fa-"],
+.btn-primary [class*=" fa-"],
+.btn-warning [class^="fa-"],
+.btn-warning [class*=" fa-"] {
+  color: #000 !important;
+}
+
+/* 3. The "Logged in as <name>" header text (.navbar-text) is bootstrap's
+   #777777 (~4.0:1 on white, fails AA at normal size). Darken to #333333. */
+.navbar-text {
+  color: #333333;
+}
+
+/* 4. The "Log out" link (.navbar-link) is rendered gray #777777, unlike the
+   adjacent "Help" link which uses the standard hyperlink color. Make Log out
+   look like a real link: the standard link blue #0076a5, and its hover the
+   standard link-hover #003f59. */
+.navbar-link {
+  color: #0076a5;
+}
+.navbar-link:hover,
+.navbar-link:focus {
+  color: #003f59;
+}
+
+/* GRP-7188 accessibility: the modal close button (the "X", bootstrap's .close).
+   Its accessible name and keyboard behavior are already fine (real button,
+   aria-label="Close", glyph in an aria-hidden span); only the styling fails
+   WCAG. Two fixes, both overriding bootstrap.css defaults. grouperUi2.css loads
+   after bootstrap.css (see commonHead.jsp) so equal-specificity rules win. */
+
+/* 1. Contrast (SC 1.4.11 requires 3:1 for non-text UI components). Bootstrap
+   renders the glyph as black at opacity .2 (~1.6:1 on the white modal header,
+   ~2.3:1 on hover). Drop the opacity trick and use a solid gray #595959
+   (~7:1), darkening to black on hover/focus so the affordance still reads. */
+.close {
+  color: #595959;
+  opacity: 1;
+}
+.close:hover,
+.close:focus {
+  color: #000;
+  opacity: 1;
+}
+
+/* 2. Target size (WCAG 2.2 SC 2.5.8 requires 24x24 CSS px). Bootstrap's button
+   hit area is only ~12x18px. Give it a 24x24 minimum box and center the glyph;
+   box-sizing keeps the padding inside the 24px so it does not grow further. */
+.close {
+  min-width: 24px;
+  min-height: 24px;
+  line-height: 24px;
+  text-align: center;
+  box-sizing: border-box;
+}
+
+/* User lifecycle policy radio list on the group edit screen. Each option is a
+   label.radio followed by a sibling span.help-block description. By default
+   bootstrap gives the label a 5px bottom margin while .form-horizontal zeroes
+   the help-block's bottom margin, so the description drifted away from its own
+   radio and collided with the next one. Flip that: pull the description up
+   against the radio it belongs to, and put the breathing room after it. */
+.user-lifecycle-policy-options label.radio {
+  margin-bottom: 0;
+}
+.user-lifecycle-policy-options .help-block {
+  /* padding-left matches .radio's 20px so the description lines up with the
+     label text rather than the radio button itself */
+  padding-left: 20px;
+  margin-top: 1px;
+  margin-bottom: 12px;
+}
+.user-lifecycle-policy-options .help-block:last-child {
+  margin-bottom: 0;
+}
+/* Copy-to-clipboard icon rendered as a real <button> (accessibility: it performs
+   an action, so it must be a button, not an <a href="#">). Strip the native button
+   chrome so it looks like the bare clone icon it replaces. */
+.grouper-copy-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: #337ab7;
+  font-size: inherit;
+  line-height: inherit;
+  vertical-align: baseline;
+}
+.grouper-copy-btn:hover,
+.grouper-copy-btn:focus {
+  color: #23527c;
+}
+
+/* GRP-7302 accessibility: two shared non-text-contrast fixes overriding bootstrap.css.
+   grouperUi2.css loads after bootstrap.css (see commonHead.jsp) so these win. */
+
+/* Item 7 - form field boundary contrast (SC 1.4.11 requires 3:1 for UI component
+   boundaries). Bootstrap gives inputs/textareas/selects a 1px solid #cccccc border,
+   which is ~1.61:1 on white and fails. Darken the resting boundary to #767676
+   (~4.54:1). The type-selector list mirrors bootstrap's own so this matches its
+   specificity and wins on order; .form-control and select are covered too. The
+   :focus border (bootstrap's blue) is left alone - this is only the resting state. */
+input[type="text"],
+input[type="password"],
+input[type="datetime"],
+input[type="datetime-local"],
+input[type="date"],
+input[type="month"],
+input[type="time"],
+input[type="week"],
+input[type="number"],
+input[type="email"],
+input[type="url"],
+input[type="search"],
+input[type="tel"],
+input[type="color"],
+textarea,
+select,
+.form-control,
+.uneditable-input {
+  border-color: #767676;
+}
+
+/* Item 2 - authored focus indicator contrast (SC 2.4.11 Focus Appearance, 1.4.11).
+   Bootstrap's link focus is a thin dotted #333 outline, which is ~1.78:1 on the teal
+   #1c6070 breadcrumb bar - effectively invisible there. Replace it with a robust
+   focus-visible indicator that clears 3:1 on ANY background: a teal outline for light
+   backgrounds plus a white+teal double ring (box-shadow) whose white layer shows on the
+   teal bar (white-on-teal and teal-on-white are each ~7.1:1). :focus-visible keeps the
+   ring off mouse clicks. The outline is retained so Windows High Contrast Mode, which
+   ignores box-shadow, still shows an indicator. The skip link keeps its own (more
+   specific) focus rule; this does not touch it. */
+a:focus-visible,
+button:focus-visible,
+.btn:focus-visible,
+[role="button"]:focus-visible {
+  outline: 2px solid #1c6070;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 2px #ffffff, 0 0 0 4px #1c6070;
+}
+
+/* GRP-7304 / GRP-7305 accessibility: heading-hierarchy helpers. Used to fix outlines
+   that skip a level (home page went h1 -> h3 -> h4; config screens had a page-title h4
+   with no h1) by bumping a heading's semantic level while KEEPING its original bootstrap
+   visual size, so pages look unchanged. bootstrap sizes: h1 35.75 / h2 29.25 / h3 22.75 /
+   h4 16.25px, with line-height 36px on h1-h3 but 18px on h4. The classes are tag-agnostic
+   (a class beats bootstrap's element selector) so e.g. an h1 shown at h4 size, or an h2
+   shown at h3 size, both render at the smaller size. "-as-h4" also restores the h4
+   line-height, which h1-h3 would otherwise widen. */
+.grouper-heading-as-h3 {
+  font-size: 22.75px;
+}
+.grouper-heading-as-h4 {
+  font-size: 16.25px;
+  line-height: 18px;
+}
+
+/* GRP a11y item 5: a native <button> styled as an inline text link. In-page-action
+   controls should be real buttons (correct role + keyboard semantics), not fake
+   <a href="#"> anchors, but many are visually plain text links. This class strips the
+   button chrome and inherits the surrounding text metrics so a <button> looks exactly
+   like a link, using the standard link blue #0076a5 (5.08:1 on white). Reusable for the
+   fake-button-anchor conversion across the UI. */
+.grouper-linkbutton {
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  color: #0076a5;
+  font: inherit;
+  line-height: inherit;
+  cursor: pointer;
+  vertical-align: baseline;
+}
+.grouper-linkbutton:hover,
+.grouper-linkbutton:focus {
+  color: #003f59;
+}
+
+/* GRP a11y item 5: a native <button> styled exactly like a Bootstrap dropdown menu item,
+   for in-page-action menu items (onclick=ajax) that were fake <a href="#"> anchors. Mirrors
+   bootstrap's ".dropdown-menu li > a" rule (block, full-width, left aligned, same padding /
+   colour / hover) so the menu looks and behaves identically. NOTE: we intentionally do NOT
+   add role="menu"/"menuitem" - bootstrap 2 has no arrow-key menu navigation, and those roles
+   without it make screen-reader UX worse; the items are simply correct buttons in a list.
+   Navigation menu items (guiV2link) stay as anchors. */
+.dropdown-menu li > button.grouper-menuitem {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 3px 20px;
+  clear: both;
+  font-weight: normal;
+  line-height: 18px;
+  color: #333333;
+  white-space: nowrap;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+.dropdown-menu li > button.grouper-menuitem:hover,
+.dropdown-menu li > button.grouper-menuitem:focus {
+  color: #ffffff;
+  text-decoration: none;
+  background-color: #006f9b;
+  background-image: linear-gradient(to bottom, #0076a5, #00648c);
+}
+
+/* GRP-7314 accessibility (WCAG 2.5.8 Target Size Minimum): icon-only action
+   controls - the copy-to-clipboard button and the grey remove (fa-times) X's in
+   the import / role-inheritance lists - rendered as just a ~14px glyph, well
+   under the 24x24 CSS px minimum. Grow the CLICKABLE box to 24x24 with the glyph
+   centered, and pull the extra height back with negative top/bottom margins so
+   table rows and inline text do not grow and the glyph does not visibly move
+   (an invisible hit-area, not a bigger-looking icon). This rule is appended
+   after .grouper-copy-btn above so its display/padding win. margin-left on the
+   copy buttons is set inline in the JSPs and is intentionally left untouched. */
+.grouper-icon-btn,
+.grouper-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  vertical-align: middle;
+  margin-top: -4px;
+  margin-bottom: -4px;
+}

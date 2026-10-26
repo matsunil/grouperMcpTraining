@@ -1,0 +1,140 @@
+<%@ include file="../assetsJsp/commonTaglib.jsp"%>
+
+                <form id="membersToDeleteFormId">
+                <grouper:browserPage jspName="groupContents" />
+                  <table class="table table-hover table-bordered table-striped table-condensed data-table table-bulk-update footable">
+                    <thead>
+                      <tr>
+                        <c:choose>
+                          <c:when test="${grouperRequestContainer.groupContainer.showEnabledStatus}"><c:set var="colspan" value="7" /></c:when>
+                          <c:when test="${grouperRequestContainer.groupContainer.showPointInTimeAudit}"><c:set var="colspan" value="5" /></c:when>
+                          <c:otherwise><c:set var="colspan" value="4" /></c:otherwise>
+                        </c:choose>
+                        <td colspan="${colspan}" class="table-toolbar gradient-background">
+                          <c:if test="${grouperRequestContainer.groupContainer.canUpdate && !grouperRequestContainer.groupContainer.showPointInTimeAudit}">
+                            <button type="button" id="groupRemoveSelectedMembersButton" onclick="ajax('../app/UiV2Group.removeMembers?groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}', {formIds: 'groupFilterFormId,membersToDeleteFormId', formIdsOptional: 'groupPagingFormId'}); return false;" class="btn">${textContainer.text['groupRemoveSelectedMembersButton'] }</button>
+                          </c:if>
+                        </td>
+                      </tr>
+                      <tr>
+                        <th>
+                          <c:if test="${grouperRequestContainer.groupContainer.canUpdate && !grouperRequestContainer.groupContainer.showPointInTimeAudit}">
+                            <label class="checkbox checkbox-no-padding">
+                              <input type="checkbox" name="notImportantXyzName" id="notImportantXyzId" onchange="$('.membershipCheckbox').prop('checked', $('#notImportantXyzId').prop('checked'));" />
+                              <span class="sr-only">${textContainer.text['groupViewDetailsMembershipCheckboxAriaLabel']}</span>
+                            </label>
+                          </c:if>
+                        </th>
+                        <th class="sorted">${textContainer.text['groupViewDetailsHeaderEntityName']}</th>
+                        <c:if test="${grouperRequestContainer.groupContainer.showEnabledStatus}">
+                          <th data-hide="phone">${textContainer.text['groupViewDetailsHeaderStatus']}</th>
+                          <th data-hide="phone">${textContainer.text['groupViewDetailsHeaderEnabledDate']}</th>
+                          <th data-hide="phone">${textContainer.text['groupViewDetailsHeaderDisabledDate']}</th>
+                        </c:if>
+                        <c:if test="${grouperRequestContainer.groupContainer.showPointInTimeAudit}">
+                          <th data-hide="phone">${textContainer.text['groupViewDetailsHeaderPITStartDate']}</th>
+                          <th data-hide="phone">${textContainer.text['groupViewDetailsHeaderPITEndDate']}</th>
+                        </c:if>
+                        <c:if test="${!grouperRequestContainer.groupContainer.showPointInTimeAudit}">
+                          <th data-hide="phone">${textContainer.text['groupViewDetailsHeaderMembership']}</th>
+                        </c:if>
+                        <th style="width:100px;">${textContainer.text['headerChooseAction']}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <c:set var="i" value="0" />
+                      <c:if test="${grouperRequestContainer.groupContainer.showPointInTimeAudit}">
+                        <c:forEach items="${grouperRequestContainer.groupContainer.guiPITMembershipViews}" 
+                          var="guiPITMembershipView" >
+                          <tr>
+                            <!-- ${guiPITMembershipView.getPITMembershipView().getId()} -->
+                            <td>&nbsp;</td>
+                            <td class="expand foo-clicker">${guiPITMembershipView.guiSubject.shortLinkWithIcon}<c:if test="${not empty guiPITMembershipView.guiSubject.subject.description}"> <button type="button" class="grouper-copy-btn" data-gr-copy-text="${grouperUtil.xmlEscape(guiPITMembershipView.guiSubject.subject.description)}" onclick="grouperCopyTextToClipboard(this);" aria-label="${textContainer.textEscapeXml['groupViewCopyEntityDescriptionTooltip']}" title="${textContainer.text['groupViewCopyEntityDescriptionTooltip']}" style="margin-left:4px;"><i class="fa fa-clone" aria-hidden="true"></i></button></c:if> <br/>
+                            </td>
+                            <td>${guiPITMembershipView.getStartTimeLabel()}</td>
+                            <td>${guiPITMembershipView.getEndTimeLabel()}</td>
+                            <td>
+                              <div class="btn-group">
+                                <button type="button" data-toggle="dropdown" aria-label="${textContainer.text['ariaLabelGuiMoreMembershipActions']}" class="btn btn-mini dropdown-toggle" aria-haspopup="true" aria-expanded="false" onclick="$('#more-options${i}').is(':visible') === true ? $(this).attr('aria-expanded','false') : $(this).attr('aria-expanded',function(index, currentValue) { $('#more-options${i} li').first().focus();return true;});">${textContainer.text['groupViewActionsButton'] }<span class="caret"></span></button>
+                                <ul class="dropdown-menu dropdown-menu-right" id="more-options${i}">
+                                   <li><a href="?operation=UiV2Membership.traceMembership&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}&memberId=${guiPITMembershipView.memberId}&field=members"  onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Membership.traceMembership&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}&memberId=${guiPITMembershipView.memberId}&field=members');" class="actions-revoke-membership">${textContainer.text['groupViewTraceMembershipButton'] }</a></li>
+                                </ul>
+                              </div>
+                            </td>
+                          </tr>
+                          <c:set var="i" value="${i+1}" />
+                        </c:forEach>
+                      </c:if>
+                      <c:if test="${!grouperRequestContainer.groupContainer.showPointInTimeAudit}">
+                        <c:forEach items="${grouperRequestContainer.groupContainer.guiMembershipSubjectContainers}" 
+                          var="guiMembershipSubjectContainer" >
+                          <c:set var="guiMembershipContainer" value="${guiMembershipSubjectContainer.guiMembershipContainers['members']}" />
+                          <tr>
+                            <td>
+                              <c:if test="${grouperRequestContainer.groupContainer.canUpdate}">
+                                <label class="checkbox checkbox-no-padding">
+                                  <c:choose>
+                                    <c:when test="${guiMembershipContainer.membershipContainer.membershipAssignType.immediate}">
+                                      <input type="checkbox" data-gr-member-checkbox="${grouperUtil.xmlEscape(guiMembershipSubjectContainer.guiSubject.subject.sourceId)}||${grouperUtil.xmlEscape(guiMembershipSubjectContainer.guiSubject.subject.id)}" aria-label="${textContainer.text['groupViewDetailsMembershipCheckboxAriaLabel']}" name="membershipRow_${i}" value="${guiMembershipContainer.membershipContainer.immediateMembership.uuid}" class="membershipCheckbox" />
+                                    </c:when>
+                                    <c:otherwise>
+                                      <input type="checkbox" disabled="disabled"/>
+                                    </c:otherwise>
+                                  </c:choose>
+                                </label>
+                              </c:if>
+                            </td>
+                            <td class="expand foo-clicker">${guiMembershipSubjectContainer.guiSubject.shortLinkWithIcon}<c:if test="${not empty guiMembershipSubjectContainer.guiSubject.subject.description}"> <button type="button" class="grouper-copy-btn" data-gr-copy-text="${grouperUtil.xmlEscape(guiMembershipSubjectContainer.guiSubject.subject.description)}" onclick="grouperCopyTextToClipboard(this);" aria-label="${textContainer.textEscapeXml['groupViewCopyEntityDescriptionTooltip']}" title="${textContainer.text['groupViewCopyEntityDescriptionTooltip']}" style="margin-left:4px;"><i class="fa fa-clone" aria-hidden="true"></i></button></c:if> <br/>
+                            </td>
+                            <c:if test="${grouperRequestContainer.groupContainer.showEnabledStatus}">
+                              <td>${guiMembershipContainer.getImmediateMembershipEnabledLabel()}</td>
+                              <td>${guiMembershipContainer.getImmediateMembershipStartDateLabel()}</td>
+                              <td>${guiMembershipContainer.getImmediateMembershipEndDateLabel()}</td>
+                            </c:if>
+                            <td data-hide="phone">
+                              ${textContainer.text[grouper:concat2('groupMembershipAssignType_',guiMembershipContainer.membershipContainer.membershipAssignType)] }
+                            </td>
+                            <td>
+                              <c:if test="${grouperRequestContainer.groupContainer.canRead
+                                  || (guiMembershipContainer.membershipContainer.membershipAssignType.immediate && grouperRequestContainer.groupContainer.canUpdate)
+                                  || guiMembershipContainer.membershipContainer.membershipAssignType.nonImmediate
+                                  || guiMembershipSubjectContainer.canReadProvisioningForMembership
+                                  || guiMembershipSubjectContainer.guiSubject.group}">
+                                <div class="btn-group"><button type="button" data-toggle="dropdown" aria-label="${textContainer.text['ariaLabelGuiMoreMembershipActions']}" class="btn btn-mini dropdown-toggle"
+                                	aria-haspopup="true" aria-expanded="false" onclick="$('#more-options${i}').is(':visible') === true ? $(this).attr('aria-expanded','false') : $(this).attr('aria-expanded',function(index, currentValue) { $('#more-options${i} li').first().focus();return true;});">
+                                		${textContainer.text['groupViewActionsButton'] } 
+                                		<span class="caret"></span>
+                                	</button>
+                                  <ul class="dropdown-menu dropdown-menu-right" id="more-options${i}">
+                                    <c:if test="${grouperRequestContainer.groupContainer.canAdmin || grouperRequestContainer.groupContainer.canReadAttributes || grouperRequestContainer.groupContainer.canUpdateAttributes}">
+                                      <li><a href="?operation=UiV2MembershipAttributeAssignment.viewAttributeAssignments&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}&subjectId=${guiMembershipSubjectContainer.guiSubject.subject.id}" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2MembershipAttributeAssignment.viewAttributeAssignments&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}&subjectId=${guiMembershipSubjectContainer.guiSubject.subject.id}');">${textContainer.text['groupViewMembershipAttributeAssignments'] }</a></li>
+                                    </c:if>
+                                    <c:if test="${grouperRequestContainer.groupContainer.canRead}">
+                                      <li><a href="?operation=UiV2Membership.editMembership&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}&memberId=${guiMembershipSubjectContainer.guiMember.member.uuid}&field=members" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Membership.editMembership&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}&memberId=${guiMembershipSubjectContainer.guiMember.member.uuid}&field=members');" class="actions-revoke-membership">${textContainer.text['groupViewEditMembershipsAndPrivilegesButton'] }</a></li>
+                                    </c:if>
+                                    <c:if test="${guiMembershipSubjectContainer.canReadProvisioningForMembership}">
+                                      <li><a href="?operation=UiV2Provisioning.viewProvisioningOnGroupMembership&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}&subjectId=${guiMembershipSubjectContainer.guiSubject.subject.id}" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Provisioning.viewProvisioningOnGroupMembership&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}&subjectId=${guiMembershipSubjectContainer.guiSubject.subject.id}');">${textContainer.text['provisioningMoreActionsMenuLabel'] }</a></li>
+                                    </c:if>
+                                    <c:if test="${guiMembershipContainer.membershipContainer.membershipAssignType.immediate && grouperRequestContainer.groupContainer.canUpdate}">
+                                      <li><button type="button" class="grouper-menuitem" onclick="ajax('../app/UiV2Group.removeMember?groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}&memberId=${guiMembershipSubjectContainer.guiMember.member.uuid}', {formIds: 'groupFilterFormId', formIdsOptional: 'groupPagingFormId'}); return false;" class="actions-revoke-membership">${textContainer.text['groupViewRevokeMembershipButton'] }</button></li>
+                                    </c:if>
+                                    <li><a href="?operation=UiV2Membership.traceMembership&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}&memberId=${guiMembershipSubjectContainer.guiMember.member.uuid}&field=members"  onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Membership.traceMembership&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}&memberId=${guiMembershipSubjectContainer.guiMember.member.uuid}&field=members');" class="actions-revoke-membership">${textContainer.text['groupViewTraceMembershipButton'] }</a></li>
+                                    <c:if test="${guiMembershipSubjectContainer.guiSubject.group}">
+                                      <li><a href="?operation=UiV2Group.viewGroup&groupId=${guiMembershipSubjectContainer.guiSubject.subject.id}" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Group.viewGroup&groupId=${guiMembershipSubjectContainer.guiSubject.subject.id}');">${textContainer.text['groupViewViewGroupButton'] }</a></li>
+                                    </c:if>
+                                  </ul>
+                                </div>
+                              </c:if>
+                            </td>
+                          </tr>
+                          <c:set var="i" value="${i+1}" />
+                        </c:forEach>
+                      </c:if>
+                    </tbody>
+                  </table>
+                </form>
+                <div class="data-table-bottom gradient-background">
+                  <grouper:paging2 guiPaging="${grouperRequestContainer.groupContainer.guiPaging}" formName="groupPagingForm" ajaxFormIds="groupFilterFormId"
+                    refreshOperation="../app/UiV2Group.filter?groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}" />
+                </div>
+                

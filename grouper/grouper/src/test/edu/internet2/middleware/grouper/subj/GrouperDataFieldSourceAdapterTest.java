@@ -1,0 +1,717 @@
+package edu.internet2.middleware.grouper.subj;
+
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+import java.util.Set;
+
+import edu.internet2.middleware.grouper.Group;
+import edu.internet2.middleware.grouper.GroupSave;
+import edu.internet2.middleware.grouper.GrouperSession;
+import edu.internet2.middleware.grouper.SubjectFinder;
+import edu.internet2.middleware.grouper.GroupFinder;
+import edu.internet2.middleware.grouper.app.dataProvider.GrouperDataProviderSyncType;
+import edu.internet2.middleware.grouper.GroupTypeFinder;
+import edu.internet2.middleware.grouper.app.loader.GrouperLoader;
+import edu.internet2.middleware.grouper.app.loader.TestgrouperLoader;
+import edu.internet2.middleware.grouper.app.loader.db.Hib3GrouperLoaderLog;
+import edu.internet2.middleware.grouper.hibernate.HibernateSession;
+import edu.internet2.middleware.grouper.cfg.dbConfig.GrouperDbConfig;
+import edu.internet2.middleware.grouper.dataField.GrouperDataEngine;
+import edu.internet2.middleware.grouper.dataField.GrouperDataProviderFullSyncJob;
+import edu.internet2.middleware.grouper.dataField.GrouperDataProviderIncrementalSyncJob;
+import edu.internet2.middleware.grouper.dataField.GrouperDataProviderTest;
+import edu.internet2.middleware.grouper.dataField.GrouperPrivacyRealmConfig;
+import edu.internet2.middleware.grouper.ddl.GrouperDdlUtils;
+import edu.internet2.middleware.grouper.exception.GrouperSessionException;
+import edu.internet2.middleware.grouper.helper.GrouperTest;
+import edu.internet2.middleware.grouper.misc.GrouperSessionHandler;
+import edu.internet2.middleware.grouper.testing.GrouperTestBase;
+import edu.internet2.middleware.grouper.util.GrouperUtil;
+import edu.internet2.middleware.grouperClient.config.ConfigPropertiesCascadeBase;
+import edu.internet2.middleware.grouperClient.jdbc.GcDbAccess;
+import edu.internet2.middleware.subject.Subject;
+import edu.internet2.middleware.subject.config.SubjectConfig;
+import edu.internet2.middleware.subject.provider.SourceManager;
+import junit.textui.TestRunner;
+
+public class GrouperDataFieldSourceAdapterTest extends GrouperTest {
+  
+  public GrouperDataFieldSourceAdapterTest(String name) {
+    super(name);
+  }
+
+  public static void main(String[] args) {
+    TestRunner.run(new GrouperDataFieldSourceAdapterTest("testGetSubjectIncremental"));
+  }
+  
+  public void testGetSubjectFull() {
+    internal_testGetSubject(GrouperDataProviderSyncType.fullSyncFull);
+  }
+
+  public void testGetSubjectIncremental() {
+    internal_testGetSubject(GrouperDataProviderSyncType.incrementalSyncChangeLog);
+  }
+
+  public void testSubjectIdResolvedAsIdentifier() {
+
+    setupData(GrouperDataProviderSyncType.fullSyncFull);
+
+    // without the config, looking up by subject_id as an identifier should not find the subject
+    // (since "test.subject.0" is not a netId identifier value, it's a subject_id)
+    Subject subject = SubjectFinder.findByIdentifierAndSource("test.subject.0", "dataFieldSubjectSource", false);
+    assertNull(subject);
+
+    // enable subjectIdResolvedAsIdentifier
+    new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.subjectIdResolvedAsIdentifier").value("true").store();
+    SubjectConfig.clearCache();
+    ConfigPropertiesCascadeBase.clearCache();
+    SourceManager.getInstance().reloadSource("dataFieldSubjectSource");
+    SourceManager.getInstance().loadSource(SubjectConfig.retrieveConfig().retrieveSourceConfigs().get("dataFieldSubjectSource"));
+
+    // now looking up by subject_id as an identifier should work
+    subject = SubjectFinder.findByIdentifierAndSource("test.subject.0", "dataFieldSubjectSource", false);
+    assertNotNull(subject);
+    assertEquals("test.subject.0", subject.getId());
+    assertEquals("my name is test.subject.0", subject.getName());
+
+    // regular identifier lookup should still work
+    Subject subjectByIdentifier = SubjectFinder.findByIdentifierAndSource("id.test.subject.0", "dataFieldSubjectSource", false);
+    assertNotNull(subjectByIdentifier);
+    assertEquals("test.subject.0", subjectByIdentifier.getId());
+  }
+  
+  private void internal_testGetSubject(GrouperDataProviderSyncType syncType) {
+    
+    setupData(syncType);
+    
+    Subject subject = SubjectFinder.findByIdAndSource("test.subject.0", "dataFieldSubjectSource", true);
+    assertEquals("my name is test.subject.0", subject.getName());
+    
+    subject = SubjectFinder.findByIdentifierAndSource("id.test.subject.0", "dataFieldSubjectSource", true);
+    assertEquals("my name is test.subject.0", subject.getName());
+    
+    Set<Subject> subjects = SubjectFinder.findAll("test 0", "dataFieldSubjectSource");
+    assertEquals(1, subjects.size());
+    assertEquals("my name is test.subject.0", subjects.iterator().next().getName());
+    
+    GrouperSession.callbackGrouperSessionBySubjectId("test.subject.1", "jdbc", new GrouperSessionHandler() {
+      
+      @Override
+      public Object callback(GrouperSession grouperSession) throws GrouperSessionException {
+        
+        Subject subject6 = SubjectFinder.findByIdAndSource("test.subject.6", "dataFieldSubjectSource", true);
+        assertEquals("my name is test.subject.6", subject6.getName());
+        
+        String namePublic = subject6.getAttributeValue("namePublic");
+        assertNull(namePublic);
+        // should be able to see private name
+        String namePrivate = subject6.getAttributeValue("namePrivate");
+        assertEquals("my name is test.subject.6", namePrivate);
+        return null;
+      }
+    });
+    
+    GrouperSession.callbackGrouperSessionBySubjectId("test.subject.0", "jdbc", new GrouperSessionHandler() {
+      
+      @Override
+      public Object callback(GrouperSession grouperSession) throws GrouperSessionException {
+        
+        Subject subject6 = SubjectFinder.findByIdAndSource("test.subject.6", "dataFieldSubjectSource", true);
+        assertNull(subject6.getName());
+        
+        String namePublic = subject6.getAttributeValue("namePublic");
+        assertNull(namePublic);
+        // should not be able to see private name
+        String namePrivate = subject6.getAttributeValue("namePrivate");
+        assertNull(namePrivate);
+        return null;
+      }
+    });
+    
+  }
+  
+  /**
+   * test that search uses the correct search string based on security config.
+   * search_string0 is descriptionPrivate (all subjects have data).
+   * search_string1 is descriptionPublic (subjects 8 and 9 have null description_public).
+   * search_string0 is restricted to readersGroup (test.subject.1 and test.subject.2 are members).
+   */
+  public void testSearchStringAccess() {
+
+    setupData(GrouperDataProviderSyncType.fullSyncFull);
+
+    // configure defaultIndexOrder to fall back to index 1 if index 0 is not accessible
+    new GrouperDbConfig().configFileName("grouper.properties").propertyName("member.search.defaultIndexOrder").value("0,1").store();
+    ConfigPropertiesCascadeBase.clearCache();
+
+    // ---- Test 1: root user (wheel) has access to search_string0, should find results ----
+    Set<Subject> subjects = SubjectFinder.findAll("test 0", "dataFieldSubjectSource");
+    assertEquals("root should find subject via search_string0", 1, subjects.size());
+    assertEquals("my name is test.subject.0", subjects.iterator().next().getName());
+
+    // root can find subject.8 via search_string0 (descriptionPrivate has data for all subjects)
+    Set<Subject> subjects8root = SubjectFinder.findAll("test.subject.8", "dataFieldSubjectSource");
+    assertEquals("root should find subject.8 via search_string0 (descriptionPrivate)", 1, subjects8root.size());
+
+    // ---- Test 2: reader (test.subject.1, member of readersGroup) uses search_string0 ----
+    GrouperSession.callbackGrouperSessionBySubjectId("test.subject.1", "jdbc", new GrouperSessionHandler() {
+
+      @Override
+      public Object callback(GrouperSession grouperSession) throws GrouperSessionException {
+
+        // reader has access to search_string0, should find test.subject.0
+        Set<Subject> readerSubjects = SubjectFinder.findAll("test 0", "dataFieldSubjectSource");
+        assertEquals("reader should find subject via search_string0", 1, readerSubjects.size());
+
+        // reader can find subject.8 via search_string0 (descriptionPrivate has data)
+        Set<Subject> readerSubjects8 = SubjectFinder.findAll("test.subject.8", "dataFieldSubjectSource");
+        assertEquals("reader should find subject.8 via search_string0 (descriptionPrivate)", 1, readerSubjects8.size());
+
+        return null;
+      }
+    });
+
+    // ---- Test 3: non-reader (test.subject.0) falls back to search_string1 (descriptionPublic) ----
+    GrouperSession.callbackGrouperSessionBySubjectId("test.subject.0", "jdbc", new GrouperSessionHandler() {
+
+      @Override
+      public Object callback(GrouperSession grouperSession) throws GrouperSessionException {
+
+        // search_string0 restricted, falls back to search_string1 (descriptionPublic)
+        // test.subject.0 has descriptionPublic data, so should be findable
+        Set<Subject> nonReaderSubjects = SubjectFinder.findAll("test 0", "dataFieldSubjectSource");
+        assertNotNull(nonReaderSubjects);
+
+        // test.subject.8 has null description_public, so search_string1 has no data for it
+        // searching via search_string1 should NOT find subject.8
+        Set<Subject> nonReaderSubjects8 = SubjectFinder.findAll("test.subject.8", "dataFieldSubjectSource");
+        assertEquals("non-reader should NOT find subject.8 via search_string1 (descriptionPublic is null)", 0, GrouperUtil.length(nonReaderSubjects8));
+
+        return null;
+      }
+    });
+
+    // ---- Test 4: restrict search_string0 to a different group, verify access changes ----
+    Group searchGroup = new GroupSave(GrouperSession.staticGrouperSession()).assignName("test:searchAccessGroup").assignCreateParentStemsIfNotExist(true).save();
+    searchGroup.addMember(SubjectFinder.findByIdAndSource("test.subject.3", "jdbc", true));
+
+    new GrouperDbConfig().configFileName("grouper.properties").propertyName("security.member.search.string0.allowOnlyGroup").value(searchGroup.getName()).store();
+    ConfigPropertiesCascadeBase.clearCache();
+
+    // test.subject.3 is in searchGroup, should use search_string0
+    GrouperSession.callbackGrouperSessionBySubjectId("test.subject.3", "jdbc", new GrouperSessionHandler() {
+
+      @Override
+      public Object callback(GrouperSession grouperSession) throws GrouperSessionException {
+
+        // has access to search_string0, can find subject.8 (descriptionPrivate has data)
+        Set<Subject> groupMemberSubjects8 = SubjectFinder.findAll("test.subject.8", "dataFieldSubjectSource");
+        assertEquals("searchGroup member should find subject.8 via search_string0", 1, groupMemberSubjects8.size());
+
+        return null;
+      }
+    });
+
+    // test.subject.4 is NOT in searchGroup, falls back to search_string1
+    GrouperSession.callbackGrouperSessionBySubjectId("test.subject.4", "jdbc", new GrouperSessionHandler() {
+
+      @Override
+      public Object callback(GrouperSession grouperSession) throws GrouperSessionException {
+
+        // falls back to search_string1, subject.8 has null descriptionPublic
+        Set<Subject> nonGroupMemberSubjects8 = SubjectFinder.findAll("test.subject.8", "dataFieldSubjectSource");
+        assertEquals("non-searchGroup member should NOT find subject.8 via search_string1", 0, GrouperUtil.length(nonGroupMemberSubjects8));
+
+        return null;
+      }
+    });
+
+    // ---- Test 5: restrict both search strings, no search possible ----
+    new GrouperDbConfig().configFileName("grouper.properties").propertyName("security.member.search.string1.wheelOnly").value("true").store();
+    ConfigPropertiesCascadeBase.clearCache();
+
+    GrouperSession.callbackGrouperSessionBySubjectId("test.subject.0", "jdbc", new GrouperSessionHandler() {
+
+      @Override
+      public Object callback(GrouperSession grouperSession) throws GrouperSessionException {
+
+        // both search strings restricted, should return empty
+        Set<Subject> noAccessSubjects = SubjectFinder.findAll("test 0", "dataFieldSubjectSource");
+        assertEquals("no accessible search strings should return empty", 0, GrouperUtil.length(noAccessSubjects));
+
+        return null;
+      }
+    });
+
+    // ---- Test 6: root still has access even when wheelOnly is set ----
+    GrouperSession.startRootSession();
+    Set<Subject> rootStillWorks = SubjectFinder.findAll("test 0", "dataFieldSubjectSource");
+    assertEquals("root should still find subject when wheelOnly is set", 1, rootStillWorks.size());
+
+  }
+
+  /**
+   * test search min length and max results limits
+   */
+  public void testSearchLimits() {
+
+    setupData(GrouperDataProviderSyncType.fullSyncFull);
+
+    // ---- Test min search length (must be at least 2 chars) ----
+
+    // single character search should return empty
+    Set<Subject> tooShort = SubjectFinder.findAll("a", "dataFieldSubjectSource");
+    assertEquals("single char search should return empty", 0, GrouperUtil.length(tooShort));
+
+    // blank search should return empty
+    Set<Subject> blank = SubjectFinder.findAll("", "dataFieldSubjectSource");
+    assertEquals("blank search should return empty", 0, GrouperUtil.length(blank));
+
+    // spaces only should return empty
+    Set<Subject> spaces = SubjectFinder.findAll("   ", "dataFieldSubjectSource");
+    assertEquals("spaces-only search should return empty", 0, GrouperUtil.length(spaces));
+
+    // 2 characters should work
+    Set<Subject> twoChars = SubjectFinder.findAll("te", "dataFieldSubjectSource");
+    assertTrue("2 char search should return results", GrouperUtil.length(twoChars) > 0);
+
+    // ---- Test max results limit (maxResults=5 set in setupData) ----
+
+    // search for "test subject" which matches all 10, but maxResults=5 should cap it
+    Set<Subject> cappedSubjects = SubjectFinder.findAll("test subject", "dataFieldSubjectSource");
+    assertEquals("maxResults=5 should cap results to 5", 5, GrouperUtil.length(cappedSubjects));
+
+  }
+
+  /**
+   * make sure subject source cache is not caching data field subjects
+   */
+  public void testGetSubjectCache() {
+    
+    setupData(GrouperDataProviderSyncType.fullSyncFull);
+    
+    GrouperSession.startRootSession();
+    assertEquals("my name is test.subject.6", SubjectFinder.findByIdAndSource("test.subject.6", "dataFieldSubjectSource", true).getAttributes().get("nameprivate").iterator().next());
+    
+    GrouperSession.start(SubjectFinder.findByIdAndSource("test.subject.0", "jdbc", true));
+    assertEquals(0, GrouperUtil.length(SubjectFinder.findByIdAndSource("test.subject.6", "dataFieldSubjectSource", true).getAttributes().get("nameprivate")));
+    
+  }
+  
+  /**
+   * Test that a SQL_GROUP_LIST loader using SUBJECT_IDENTIFIER with the data field subject source
+   * properly loads members, and that if the identifier lookup throws an exception (simulating a
+   * database timeout), the loader fails with an error instead of silently removing members.
+   */
+  public void testLoaderWithIdentifierException() {
+
+    setupData(GrouperDataProviderSyncType.fullSyncFull);
+
+    GrouperSession grouperSession = GrouperSession.startRootSession();
+
+    // Create a loader table with group_name and subject_identifier (the loginid/netId)
+    // The data field source identifiers are like "id.test.subject.0" (from loginid)
+    // Ensure the testgrouper_loader table exists
+    edu.internet2.middleware.grouper.app.loader.GrouperLoaderTest.ensureTestgrouperLoaderTables();
+    HibernateSession.byHqlStatic().createQuery("delete from TestgrouperLoader").executeUpdate();
+
+    List<TestgrouperLoader> testDataList = new ArrayList<TestgrouperLoader>();
+    testDataList.add(new TestgrouperLoader("test:loaderGroup1", "id.test.subject.0", null));
+    testDataList.add(new TestgrouperLoader("test:loaderGroup1", "id.test.subject.1", null));
+    testDataList.add(new TestgrouperLoader("test:loaderGroup1", "id.test.subject.2", null));
+    HibernateSession.byObjectStatic().saveOrUpdate(testDataList);
+
+    // Create loader group using GroupType approach (like existing loader tests)
+    Group loaderGroup = Group.saveGroup(grouperSession, null, null, "test:loaderOwner", null, null, null, true);
+    loaderGroup.addType(GroupTypeFinder.find("grouperLoader", true));
+    loaderGroup.setAttribute(GrouperLoader.GROUPER_LOADER_TYPE, "SQL_GROUP_LIST");
+    loaderGroup.setAttribute(GrouperLoader.GROUPER_LOADER_DB_NAME, "grouper");
+    loaderGroup.setAttribute(GrouperLoader.GROUPER_LOADER_QUERY,
+        "select col1 as GROUP_NAME, col2 as SUBJECT_IDENTIFIER from testgrouper_loader");
+    loaderGroup.setAttribute(GrouperLoader.GROUPER_LOADER_SCHEDULE_TYPE, "START_TO_START_INTERVAL");
+    loaderGroup.setAttribute(GrouperLoader.GROUPER_LOADER_INTERVAL_SECONDS, "86400");
+
+    // Run the loader - should succeed and populate the group
+    GrouperLoader.runJobOnceForGroup(grouperSession, loaderGroup);
+
+    // Verify members were loaded
+    Group loadedGroup = GroupFinder.findByName(grouperSession, "test:loaderGroup1", true);
+    assertEquals("loader should have loaded 3 members", 3, loadedGroup.getMembers().size());
+
+    // Add new subjects that weren't in the first run, so they won't be cached
+    // and must be resolved fresh through the data field source adapter
+    List<TestgrouperLoader> newDataList = new ArrayList<TestgrouperLoader>();
+    newDataList.add(new TestgrouperLoader("test:loaderGroup1", "id.test.subject.3", null));
+    newDataList.add(new TestgrouperLoader("test:loaderGroup1", "id.test.subject.4", null));
+    HibernateSession.byObjectStatic().saveOrUpdate(newDataList);
+
+    // Now simulate a database timeout by setting the test flag
+    GrouperDataFieldSourceAdapter.testingThrowExceptionOnGetSubjectsByIdentifiers = true;
+
+    try {
+      // Run the loader again via runOnceByJobName (like the daemon does - catches exceptions internally)
+      String jobName = "SQL_GROUP_LIST__" + loaderGroup.getName() + "__" + loaderGroup.getUuid();
+      boolean exceptionThrown = false;
+      try {
+        GrouperLoader.runOnceByJobName(grouperSession, jobName, false);
+      } catch (Exception e) {
+        exceptionThrown = true;
+      }
+
+      // Check the loader log for ERROR status
+      if (!exceptionThrown) {
+        Hib3GrouperLoaderLog loaderLog = Hib3GrouperLoaderLog.retrieveMostRecentLog(jobName);
+        assertTrue("Loader should have ERROR status, not: " + loaderLog.getStatus(),
+            loaderLog.getStatus().contains("ERROR"));
+      }
+      
+      // Most importantly, the group should still have its original 3 members (not emptied out)
+      loadedGroup = GroupFinder.findByName(grouperSession, "test:loaderGroup1", true);
+      assertEquals("group should still have 3 members after failed loader run", 3, loadedGroup.getMembers().size());
+
+    } finally {
+      GrouperDataFieldSourceAdapter.testingThrowExceptionOnGetSubjectsByIdentifiers = false;
+    }
+  }
+
+  public void setupData(GrouperDataProviderSyncType syncType) {
+    
+    try {      
+      synchronized (GrouperTestBase.class) {
+        GrouperSession grouperSession = GrouperSession.startRootSession();
+        
+        //TODO: add to DDL
+        if (!GrouperDdlUtils.assertTableThere(true, "subject_base_v")) {
+          new GcDbAccess().sql(""" 
+              CREATE VIEW subject_base_v
+                   AS SELECT subjectid AS id,
+                name,
+                ( SELECT sa2.value
+                       FROM subjectattribute sa2
+                      WHERE sa2.name = 'name' AND sa2.subjectid = s.subjectid) AS lfname,
+                ( SELECT sa3.value
+                       FROM subjectattribute sa3
+                      WHERE sa3.name = 'loginid' AND sa3.subjectid = s.subjectid) AS loginid,
+                ( SELECT sa4.value
+                       FROM subjectattribute sa4
+                      WHERE sa4.name = 'description' AND sa4.subjectid = s.subjectid) AS description,
+                ( SELECT sa5.value
+                       FROM subjectattribute sa5
+                      WHERE sa5.name = 'email' AND sa5.subjectid = s.subjectid) AS email
+              FROM subject s
+              """).executeSql();
+        }
+        
+        if (!GrouperDdlUtils.assertTableThere(true, "subject_v")) {
+          new GcDbAccess().sql(""" 
+              create view subject_v as 
+              select sbv.id, 
+              case when id in ('test.subject.6', 'test.subject.7') then null else name end as name_public, 
+              name as name_private,
+              case when id in ('test.subject.6', 'test.subject.7') then null else lfname end as lfname_public, 
+              lfname as lfname_private,
+              case when id in ('test.subject.7', 'test.subject.8') then null else loginid end as loginid_public, 
+              loginid as loginid_private,
+              case when id in ('test.subject.8', 'test.subject.9') then null else description end as description_public, 
+              description as description_private,
+              case when id in ('test.subject.5', 'test.subject.6') then null else email end as email_public, 
+              email as email_private
+              from subject_base_v sbv
+              """).executeSql();
+        }
+        
+        GrouperDataProviderTest.createTableChangeLog();
+        
+        //TODO: take the following sql out once Shilen's code is in
+        
+        String _sql = """
+            INSERT INTO public.grouper_members (id,subject_id,subject_source,subject_type,hibernate_version_number,subject_identifier0,subject_identifier1,subject_identifier2,id_index,internal_id,email0,sort_string0,sort_string1,sort_string2,sort_string3,sort_string4,search_string0,search_string1,search_string2,search_string3,search_string4,"name",description,context_id,subject_resolution_deleted,subject_resolution_resolvable,subject_resolution_eligible) VALUES
+       ('8d498acb78f54c789d4229daa805d1a0','test.subject.0','dataFieldSubjectSource','person',0,'',NULL,NULL,999901,999901,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'My name is test.subject.0','My description is test.subject.0','f3f6ba364aa448b58c11677c9081e7b0','F','T','T')
+            """;
+//        new GcDbAccess().sql(_sql).executeSql();
+        
+        Group viewersGroup = new GroupSave(grouperSession).assignName("test:dataFieldPrivateViewers").assignCreateParentStemsIfNotExist(true).save();
+        Group updatersGroup = new GroupSave(grouperSession).assignName("test:dataFieldPrivateUpdaters").assignCreateParentStemsIfNotExist(true).save();
+        Group readersGroup = new GroupSave(grouperSession).assignName("test:dataFieldPrivateReaders").assignCreateParentStemsIfNotExist(true).save();
+        
+        readersGroup.addMember(updatersGroup.toSubject());
+        
+        readersGroup.addMember(SubjectFinder.findByIdAndSource("test.subject.1", "jdbc", true));
+        readersGroup.addMember(SubjectFinder.findByIdAndSource("test.subject.2", "jdbc", true));
+        
+        //rum change_log temp daemon
+        GrouperLoader.runOnceByJobName(GrouperSession.staticGrouperSession(), "CHANGE_LOG_changeLogTempToChangeLog", false);
+        GrouperDataEngine.clearHighestLevelCache();
+        
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperPrivacyRealm.privateConfigId.privacyRealmName").value("privateConfigId").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperPrivacyRealm.privateConfigId.privacyRealmPublic").value("false").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperPrivacyRealm.privateConfigId.privacyRealmAuthenticated").value("false").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperPrivacyRealm.privateConfigId.privacyRealmSysadminsCanView").value("true").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperPrivacyRealm.privateConfigId.privacyRealmViewersGroupName").value(viewersGroup.getName()).store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperPrivacyRealm.privateConfigId.privacyRealmUpdatersGroupName").value(updatersGroup.getName()).store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperPrivacyRealm.privateConfigId.privacyRealmReadersGroupName").value(readersGroup.getName()).store();
+        
+        GrouperPrivacyRealmConfig privacyRealmConfigPrivate = new GrouperPrivacyRealmConfig();
+        privacyRealmConfigPrivate.readFromConfig("privateConfigId");
+        
+        
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperPrivacyRealm.publicConfigId.privacyRealmName").value("publicConfigId").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperPrivacyRealm.publicConfigId.privacyRealmPublic").value("true").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperPrivacyRealm.publicConfigId.privacyRealmAuthenticated").value("false").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperPrivacyRealm.publicConfigId.privacyRealmSysadminsCanView").value("true").store();
+        
+        GrouperPrivacyRealmConfig privacyRealmConfigPublic = new GrouperPrivacyRealmConfig();
+        privacyRealmConfigPublic.readFromConfig("publicConfigId");
+        
+        
+        for (String configId: new String[] {"namePublic", "namePrivate", "lfNamePublic", "lfNamePrivate", "netIdPublic", "netIdPrivate", "emailPublic", 
+            "emailPrivate", "descriptionPublic", "descriptionPrivate"}) {
+          
+          String privacyRealm = configId.endsWith("Public") ? "publicConfigId": "privateConfigId";
+          String fieldDataUseValue = configId.startsWith("netId") ? "informational": "identifier";
+          
+          new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataField."+configId+".fieldAliases").value(configId).store();
+          new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataField."+configId+".fieldPrivacyRealm").value(privacyRealm).store();
+          new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataField."+configId+".descriptionHtml").value("<b>description html </b>").store();
+          new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataField."+configId+".fieldDataAssignableTo").value("individuals").store();
+          new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataField."+configId+".fieldDataUse").value(fieldDataUseValue).store();
+          
+        }
+        
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProvider.dataFieldSource.name").value("dataFieldSource").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProvider.dataFieldSource.subjectSource").value("true").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProvider.dataFieldSource.subjectSourceId").value("dataFieldSubjectSource").store();
+        
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerConfigId").value("dataFieldSource").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryType").value("sql").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQuerySqlConfigId").value("grouper").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQuerySqlQuery")
+          .value("""
+              SELECT id as subject_id, name_public, name_private, lfname_public, lfname_private, loginid_public, loginid_private, 
+              description_public, description_private, email_public, email_private
+                  FROM subject_v
+              """).store();
+
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataStructure").value("attribute").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQuerySubjectIdAttribute").value("subject_id").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQuerySubjectIdType").value("subjectId").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQuerySubjectSourceId").value("dataFieldSubjectSource").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryNumberOfDataFields").value("10").store();
+        
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.0.providerDataFieldConfigId").value("namePublic").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.0.providerDataFieldMappingType").value("attribute").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.0.providerDataFieldAttribute").value("name_public").store();
+        
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.1.providerDataFieldConfigId").value("namePrivate").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.1.providerDataFieldMappingType").value("attribute").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.1.providerDataFieldAttribute").value("name_private").store();
+        
+        // lf name public
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.2.providerDataFieldConfigId").value("lfNamePublic").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.2.providerDataFieldMappingType").value("attribute").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.2.providerDataFieldAttribute").value("lfname_public").store();
+        
+        // lf name private
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.3.providerDataFieldConfigId").value("lfNamePrivate").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.3.providerDataFieldMappingType").value("attribute").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.3.providerDataFieldAttribute").value("lfname_private").store();
+        
+        // net id public
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.4.providerDataFieldConfigId").value("netIdPublic").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.4.providerDataFieldMappingType").value("attribute").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.4.providerDataFieldAttribute").value("loginid_public").store();
+        
+        // net id private
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.5.providerDataFieldConfigId").value("netIdPrivate").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.5.providerDataFieldMappingType").value("attribute").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.5.providerDataFieldAttribute").value("loginid_private").store();
+        
+        // email public
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.6.providerDataFieldConfigId").value("emailPublic").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.6.providerDataFieldMappingType").value("attribute").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.6.providerDataFieldAttribute").value("email_public").store();
+        
+        // email private
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.7.providerDataFieldConfigId").value("emailPrivate").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.7.providerDataFieldMappingType").value("attribute").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.7.providerDataFieldAttribute").value("email_private").store();
+        
+        // description public
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.8.providerDataFieldConfigId").value("descriptionPublic").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.8.providerDataFieldMappingType").value("attribute").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.8.providerDataFieldAttribute").value("description_public").store();
+        
+        // description private
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.9.providerDataFieldConfigId").value("descriptionPrivate").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.9.providerDataFieldMappingType").value("attribute").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderQuery.dataFieldSourceQuery.providerQueryDataField.9.providerDataFieldAttribute").value("description_private").store();
+        
+        
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderChangeLogQuery.cl1.providerConfigId").value("dataFieldSource").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderChangeLogQuery.cl1.providerChangeLogQueryType").value("sql").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderChangeLogQuery.cl1.providerChangeLogQuerySqlConfigId").value("grouper").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderChangeLogQuery.cl1.providerChangeLogQuerySqlQuery").value("select id, subject_id, create_timestamp1 from testgrouper_dp_changelog").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderChangeLogQuery.cl1.providerChangeLogQueryPrimaryKeyAttribute").value("id").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderChangeLogQuery.cl1.providerChangeLogQueryTimestampAttribute").value("create_timestamp1").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderChangeLogQuery.cl1.providerChangeLogQuerySubjectIdAttribute").value("subject_id").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderChangeLogQuery.cl1.providerChangeLogQuerySubjectIdType").value("subjectId").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("grouperDataProviderChangeLogQuery.cl1.providerChangeLogQuerySubjectSourceId").value("dataFieldSubjectSource").store();
+        
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.adapterClass").value("edu.internet2.middleware.grouper.subj.GrouperDataFieldSourceAdapter").store();;
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.0.name").value("name").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.0.translationType").value("dataFieldPrivacyTarget").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.1.name").value("namePrivate").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.1.privacyAttributeName").value("name").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.1.privacyDataFieldSource").value("true").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.1.privacyPriority").value("1").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.1.sourceAttribute").value("namePrivate").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.1.translationType").value("sourceAttribute").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.10.formatToLowerCase").value("false").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.10.name").value("emailPrivate").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.10.privacyAttributeName").value("email").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.10.privacyDataFieldSource").value("true").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.10.privacyPriority").value("1").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.10.sourceAttribute").value("emailPrivate").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.10.translationType").value("sourceAttribute").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.11.name").value("emailPublic").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.11.privacyAttributeName").value("email").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.11.privacyDataFieldSource").value("true").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.11.privacyPriority").value("2").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.11.sourceAttribute").value("emailPublic").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.11.translationType").value("sourceAttribute").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.12.name").value("description").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.12.translationType").value("dataFieldPrivacyTarget").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.13.name").value("descriptionPrivate").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.13.privacyAttributeName").value("description").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.13.privacyDataFieldSource").value("true").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.13.privacyPriority").value("1").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.13.sourceAttribute").value("descriptionPrivate").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.13.translationType").value("sourceAttribute").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.14.name").value("descriptionPublic").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.14.privacyAttributeName").value("description").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.14.privacyDataFieldSource").value("true").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.14.privacyPriority").value("2").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.14.sourceAttribute").value("descriptionPublic").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.14.translationType").value("sourceAttribute").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.2.name").value("namePublic").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.2.privacyAttributeName").value("name").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.2.privacyDataFieldSource").value("true").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.2.privacyPriority").value("2").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.2.sourceAttribute").value("namePublic").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.2.translationType").value("sourceAttribute").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.3.name").value("lfName").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.3.translationType").value("dataFieldPrivacyTarget").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.4.name").value("lfNamePrivate").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.4.privacyAttributeName").value("lfName").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.4.privacyDataFieldSource").value("true").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.4.privacyPriority").value("1").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.4.sourceAttribute").value("lfNamePrivate").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.4.translationType").value("sourceAttribute").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.5.name").value("lfNamePublic").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.5.privacyAttributeName").value("lfName").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.5.privacyDataFieldSource").value("true").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.5.privacyPriority").value("2").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.5.sourceAttribute").value("lfNamePublic").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.5.translationType").value("sourceAttribute").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.6.name").value("netId").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.6.translationType").value("dataFieldPrivacyTarget").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.7.name").value("netIdPrivate").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.7.privacyAttributeName").value("netId").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.7.privacyDataFieldSource").value("true").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.7.privacyPriority").value("1").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.7.sourceAttribute").value("netIdPrivate").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.7.translationType").value("sourceAttribute").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.8.name").value("netIdPublic").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.8.privacyAttributeName").value("netId").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.8.privacyDataFieldSource").value("true").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.8.privacyPriority").value("2").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.8.sourceAttribute").value("netIdPublic").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.8.translationType").value("sourceAttribute").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.9.name").value("email").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.9.translationType").value("dataFieldPrivacyTarget").store();
+
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.6.subjectIdentifier").value("true").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.7.subjectIdentifier").value("true").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.8.subjectIdentifier").value("true").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.9.subjectIdentifier").value("true").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.10.subjectIdentifier").value("true").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.attribute.11.subjectIdentifier").value("true").store();
+        
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.id").value("dataFieldSubjectSource").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.name").value("data field subject source").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.numberOfAttributes").value("15").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.param.Description_AttributeType.value").value("description").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.param.Name_AttributeType.value").value("name").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.param.emailAttributeName.value").value("email").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.param.netId.value").value("netId").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.param.subjectIdentifierAttribute0.value").value("netId").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.param.maxResults.value").value("5").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.searchAttribute.0.attributeName").value("descriptionPrivate").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.searchAttribute.1.attributeName").value("descriptionPublic").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.searchAttributeCount").value("2").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.sortAttribute.0.attributeName").value("lfNamePrivate").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.sortAttribute.1.attributeName").value("lfNamePublic").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.sortAttributeCount").value("2").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.types").value("person").store();
+        
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.g_gsa.param.sortAttribute1.value").value("displayExtension").store();
+        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.g_gsa.param.searchAttribute1.value").value("searchAttribute0").store();
+        
+//        new GrouperDbConfig().configFileName("subject.properties").propertyName("subjectApi.source.dataFieldSubjectSource.extraAttributesFromSource").value("person").store();
+
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("internalSubjects.searchAttribute1.el").value("${subject.name},${subject.id}").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("internalSubjects.sortAttribute1.el").value("${subject.name}").store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("security.member.sort.string0.allowOnlyGroup").value(readersGroup.getName()).store();
+        new GrouperDbConfig().configFileName("grouper.properties").propertyName("security.member.search.string0.allowOnlyGroup").value(readersGroup.getName()).store();
+        
+
+        new GrouperDbConfig().configFileName("grouper-ui.properties").propertyName("grouper.ui.authentication.sourceIds").value("jdbc,g:isa").store();
+
+        if (syncType == GrouperDataProviderSyncType.fullSyncFull) {
+          new GrouperDbConfig().configFileName("grouper-loader.properties").propertyName("otherJob.dataFieldSourceFull.class").value("edu.internet2.middleware.grouper.dataField.GrouperDataProviderFullSyncJob").store();
+          new GrouperDbConfig().configFileName("grouper-loader.properties").propertyName("otherJob.dataFieldSourceFull.dataProviderConfigId").value("dataFieldSource").store();
+          new GrouperDbConfig().configFileName("grouper-loader.properties").propertyName("otherJob.dataFieldSourceFull.quartzCron").value("0 0 5 * * ?").store();
+        } else {
+          new GrouperDbConfig().configFileName("grouper-loader.properties").propertyName("otherJob.dataFieldSourceIncremental.class").value("edu.internet2.middleware.grouper.dataField.GrouperDataProviderIncrementalSyncJob").store();
+          new GrouperDbConfig().configFileName("grouper-loader.properties").propertyName("otherJob.dataFieldSourceIncremental.dataProviderConfigId").value("dataFieldSource").store();
+          new GrouperDbConfig().configFileName("grouper-loader.properties").propertyName("otherJob.dataFieldSourceIncremental.quartzCron").value("0 0 5 * * ?").store();
+        }
+        
+        // load data
+        SubjectConfig.clearCache();
+        ConfigPropertiesCascadeBase.clearCache();
+
+        SourceManager.getInstance().reloadSource("dataFieldSubjectSource");
+        SourceManager.getInstance().loadSource(SubjectConfig.retrieveConfig().retrieveSourceConfigs().get("dataFieldSubjectSource"));
+
+        if (syncType == GrouperDataProviderSyncType.fullSyncFull) {
+          GrouperDataProviderFullSyncJob.runDaemonStandalone("OTHER_JOB_dataFieldSourceFull");
+        } else {
+          GrouperDataProviderIncrementalSyncJob.runDaemonStandalone("OTHER_JOB_dataFieldSourceIncremental");
+
+          List<List<Object>> batchBindVarsChangeLog = new ArrayList<List<Object>>();
+
+          batchBindVarsChangeLog.add(GrouperUtil.toList(1, "test.subject.0", new Date()));
+          batchBindVarsChangeLog.add(GrouperUtil.toList(2, "test.subject.1", new Date()));
+          batchBindVarsChangeLog.add(GrouperUtil.toList(3, "test.subject.2", new Date()));
+          batchBindVarsChangeLog.add(GrouperUtil.toList(4, "test.subject.3", new Date()));
+          batchBindVarsChangeLog.add(GrouperUtil.toList(5, "test.subject.4", new Date()));
+          batchBindVarsChangeLog.add(GrouperUtil.toList(6, "test.subject.5", new Date()));
+          batchBindVarsChangeLog.add(GrouperUtil.toList(7, "test.subject.6", new Date()));
+          batchBindVarsChangeLog.add(GrouperUtil.toList(8, "test.subject.7", new Date()));
+          batchBindVarsChangeLog.add(GrouperUtil.toList(9, "test.subject.8", new Date()));
+          batchBindVarsChangeLog.add(GrouperUtil.toList(10, "test.subject.9", new Date()));
+
+          new GcDbAccess().sql("insert into testgrouper_dp_changelog (id, subject_id, create_timestamp1) values (?, ?, ?)").batchBindVars(batchBindVarsChangeLog).executeBatchSql();
+          
+          GrouperDataProviderIncrementalSyncJob.runDaemonStandalone("OTHER_JOB_dataFieldSourceIncremental");
+        }
+      }
+    } catch (Exception e) {
+      System.out.println("error: " + e);
+    }
+    
+  }
+
+}

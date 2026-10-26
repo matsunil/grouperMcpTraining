@@ -1,0 +1,9175 @@
+package edu.internet2.middleware.grouper.app.provisioning;
+
+import java.sql.Timestamp;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.builder.EqualsBuilder;
+import org.apache.commons.lang3.builder.HashCodeBuilder;
+import org.apache.commons.logging.Log;
+
+import com.fasterxml.jackson.databind.JsonNode;
+
+import edu.internet2.middleware.grouper.app.loader.GrouperDaemonUtils;
+import edu.internet2.middleware.grouper.app.loader.GrouperLoaderStatus;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoInsertEntitiesRequest;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoInsertGroupsRequest;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveAllDataRequest;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveAllDataResponse;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveEntitiesRequest;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveEntitiesResponse;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveGroupsRequest;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveGroupsResponse;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveMembershipsByEntitiesRequest;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveMembershipsByEntitiesResponse;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveMembershipsByGroupsRequest;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoRetrieveMembershipsByGroupsResponse;
+import edu.internet2.middleware.grouper.app.provisioning.targetDao.TargetDaoSendChangesToTargetRequest;
+import edu.internet2.middleware.grouper.cfg.GrouperConfig;
+import edu.internet2.middleware.grouper.changeLog.esb.consumer.EsbEventContainer;
+import edu.internet2.middleware.grouper.dataField.GrouperDataEngine;
+import edu.internet2.middleware.grouper.dataField.GrouperDataField;
+import edu.internet2.middleware.grouper.dataField.GrouperDataFieldAssignDao;
+import edu.internet2.middleware.grouper.dataField.GrouperDataFieldConfig;
+import edu.internet2.middleware.grouper.dataField.GrouperDataFieldDao;
+import edu.internet2.middleware.grouper.dataField.GrouperDataFieldStructure;
+import edu.internet2.middleware.grouper.dataField.GrouperDataRow;
+import edu.internet2.middleware.grouper.dataField.GrouperDataRowConfig;
+import edu.internet2.middleware.grouper.dataField.GrouperDataRowDao;
+import edu.internet2.middleware.grouper.dataField.GrouperDataRowFieldAssignDao;
+import edu.internet2.middleware.grouper.dictionary.GrouperDictionaryDao;
+import edu.internet2.middleware.grouper.ldap.LdapAttribute;
+import edu.internet2.middleware.grouper.ldap.LdapEntry;
+import edu.internet2.middleware.grouper.ldap.LdapSearchScope;
+import edu.internet2.middleware.grouper.ldap.LdapSessionUtils;
+import edu.internet2.middleware.grouper.tableIndex.TableIndex;
+import edu.internet2.middleware.grouper.tableIndex.TableIndexType;
+import edu.internet2.middleware.grouper.util.GrouperUtil;
+import edu.internet2.middleware.grouperClient.collections.MultiKey;
+import edu.internet2.middleware.grouperClient.jdbc.GcDbAccess;
+import edu.internet2.middleware.grouperClient.jdbc.tableSync.GcGrouperSync;
+import edu.internet2.middleware.grouperClient.jdbc.tableSync.GcGrouperSyncErrorCode;
+import edu.internet2.middleware.grouperClient.jdbc.tableSync.GcGrouperSyncGroup;
+import edu.internet2.middleware.grouperClient.jdbc.tableSync.GcGrouperSyncJob;
+import edu.internet2.middleware.grouperClient.jdbc.tableSync.GcGrouperSyncLog;
+import edu.internet2.middleware.grouperClient.jdbc.tableSync.GcGrouperSyncLogState;
+import edu.internet2.middleware.grouperClient.jdbc.tableSync.GcGrouperSyncMember;
+import edu.internet2.middleware.grouperClient.jdbc.tableSync.GcGrouperSyncMembership;
+import edu.internet2.middleware.grouperClient.jdbc.tableSync.GcTableSync;
+import edu.internet2.middleware.grouperClient.jdbc.tableSync.GcTableSyncConfiguration;
+import edu.internet2.middleware.grouperClient.jdbc.tableSync.GcTableSyncOutput;
+import edu.internet2.middleware.grouperClient.jdbc.tableSync.GcTableSyncPhase;
+import edu.internet2.middleware.grouperClient.jdbc.tableSync.GcTableSyncSubtype;
+import edu.internet2.middleware.grouperClient.jdbc.tableSync.GcTableSyncTableBean;
+import edu.internet2.middleware.grouperClient.jdbc.tableSync.GcTableSyncTableData;
+import edu.internet2.middleware.grouperClient.jdbc.tableSync.GcTableSyncTableMetadata;
+import edu.internet2.middleware.grouperClient.util.GrouperClientUtils;
+
+/**
+ * does the logic to use the data from the DAOs and call the correct methods to synnc things up or dry run or send messages for async
+ * @author mchyzer
+ *
+ */
+public class GrouperProvisioningLogic {
+
+  /**
+   * default role name for memberships that do not specify a role
+   */
+  public static final String DEFAULT_MSHIP_ROLE_NAME = "members";
+
+  /**
+   *
+   */
+  public void provision() {
+
+    this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.configure);
+
+    Timestamp startTimestamp = new Timestamp(System.currentTimeMillis());
+    this.getGrouperProvisioner().getGcGrouperSyncJob().setLastSyncStart(startTimestamp);
+    
+    this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().getGrouperProvisioningType().provision(this.grouperProvisioner);
+    
+  }
+
+  // ===================== ignoreIfMatchesValue (GRP-7436) =====================
+  // targetGroupAttribute.N.ignoreIfMatchesValue, targetEntityAttribute.N.ignoreIfMatchesValue and
+  // targetMembershipAttribute.N.ignoreIfMatchesValue mark objects Grouper must never insert, update or
+  // delete.  They are applied after matching, so a Grouper object and its target object are ignored
+  // together even when only one side carries the value (e.g. a hand-made admin whose target role is
+  // ignored but whose Grouper translation is not).  Ignored containers are pulled out of the data with
+  // their state flagged, so nothing downstream (inserts, compare, updates, deletes) sees them.  Not an
+  // error and not in the insert/update/delete counts; counted as ignoredGroups, ignoredEntities and
+  // ignoredMemberships.
+  // For groupAttributes / entityAttributes, an ignore value on the membership attribute itself ignores
+  // only those values (memberships), not the group / entity, so it works for target-only accounts too.
+
+  /**
+   * @param attributeNameToConfig a target attribute config map
+   * @return the attribute configs that have ignoreIfMatchesValue values (never null)
+   */
+  private static List<GrouperProvisioningConfigurationAttribute> attributesWithIgnoreValues(
+      Map<String, GrouperProvisioningConfigurationAttribute> attributeNameToConfig) {
+    List<GrouperProvisioningConfigurationAttribute> result = new ArrayList<GrouperProvisioningConfigurationAttribute>();
+    for (GrouperProvisioningConfigurationAttribute attribute : GrouperUtil.nonNull(attributeNameToConfig).values()) {
+      if (attribute != null && GrouperUtil.length(attribute.getIgnoreIfMatchesValues()) > 0) {
+        result.add(attribute);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * For groupAttributes (entityAttributes), the group (entity) attribute that holds the memberships.  An
+   * ignoreIfMatchesValue on that attribute ignores just the matching values (memberships), never the
+   * whole group (entity), so it is left out of the container checks and applied by
+   * removeIgnoredMemberships instead.
+   * @param forGroups true for the group attribute (groupAttributes), false for the entity attribute
+   *   (entityAttributes)
+   * @return the membership attribute config if it has ignore values, else null
+   */
+  private GrouperProvisioningConfigurationAttribute membershipAttributeWithIgnoreValues(boolean forGroups) {
+    GrouperProvisioningConfiguration configuration = this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration();
+    GrouperProvisioningBehaviorMembershipType membershipType = this.getGrouperProvisioner()
+        .retrieveGrouperProvisioningBehavior().getGrouperProvisioningBehaviorMembershipType();
+    if (membershipType != (forGroups ? GrouperProvisioningBehaviorMembershipType.groupAttributes
+        : GrouperProvisioningBehaviorMembershipType.entityAttributes)) {
+      return null;
+    }
+    String attributeNameForMemberships = configuration.getAttributeNameForMemberships();
+    if (StringUtils.isBlank(attributeNameForMemberships)) {
+      return null;
+    }
+    GrouperProvisioningConfigurationAttribute attribute = GrouperUtil.nonNull(forGroups ? configuration.getTargetGroupAttributeNameToConfig()
+        : configuration.getTargetEntityAttributeNameToConfig()).get(attributeNameForMemberships);
+    return attribute != null && GrouperUtil.length(attribute.getIgnoreIfMatchesValues()) > 0 ? attribute : null;
+  }
+
+  /**
+   * @param value an attribute value
+   * @param ignoreValue a configured ignore value
+   * @param caseSensitiveCompare from the attribute config
+   * @return true if they are the same value
+   */
+  private static boolean ignoreValueEquals(Object value, Object ignoreValue, boolean caseSensitiveCompare) {
+    if (value == null || ignoreValue == null) {
+      return false;
+    }
+    if (GrouperUtil.equals(value, ignoreValue)) {
+      return true;
+    }
+    // the ignore values are converted to the attribute value type at config load, but a target may
+    // still hand back a different java type (e.g. Integer vs Long), so compare as strings too
+    String valueString = GrouperUtil.stringValue(value);
+    String ignoreString = GrouperUtil.stringValue(ignoreValue);
+    return caseSensitiveCompare ? StringUtils.equals(valueString, ignoreString) : StringUtils.equalsIgnoreCase(valueString, ignoreString);
+  }
+
+  /**
+   * @param provisioningUpdatable a Grouper-side or target-side group, entity or membership, or null
+   * @param attributes attribute configs with ignore values
+   * @return true if any value of any of these attributes (any one value of a multi-valued attribute)
+   *   is one of that attribute's ignoreIfMatchesValue values
+   */
+  static boolean matchesIgnoreIfMatchesValue(ProvisioningUpdatable provisioningUpdatable,
+      List<GrouperProvisioningConfigurationAttribute> attributes) {
+    if (provisioningUpdatable == null || GrouperUtil.length(attributes) == 0) {
+      return false;
+    }
+    for (GrouperProvisioningConfigurationAttribute attribute : attributes) {
+      Object value = provisioningUpdatable.retrieveAttributeValue(attribute.getName());
+      Collection<?> values = value instanceof Collection ? (Collection<?>)value : GrouperUtil.toSet(value);
+      for (Object oneValue : GrouperUtil.nonNull(values)) {
+        for (Object ignoreValue : attribute.getIgnoreIfMatchesValues()) {
+          if (ignoreValueEquals(oneValue, ignoreValue, attribute.isCaseSensitiveCompare())) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * GRP-7436: pull group and entity containers whose Grouper-side or target-side object matches a
+   * configured ignoreIfMatchesValue.  Called in full and incremental sync after groups and entities are
+   * matched (and missing ones retrieved), before insertGroups / insertEntities.  The pulled containers
+   * are flagged ignoredDueToAttributeValue and kept in the ignored lists for removeIgnoredMemberships.
+   * No-op unless a group or entity attribute has ignoreIfMatchesValue configured.
+   */
+  public void removeIgnoredGroupsAndEntities() {
+
+    GrouperProvisioningConfiguration configuration = this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration();
+    List<GrouperProvisioningConfigurationAttribute> groupAttributes = attributesWithIgnoreValues(configuration.getTargetGroupAttributeNameToConfig());
+    List<GrouperProvisioningConfigurationAttribute> entityAttributes = attributesWithIgnoreValues(configuration.getTargetEntityAttributeNameToConfig());
+
+    // the membership attribute ignores memberships, not the container (see removeIgnoredMemberships)
+    groupAttributes.remove(this.membershipAttributeWithIgnoreValues(true));
+    entityAttributes.remove(this.membershipAttributeWithIgnoreValues(false));
+
+    if (groupAttributes.isEmpty() && entityAttributes.isEmpty()) {
+      return;
+    }
+
+    GrouperProvisioningData grouperProvisioningData = this.getGrouperProvisioner().retrieveGrouperProvisioningData();
+
+    int ignoredGroups = 0;
+    if (!groupAttributes.isEmpty()) {
+      // copy: the containers are removed from the set while looping
+      for (ProvisioningGroupWrapper provisioningGroupWrapper : new ArrayList<ProvisioningGroupWrapper>(
+          GrouperUtil.nonNull(grouperProvisioningData.getProvisioningGroupWrappers()))) {
+        if (matchesIgnoreIfMatchesValue(provisioningGroupWrapper.getGrouperTargetGroup(), groupAttributes)
+            || matchesIgnoreIfMatchesValue(provisioningGroupWrapper.getTargetProvisioningGroup(), groupAttributes)) {
+          provisioningGroupWrapper.getProvisioningStateGroup().setIgnoredDueToAttributeValue(true);
+          grouperProvisioningData.removeAndUnindexGroupWrapper(provisioningGroupWrapper);
+          grouperProvisioningData.getIgnoredGroupWrappers().add(provisioningGroupWrapper);
+          ignoredGroups++;
+          if (LOG.isDebugEnabled()) {
+            LOG.debug("ignoreIfMatchesValue: ignoring group " + provisioningGroupWrapper);
+          }
+        }
+      }
+    }
+
+    int ignoredEntities = 0;
+    if (!entityAttributes.isEmpty()) {
+      for (ProvisioningEntityWrapper provisioningEntityWrapper : new ArrayList<ProvisioningEntityWrapper>(
+          GrouperUtil.nonNull(grouperProvisioningData.getProvisioningEntityWrappers()))) {
+        if (matchesIgnoreIfMatchesValue(provisioningEntityWrapper.getGrouperTargetEntity(), entityAttributes)
+            || matchesIgnoreIfMatchesValue(provisioningEntityWrapper.getTargetProvisioningEntity(), entityAttributes)) {
+          provisioningEntityWrapper.getProvisioningStateEntity().setIgnoredDueToAttributeValue(true);
+          grouperProvisioningData.removeAndUnindexEntityWrapper(provisioningEntityWrapper);
+          grouperProvisioningData.getIgnoredEntityWrappers().add(provisioningEntityWrapper);
+          ignoredEntities++;
+          if (LOG.isDebugEnabled()) {
+            LOG.debug("ignoreIfMatchesValue: ignoring entity " + provisioningEntityWrapper);
+          }
+        }
+      }
+    }
+
+    GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "ignoredGroups", ignoredGroups);
+    GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "ignoredEntities", ignoredEntities);
+  }
+
+  /**
+   * GRP-7436: pull membership containers that match a membership ignoreIfMatchesValue, or whose group or
+   * entity was flagged by removeIgnoredGroupsAndEntities.  For groupAttributes / entityAttributes, also
+   * strip the membership values of ignored entities (groups) from the membership attribute of every
+   * remaining group (entity), on both the Grouper side and the target side, so they are neither added
+   * nor removed.  Called in full and incremental sync after memberships are matched, before
+   * compareTargetObjects.  No-op unless something is configured or was ignored.
+   */
+  public void removeIgnoredMemberships() {
+
+    GrouperProvisioningConfiguration configuration = this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration();
+    GrouperProvisioningData grouperProvisioningData = this.getGrouperProvisioner().retrieveGrouperProvisioningData();
+
+    List<GrouperProvisioningConfigurationAttribute> membershipAttributes = attributesWithIgnoreValues(configuration.getTargetMembershipAttributeNameToConfig());
+    List<ProvisioningGroupWrapper> ignoredGroupWrappers = grouperProvisioningData.getIgnoredGroupWrappers();
+    List<ProvisioningEntityWrapper> ignoredEntityWrappers = grouperProvisioningData.getIgnoredEntityWrappers();
+    GrouperProvisioningConfigurationAttribute groupMembershipAttribute = this.membershipAttributeWithIgnoreValues(true);
+    GrouperProvisioningConfigurationAttribute entityMembershipAttribute = this.membershipAttributeWithIgnoreValues(false);
+
+    if (membershipAttributes.isEmpty() && ignoredGroupWrappers.isEmpty() && ignoredEntityWrappers.isEmpty()
+        && groupMembershipAttribute == null && entityMembershipAttribute == null) {
+      return;
+    }
+
+    // target ids of the ignored containers, for target-side memberships that only carry ids
+    Set<String> ignoredTargetGroupIds = new HashSet<String>();
+    for (ProvisioningGroupWrapper provisioningGroupWrapper : ignoredGroupWrappers) {
+      for (ProvisioningGroup provisioningGroup : new ProvisioningGroup[] {
+          provisioningGroupWrapper.getTargetProvisioningGroup(), provisioningGroupWrapper.getGrouperTargetGroup()}) {
+        if (provisioningGroup != null && !StringUtils.isBlank(provisioningGroup.getId())) {
+          ignoredTargetGroupIds.add(provisioningGroup.getId());
+        }
+      }
+    }
+    Set<String> ignoredTargetEntityIds = new HashSet<String>();
+    for (ProvisioningEntityWrapper provisioningEntityWrapper : ignoredEntityWrappers) {
+      for (ProvisioningEntity provisioningEntity : new ProvisioningEntity[] {
+          provisioningEntityWrapper.getTargetProvisioningEntity(), provisioningEntityWrapper.getGrouperTargetEntity()}) {
+        if (provisioningEntity != null && !StringUtils.isBlank(provisioningEntity.getId())) {
+          ignoredTargetEntityIds.add(provisioningEntity.getId());
+        }
+      }
+    }
+
+    // a target-only membership (e.g. a SQL row) is often not linked to any group or entity object, just
+    // carries reference values (e.g. entity_uuid from entityAttributeValueCache0).  So for each membership
+    // attribute translated from a group (entity) field, collect the values the ignored groups (entities)
+    // have for that field, and ignore memberships that carry one
+    Map<GrouperProvisioningConfigurationAttribute, Set<Object>> membershipAttributeToIgnoredReferences =
+        new HashMap<GrouperProvisioningConfigurationAttribute, Set<Object>>();
+    for (GrouperProvisioningConfigurationAttribute attribute : GrouperUtil.nonNull(configuration.getTargetMembershipAttributeNameToConfig()).values()) {
+      if (attribute == null) {
+        continue;
+      }
+      Set<Object> ignoredReferences = new HashSet<Object>();
+      if (attribute.getTranslateExpressionType() == GrouperProvisioningConfigurationAttributeTranslationType.grouperProvisioningEntityField
+          && !StringUtils.isBlank(attribute.getTranslateFromGrouperProvisioningEntityField())) {
+        for (ProvisioningEntityWrapper provisioningEntityWrapper : ignoredEntityWrappers) {
+          ignoredReferences.addAll(membershipValuesForIgnoredEntity(provisioningEntityWrapper, attribute.getTranslateFromGrouperProvisioningEntityField()));
+        }
+      } else if (attribute.getTranslateExpressionType() == GrouperProvisioningConfigurationAttributeTranslationType.grouperProvisioningGroupField
+          && !StringUtils.isBlank(attribute.getTranslateFromGrouperProvisioningGroupField())) {
+        for (ProvisioningGroupWrapper provisioningGroupWrapper : ignoredGroupWrappers) {
+          ignoredReferences.addAll(membershipValuesForIgnoredGroup(provisioningGroupWrapper, attribute.getTranslateFromGrouperProvisioningGroupField()));
+        }
+      }
+      if (!ignoredReferences.isEmpty()) {
+        membershipAttributeToIgnoredReferences.put(attribute, ignoredReferences);
+      }
+    }
+
+    int ignoredMemberships = 0;
+    Set<ProvisioningMembershipWrapper> removedMembershipWrappers = new HashSet<ProvisioningMembershipWrapper>();
+
+    for (ProvisioningMembershipWrapper provisioningMembershipWrapper : new ArrayList<ProvisioningMembershipWrapper>(
+        GrouperUtil.nonNull(grouperProvisioningData.getProvisioningMembershipWrappers()))) {
+
+      boolean ignore = matchesIgnoreIfMatchesValue(provisioningMembershipWrapper.getGrouperTargetMembership(), membershipAttributes)
+          || matchesIgnoreIfMatchesValue(provisioningMembershipWrapper.getTargetProvisioningMembership(), membershipAttributes);
+
+      // only a group or entity flagged ignoredDueToAttributeValue counts: a container that is missing for
+      // any other reason must not make its memberships ignored
+      if (!ignore) {
+        ProvisioningGroupWrapper provisioningGroupWrapper = provisioningMembershipWrapper.getProvisioningGroupWrapper();
+        ProvisioningEntityWrapper provisioningEntityWrapper = provisioningMembershipWrapper.getProvisioningEntityWrapper();
+        ignore = (provisioningGroupWrapper != null && provisioningGroupWrapper.getProvisioningStateGroup().isIgnoredDueToAttributeValue())
+            || (provisioningEntityWrapper != null && provisioningEntityWrapper.getProvisioningStateEntity().isIgnoredDueToAttributeValue());
+      }
+      if (!ignore) {
+        for (ProvisioningMembership provisioningMembership : new ProvisioningMembership[] {
+            provisioningMembershipWrapper.getTargetProvisioningMembership(), provisioningMembershipWrapper.getGrouperTargetMembership()}) {
+          if (provisioningMembership != null
+              && (ignoredTargetGroupIds.contains(provisioningMembership.getProvisioningGroupId())
+                  || ignoredTargetEntityIds.contains(provisioningMembership.getProvisioningEntityId()))) {
+            ignore = true;
+            break;
+          }
+        }
+      }
+      if (!ignore && !membershipAttributeToIgnoredReferences.isEmpty()) {
+        ignore = carriesIgnoredReference(provisioningMembershipWrapper.getTargetProvisioningMembership(), membershipAttributeToIgnoredReferences)
+            || carriesIgnoredReference(provisioningMembershipWrapper.getGrouperTargetMembership(), membershipAttributeToIgnoredReferences);
+      }
+
+      if (ignore) {
+        grouperProvisioningData.removeAndUnindexMembershipWrapper(provisioningMembershipWrapper);
+        removedMembershipWrappers.add(provisioningMembershipWrapper);
+        ignoredMemberships++;
+      }
+    }
+
+    // memberships as an attribute on the group (entity): strip the ignored values from both sides of
+    // every remaining group (entity) so compare neither adds nor removes them
+    GrouperProvisioningBehaviorMembershipType membershipType = this.getGrouperProvisioner()
+        .retrieveGrouperProvisioningBehavior().getGrouperProvisioningBehaviorMembershipType();
+    String attributeNameForMemberships = configuration.getAttributeNameForMemberships();
+
+    // memberships pulled because their value was stripped (pulled after the loops below)
+    Set<ProvisioningMembershipWrapper> strippedMembershipWrappers = new HashSet<ProvisioningMembershipWrapper>();
+
+    if (membershipType == GrouperProvisioningBehaviorMembershipType.groupAttributes && !StringUtils.isBlank(attributeNameForMemberships)
+        && (!ignoredEntityWrappers.isEmpty() || !removedMembershipWrappers.isEmpty() || groupMembershipAttribute != null)) {
+      GrouperProvisioningConfigurationAttribute membershipAttribute = configuration.getTargetGroupAttributeNameToConfig().get(attributeNameForMemberships);
+      boolean caseSensitiveCompare = membershipAttribute == null || membershipAttribute.isCaseSensitiveCompare();
+      Set<Object> ignoredValues = new HashSet<Object>();
+      // ignoreIfMatchesValue on the membership attribute itself: these values are ignored memberships,
+      // which works even for a subject that is not in Grouper at all
+      if (groupMembershipAttribute != null) {
+        ignoredValues.addAll(groupMembershipAttribute.getIgnoreIfMatchesValues());
+      }
+      for (ProvisioningEntityWrapper provisioningEntityWrapper : ignoredEntityWrappers) {
+        ignoredValues.addAll(membershipValuesForIgnoredEntity(provisioningEntityWrapper, configuration.getGroupMembershipAttributeValue()));
+      }
+      for (ProvisioningGroupWrapper provisioningGroupWrapper : GrouperUtil.nonNull(grouperProvisioningData.getProvisioningGroupWrappers())) {
+        ignoredValues.addAll(valuesOfRemovedMemberships(provisioningGroupWrapper.getGrouperTargetGroup(), attributeNameForMemberships, removedMembershipWrappers));
+      }
+      for (ProvisioningGroupWrapper provisioningGroupWrapper : GrouperUtil.nonNull(grouperProvisioningData.getProvisioningGroupWrappers())) {
+        ignoredMemberships += stripMembershipValues(provisioningGroupWrapper.getGrouperTargetGroup(), attributeNameForMemberships, ignoredValues, caseSensitiveCompare, strippedMembershipWrappers);
+        stripMembershipValues(provisioningGroupWrapper.getTargetProvisioningGroup(), attributeNameForMemberships, ignoredValues, caseSensitiveCompare, strippedMembershipWrappers);
+      }
+    }
+
+    if (membershipType == GrouperProvisioningBehaviorMembershipType.entityAttributes && !StringUtils.isBlank(attributeNameForMemberships)
+        && (!ignoredGroupWrappers.isEmpty() || !removedMembershipWrappers.isEmpty() || entityMembershipAttribute != null)) {
+      GrouperProvisioningConfigurationAttribute membershipAttribute = configuration.getTargetEntityAttributeNameToConfig().get(attributeNameForMemberships);
+      boolean caseSensitiveCompare = membershipAttribute == null || membershipAttribute.isCaseSensitiveCompare();
+      Set<Object> ignoredValues = new HashSet<Object>();
+      // ignoreIfMatchesValue on the membership attribute itself (e.g. a memberOf group name)
+      if (entityMembershipAttribute != null) {
+        ignoredValues.addAll(entityMembershipAttribute.getIgnoreIfMatchesValues());
+      }
+      for (ProvisioningGroupWrapper provisioningGroupWrapper : ignoredGroupWrappers) {
+        ignoredValues.addAll(membershipValuesForIgnoredGroup(provisioningGroupWrapper, configuration.getEntityMembershipAttributeValue()));
+      }
+      for (ProvisioningEntityWrapper provisioningEntityWrapper : GrouperUtil.nonNull(grouperProvisioningData.getProvisioningEntityWrappers())) {
+        ignoredValues.addAll(valuesOfRemovedMemberships(provisioningEntityWrapper.getGrouperTargetEntity(), attributeNameForMemberships, removedMembershipWrappers));
+      }
+      for (ProvisioningEntityWrapper provisioningEntityWrapper : GrouperUtil.nonNull(grouperProvisioningData.getProvisioningEntityWrappers())) {
+        ignoredMemberships += stripMembershipValues(provisioningEntityWrapper.getGrouperTargetEntity(), attributeNameForMemberships, ignoredValues, caseSensitiveCompare, strippedMembershipWrappers);
+        stripMembershipValues(provisioningEntityWrapper.getTargetProvisioningEntity(), attributeNameForMemberships, ignoredValues, caseSensitiveCompare, strippedMembershipWrappers);
+      }
+    }
+
+    // a stripped value's membership container must not be inserted or deleted on its own either
+    // (e.g. an incremental membership delete)
+    strippedMembershipWrappers.removeAll(removedMembershipWrappers);
+    for (ProvisioningMembershipWrapper provisioningMembershipWrapper : strippedMembershipWrappers) {
+      grouperProvisioningData.removeAndUnindexMembershipWrapper(provisioningMembershipWrapper);
+    }
+
+    GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "ignoredMemberships", ignoredMemberships);
+  }
+
+  /**
+   * @param provisioningMembership a membership (either side) or null
+   * @param membershipAttributeToIgnoredReferences membership attribute to the values ignored groups /
+   *   entities have for it
+   * @return true if the membership points at an ignored group or entity by one of those values
+   */
+  private static boolean carriesIgnoredReference(ProvisioningMembership provisioningMembership,
+      Map<GrouperProvisioningConfigurationAttribute, Set<Object>> membershipAttributeToIgnoredReferences) {
+    if (provisioningMembership == null) {
+      return false;
+    }
+    for (Map.Entry<GrouperProvisioningConfigurationAttribute, Set<Object>> entry : membershipAttributeToIgnoredReferences.entrySet()) {
+      Object value = provisioningMembership.retrieveAttributeValue(entry.getKey().getName());
+      for (Object ignoredReference : entry.getValue()) {
+        if (ignoreValueEquals(value, ignoredReference, entry.getKey().isCaseSensitiveCompare())) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * @param provisioningUpdatable a Grouper-side group (entity) or null
+   * @param attributeNameForMemberships the membership attribute
+   * @param removedMembershipWrappers membership containers just pulled
+   * @return the membership attribute values that belong to those pulled memberships
+   */
+  private static Set<Object> valuesOfRemovedMemberships(ProvisioningUpdatable provisioningUpdatable,
+      String attributeNameForMemberships, Set<ProvisioningMembershipWrapper> removedMembershipWrappers) {
+    Set<Object> result = new HashSet<Object>();
+    if (provisioningUpdatable == null || removedMembershipWrappers.isEmpty()) {
+      return result;
+    }
+    ProvisioningAttribute provisioningAttribute = provisioningUpdatable.retrieveProvisioningAttribute(attributeNameForMemberships);
+    if (provisioningAttribute == null) {
+      return result;
+    }
+    for (Map.Entry<Object, ProvisioningMembershipWrapper> entry : GrouperUtil.nonNull(provisioningAttribute.getValueToProvisioningMembershipWrapper()).entrySet()) {
+      if (removedMembershipWrappers.contains(entry.getValue())) {
+        result.add(entry.getKey());
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Remove the given values from a multi-valued membership attribute.
+   * @param provisioningUpdatable a group or entity (either side) or null
+   * @param attributeNameForMemberships the membership attribute
+   * @param ignoredValues values to remove
+   * @param caseSensitiveCompare from the membership attribute config
+   * @param strippedMembershipWrappers collects the membership containers of the removed values
+   * @return how many values were removed
+   */
+  private static int stripMembershipValues(ProvisioningUpdatable provisioningUpdatable, String attributeNameForMemberships,
+      Set<Object> ignoredValues, boolean caseSensitiveCompare, Set<ProvisioningMembershipWrapper> strippedMembershipWrappers) {
+    if (provisioningUpdatable == null || ignoredValues.isEmpty()) {
+      return 0;
+    }
+    ProvisioningAttribute provisioningAttribute = provisioningUpdatable.retrieveProvisioningAttribute(attributeNameForMemberships);
+    if (provisioningAttribute == null || !(provisioningAttribute.getValue() instanceof Collection)) {
+      return 0;
+    }
+    int removed = 0;
+    Iterator<?> iterator = ((Collection<?>)provisioningAttribute.getValue()).iterator();
+    while (iterator.hasNext()) {
+      Object value = iterator.next();
+      for (Object ignoredValue : ignoredValues) {
+        if (ignoreValueEquals(value, ignoredValue, caseSensitiveCompare)) {
+          iterator.remove();
+          if (provisioningAttribute.getValueToProvisioningMembershipWrapper() != null) {
+            ProvisioningMembershipWrapper provisioningMembershipWrapper = provisioningAttribute.getValueToProvisioningMembershipWrapper().remove(value);
+            if (provisioningMembershipWrapper != null) {
+              strippedMembershipWrappers.add(provisioningMembershipWrapper);
+            }
+          }
+          removed++;
+          break;
+        }
+      }
+    }
+    return removed;
+  }
+
+  /**
+   * The values an ignored entity has in a group's membership attribute (groupAttributes): the
+   * configured groupMembershipAttributeValue read from the sync member, or, for an entity with no sync
+   * row (target only), from the entity attribute that cache is configured on.
+   * @param provisioningEntityWrapper ignored entity
+   * @param groupMembershipAttributeValue e.g. entityAttributeValueCache0 or subjectId
+   * @return the values, never null
+   */
+  private Set<Object> membershipValuesForIgnoredEntity(ProvisioningEntityWrapper provisioningEntityWrapper, String groupMembershipAttributeValue) {
+    Set<Object> result = new HashSet<Object>();
+    if (StringUtils.isBlank(groupMembershipAttributeValue)) {
+      return result;
+    }
+    if (provisioningEntityWrapper.getGcGrouperSyncMember() != null) {
+      addIfNotBlank(result, provisioningEntityWrapper.getGcGrouperSyncMember().retrieveField(groupMembershipAttributeValue));
+    }
+    String cachedAttributeName = cacheAttributeName(groupMembershipAttributeValue, "entityAttributeValueCache",
+        this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().getEntityAttributeDbCaches());
+    if (cachedAttributeName != null) {
+      for (ProvisioningEntity provisioningEntity : new ProvisioningEntity[] {
+          provisioningEntityWrapper.getTargetProvisioningEntity(), provisioningEntityWrapper.getGrouperTargetEntity()}) {
+        if (provisioningEntity != null) {
+          addIfNotBlank(result, provisioningEntity.retrieveAttributeValue(cachedAttributeName));
+        }
+      }
+    }
+    return result;
+  }
+
+  /**
+   * The values an ignored group has in an entity's membership attribute (entityAttributes), see
+   * membershipValuesForIgnoredEntity.
+   * @param provisioningGroupWrapper ignored group
+   * @param entityMembershipAttributeValue e.g. groupAttributeValueCache0 or name
+   * @return the values, never null
+   */
+  private Set<Object> membershipValuesForIgnoredGroup(ProvisioningGroupWrapper provisioningGroupWrapper, String entityMembershipAttributeValue) {
+    Set<Object> result = new HashSet<Object>();
+    if (StringUtils.isBlank(entityMembershipAttributeValue)) {
+      return result;
+    }
+    if (provisioningGroupWrapper.getGcGrouperSyncGroup() != null) {
+      addIfNotBlank(result, provisioningGroupWrapper.getGcGrouperSyncGroup().retrieveField(entityMembershipAttributeValue));
+    }
+    String cachedAttributeName = cacheAttributeName(entityMembershipAttributeValue, "groupAttributeValueCache",
+        this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().getGroupAttributeDbCaches());
+    if (cachedAttributeName != null) {
+      for (ProvisioningGroup provisioningGroup : new ProvisioningGroup[] {
+          provisioningGroupWrapper.getTargetProvisioningGroup(), provisioningGroupWrapper.getGrouperTargetGroup()}) {
+        if (provisioningGroup != null) {
+          addIfNotBlank(result, provisioningGroup.retrieveAttributeValue(cachedAttributeName));
+        }
+      }
+    }
+    return result;
+  }
+
+  /**
+   * @param membershipAttributeValue e.g. entityAttributeValueCache2
+   * @param cachePrefix entityAttributeValueCache or groupAttributeValueCache
+   * @param caches the configured caches
+   * @return the attribute that cache holds, or null if the value is not a cache or the cache has no attribute
+   */
+  private static String cacheAttributeName(String membershipAttributeValue, String cachePrefix,
+      GrouperProvisioningConfigurationAttributeDbCache[] caches) {
+    if (membershipAttributeValue == null || !membershipAttributeValue.startsWith(cachePrefix) || caches == null) {
+      return null;
+    }
+    int index = GrouperUtil.intValue(membershipAttributeValue.substring(cachePrefix.length()), -1);
+    if (index < 0 || index >= caches.length || caches[index] == null) {
+      return null;
+    }
+    return StringUtils.trimToNull(caches[index].getAttributeName());
+  }
+
+  /**
+   * @param result set to add to
+   * @param value a single value (a collection is not expected here and is skipped)
+   */
+  private static void addIfNotBlank(Set<Object> result, Object value) {
+    if (value != null && !(value instanceof Collection) && !StringUtils.isBlank(GrouperUtil.stringValue(value))) {
+      result.add(value);
+    }
+  }
+
+  /**
+   * 
+   */
+  public void provisionFull() {
+
+    Map<String, Object> debugMap = this.getGrouperProvisioner().getDebugMap();
+    Timestamp startTimestamp = new Timestamp(System.currentTimeMillis());
+
+    if (!this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().isRunLogicInFullDaemon()) {
+      throw new RuntimeException("Provisioner or global default is set to not run logic in full daemon! runLogicInFullDaemon");
+    }
+    
+    this.getGrouperProvisioner().getGcGrouperSyncJob().setErrorMessage(null);
+    this.getGrouperProvisioner().getGcGrouperSyncJob().setErrorTimestamp(null);
+    
+    garbageCollectAndLogMemoryIfDebug(debugMap, "Start");
+
+    {
+      debugMap.put("state", "propagateProvisioningAttributes");
+      long start = System.currentTimeMillis();
+      grouperProvisioner.propagateProvisioningAttributes();
+      long propagateProvisioningAttributes = System.currentTimeMillis()-start;
+      debugMap.put("propagateProvisioningAttributes_millis", propagateProvisioningAttributes);
+      
+      if (grouperProvisioner.getConfigId().startsWith("junitProvisioningAttributePropagationTest")) {
+        // just testing attribute propagation
+        return;
+      }
+    }
+        
+    // validate the perhaps throw exception
+    this.validateAndThrowExceptionIfInvalid();
+
+    // GRP-7048: advisory only (never blocks) -- feature enabled-but-unsupported, and managed
+    // attributes not captured into the sync-back mirror (which would cause spurious updates)
+    this.logFullSyncUsersFromSyncBackAdvisories();
+    this.logFullSyncGroupsFromSyncBackAdvisories();
+
+    debugMap.put("state", "retrieveAllDataFromGrouperAndTarget");
+    grouperProvisioner.retrieveGrouperProvisioningLogic().retrieveAllData();
+    
+    garbageCollectAndLogMemoryIfDebug(debugMap, "AfterRetrieveAllData");
+    
+    debugMap.put("state", "clearInvalidErrors");
+    clearInvalidErrors();
+    
+    debugMap.put("state", "retrieveSubjectLink");
+    this.grouperProvisioner.retrieveGrouperProvisioningLinkLogic().retrieveSubjectLink();
+    GrouperDaemonUtils.stopProcessingIfJobPaused();
+
+    debugMap.put("state", "translateGrouperGroupsEntitiesToTarget");
+
+    {
+      List<ProvisioningGroup> grouperProvisioningGroups = this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperProvisioningGroups();
+      List<ProvisioningGroup> grouperTargetGroups = this.grouperProvisioner.retrieveGrouperProvisioningTranslator().translateGrouperToTargetGroups(grouperProvisioningGroups, false, false);
+    }
+    
+    {
+      List<ProvisioningEntity> grouperProvisioningEntities = this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperProvisioningEntities();
+      List<ProvisioningEntity> grouperTargetEntities = this.grouperProvisioner.retrieveGrouperProvisioningTranslator().translateGrouperToTargetEntities(
+          grouperProvisioningEntities, false, false);
+    }    
+
+    {
+      debugMap.put("state", "manipulateGrouperTargetAttributes");
+      List<ProvisioningGroup> grouperTargetGroups = this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperTargetGroups();
+      Set<ProvisioningGroup> affectedGroups = this.grouperProvisioner.retrieveGrouperProvisioningAttributeManipulation().manipulateDefaultsFilterAttributesGroups(
+          grouperTargetGroups, true, true, false, false);
+      if (GrouperUtil.length(affectedGroups) > 0) {
+        this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.manipulateGrouperTargetGroups, affectedGroups);
+      }
+    }
+
+    {
+      List<ProvisioningEntity> grouperTargetEntities = this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperTargetEntities();
+      Set<ProvisioningEntity> affectedEntities = this.grouperProvisioner.retrieveGrouperProvisioningAttributeManipulation().manipulateDefaultsFilterAttributesEntities(
+          grouperTargetEntities, true, true, false, false);
+  
+      if (GrouperUtil.length(affectedEntities) > 0) {
+        this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.manipulateGrouperTargetEntities, affectedEntities);
+      }
+    }
+    
+    try {
+      debugMap.put("state", "matchingIdGrouperGroupsEntities");
+      this.grouperProvisioner.retrieveGrouperProvisioningTranslator().idTargetGroups(
+          this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperTargetGroups());
+      this.grouperProvisioner.retrieveGrouperProvisioningTranslator().idTargetEntities(
+          this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperTargetEntities());
+    } finally {
+      this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.matchingIdGrouperGroupsEntities);
+    }
+
+    retrieveFullIndividualTargetGroupsAndEntities();
+    this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.retrieveIndividualTargetGroupsAndEntities);
+    
+    {
+      debugMap.put("state", "indexMatchingIdGroups");
+      
+      // index the groups and entity matching ids
+      this.grouperProvisioner.retrieveGrouperProvisioningMatchingIdIndex().indexMatchingIdGroups(null);
+      
+      debugMap.put("state", "indexMatchingIdEntities");
+      
+      this.grouperProvisioner.retrieveGrouperProvisioningMatchingIdIndex().indexMatchingIdEntities(null);
+    }
+
+    skipPreExistingTargetGroups();
+
+    assignRecalcForGroupsAndEntities();
+    
+    debugMap.put("state", "retrieveIndividualMissingGroups");
+    this.grouperProvisioner.retrieveGrouperProvisioningLogic().retrieveIndividualMissingGroups();
+    
+    debugMap.put("state", "retrieveIndividualMissingEntities");
+    this.grouperProvisioner.retrieveGrouperProvisioningLogic().retrieveIndividualMissingEntities();
+    
+    assignRecalcForGroupsAndEntities();
+    
+    // GRP-7436: groups / entities are matched; pull the ignoreIfMatchesValue ones before anything is
+    // loaded to the sync tables or inserted
+    debugMap.put("state", "removeIgnoredGroupsAndEntities");
+    this.removeIgnoredGroupsAndEntities();
+
+    debugMap.put("state", "loadDataToGrouper");
+    long start = System.currentTimeMillis();
+    grouperProvisioner.retrieveGrouperProvisioningLogic().loadDataToGrouper();
+    long retrieveDataPass1 = System.currentTimeMillis()-start;
+    debugMap.put("loadDataToGrouper_millis", retrieveDataPass1);
+
+    debugMap.put("state", "insertGroups");
+    createMissingGroupsFull();
+
+    debugMap.put("state", "insertEntities");
+    createMissingEntitiesFull();
+
+    debugMap.put("state", "retrieveTargetGroupLink");
+    this.grouperProvisioner.retrieveGrouperProvisioningLinkLogic().updateGroupLinkFull();
+    
+    debugMap.put("state", "retrieveTargetEntityLink");
+    this.grouperProvisioner.retrieveGrouperProvisioningLinkLogic().updateEntityLinkFull();
+
+    // validate
+    debugMap.put("state", "validateGroupsAndEntities");
+    this.getGrouperProvisioner().retrieveGrouperProvisioningValidation().validateEntities(this.grouperProvisioner.retrieveGrouperProvisioningData().retrieveGrouperTargetEntities(), false, false, false);
+    this.getGrouperProvisioner().retrieveGrouperProvisioningValidation().validateGroupsHaveMembers(this.grouperProvisioner.retrieveGrouperProvisioningData().retrieveGrouperTargetGroups(), false);
+    this.getGrouperProvisioner().retrieveGrouperProvisioningValidation().validateGroups(this.grouperProvisioner.retrieveGrouperProvisioningData().retrieveGrouperTargetGroups(), false, false, false);
+
+    retrieveFullIndividualTargetMemberships();
+    this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.retrieveIndividualTargetMemberships);
+
+    // sync-back flush runs at the END of provisionFull (after sendChangesToTarget),
+    // mirroring provisionIncremental, so the mirror reflects post-change target state
+    // rather than a pre-write snapshot. See loadDataToGenericProvisionerTables() after
+    // errorHandling() below.
+
+    {
+  
+      debugMap.put("state", "translateGrouperMembershipsToTarget");
+      {
+        List<ProvisioningMembership> grouperProvisioningMemberships = this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperProvisioningMemberships(false);
+        List<ProvisioningMembership> grouperTargetMemberships = this.grouperProvisioner.retrieveGrouperProvisioningTranslator().translateGrouperToTargetMemberships(
+            grouperProvisioningMemberships, false);
+        
+        this.grouperProvisioner.retrieveGrouperProvisioningTranslator().removeUneededDependencyRows();
+      }    
+
+    }
+
+    {
+      debugMap.put("state", "manipulateGrouperMembershipTargetAttributes");
+      List<ProvisioningMembership> grouperTargetMemberships = this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperTargetMemberships(false);
+      
+      Set<ProvisioningMembership> affectedMemberships = this.grouperProvisioner.retrieveGrouperProvisioningAttributeManipulation().manipulateDefaultsFilterAttributesMemberships(
+          grouperTargetMemberships, true, true, false, false);
+      if (GrouperUtil.length(affectedMemberships) > 0) {
+        this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.manipulateGrouperTargetMemberships, affectedMemberships);
+      }
+
+    }
+
+    try {
+      debugMap.put("state", "matchingIdGrouperMemberships");
+      this.grouperProvisioner.retrieveGrouperProvisioningTranslator().idTargetMemberships(this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperTargetMemberships(false));
+    } finally {
+      this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.matchingIdGrouperMemberships);
+    }
+
+    // index the memberships
+    this.grouperProvisioner.retrieveGrouperProvisioningMatchingIdIndex().indexMatchingIdMemberships(null);
+    
+    this.identifyTargetValuesThatExistInGrouper();
+    
+    this.getGrouperProvisioner().retrieveGrouperDao().fixGrouperTargetMembershipReferences();
+    
+    if (this.grouperProvisioner.getProvisioningStateGlobal().isSelectResultProcessedMemberships()) {
+      for (ProvisioningMembershipWrapper provisioningMembershipWrapper : GrouperUtil.nonNull(this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningMembershipWrappers())) {
+        if (provisioningMembershipWrapper.getProvisioningGroupWrapper() != null) {
+          provisioningMembershipWrapper.getProvisioningGroupWrapper().getProvisioningStateGroup().setSelectAllMembershipsResultProcessed(true);
+        }
+        if (provisioningMembershipWrapper.getProvisioningEntityWrapper() != null) {
+          provisioningMembershipWrapper.getProvisioningEntityWrapper().getProvisioningStateEntity().setSelectAllMembershipsResultProcessed(true);
+        }
+        provisioningMembershipWrapper.getProvisioningStateMembership().setSelectResultProcessed(true);
+      }
+    }
+    
+    if (this.grouperProvisioner.getProvisioningStateGlobal().isSelectResultProcessedGroups()) {
+      for (ProvisioningGroupWrapper provisioningGroupWrapper : GrouperUtil.nonNull(this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningGroupWrappers())) {
+        provisioningGroupWrapper.getProvisioningStateGroup().setSelectResultProcessed(true);
+      }
+    }
+    
+    if (this.grouperProvisioner.getProvisioningStateGlobal().isSelectResultProcessedEntities()) {
+      for (ProvisioningEntityWrapper provisioningEntityWrapper : GrouperUtil.nonNull(this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningEntityWrappers())) {
+        provisioningEntityWrapper.getProvisioningStateEntity().setSelectResultProcessed(true);
+      }
+    }
+    
+    // at this point everything is a recalc and selected
+    for (ProvisioningMembershipWrapper provisioningMembershipWrapper : GrouperUtil.nonNull(this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningMembershipWrappers())) {
+      provisioningMembershipWrapper.getProvisioningStateMembership().setRecalcObject(this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isSelectMembershipsForRecalc());
+    }
+
+    this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().processResultsSelectGroupsFull(this.grouperProvisioner.retrieveGrouperProvisioningData().getProvisioningGroupWrappers());
+    this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().processResultsSelectEntitiesFull(this.grouperProvisioner.retrieveGrouperProvisioningData().getProvisioningEntityWrappers());
+    this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().processResultsSelectMembershipsFull(
+        this.grouperProvisioner.retrieveGrouperProvisioningData().getProvisioningGroupWrappers(),
+        this.grouperProvisioner.retrieveGrouperProvisioningData().getProvisioningEntityWrappers(),
+        this.grouperProvisioner.retrieveGrouperProvisioningData().getProvisioningMembershipWrappers());
+    
+    // validate memberships
+    this.getGrouperProvisioner().retrieveGrouperProvisioningValidation().validateMemberships(this.grouperProvisioner.retrieveGrouperProvisioningData().retrieveGrouperTargetMemberships(false), false);
+    this.getGrouperProvisioner().retrieveGrouperProvisioningValidation().validateEntities(this.grouperProvisioner.retrieveGrouperProvisioningData().retrieveGrouperTargetEntities(), false, true, false);
+    
+    // GRP-7436: memberships are matched; pull the ignored ones before compare
+    debugMap.put("state", "removeIgnoredMemberships");
+    this.removeIgnoredMemberships();
+
+    try {
+      this.logCompareCalculationsPreCompare();
+      
+      debugMap.put("state", "compareTargetObjects");
+      this.grouperProvisioner.retrieveGrouperProvisioningCompare().compareTargetObjects();
+    } finally {
+      this.logCompareCalculationsPostCompare();
+
+      this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.compareTargetObjects);
+      
+      
+    }
+    
+    this.getGrouperProvisioner().retrieveGrouperProvisioningFailsafe().processFailsafesAtStart();
+    this.getGrouperProvisioner().retrieveGrouperProvisioningFailsafe().processFailsafes();
+    
+    RuntimeException runtimeException = null;
+    try {
+      debugMap.put("state", "sendChangesToTarget");
+      TargetDaoSendChangesToTargetRequest targetDaoSendChangesToTargetRequest = new TargetDaoSendChangesToTargetRequest();
+      targetDaoSendChangesToTargetRequest.setTargetObjectInserts(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectInserts());
+      targetDaoSendChangesToTargetRequest.setTargetObjectUpdates(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectUpdates());
+      targetDaoSendChangesToTargetRequest.setTargetObjectReplaces(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectReplaces());
+      targetDaoSendChangesToTargetRequest.setTargetObjectDeletes(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectDeletes());
+      this.getGrouperProvisioner().retrieveGrouperProvisioningTargetDaoAdapter().sendChangesToTarget(targetDaoSendChangesToTargetRequest);
+    } catch (RuntimeException e) {
+      runtimeException = e;
+    } finally {
+      try {
+        this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().processResultsInserts(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectInserts());
+        this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().processResultsUpdatesFull(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectUpdates());
+        this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().processResultsReplaces(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectReplaces());
+        this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().processResultsDeletes(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectDeletes());
+      } catch (RuntimeException e) {
+        GrouperUtil.exceptionFinallyInjectOrThrow(runtimeException, e);
+      }
+
+    }
+  
+    this.errorHandling();
+    
+    { 
+      // counts for sync
+      this.countInsertsUpdatesDeletes();
+
+      // count total for full sync
+      int totalCount = 0;
+      for (GcGrouperSyncGroup gcGrouperSyncGroup : GrouperUtil.nonNull(this.getGrouperProvisioner().getGcGrouperSync().getGcGrouperSyncGroupDao().groupRetrieveAll())) {
+        if (gcGrouperSyncGroup.getInTarget() != null && gcGrouperSyncGroup.getInTarget()) {
+          totalCount++;
+        }
+      }
+      for (GcGrouperSyncMember gcGrouperSyncMember : GrouperUtil.nonNull(this.getGrouperProvisioner().getGcGrouperSync().getGcGrouperSyncMemberDao().memberRetrieveAll())) {
+        if (gcGrouperSyncMember.getInTarget() != null && gcGrouperSyncMember.getInTarget()) {
+          totalCount++;
+        }
+      }
+      for (GcGrouperSyncMembership gcGrouperSyncMembership : GrouperUtil.nonNull(this.getGrouperProvisioner().getGcGrouperSync().getGcGrouperSyncMembershipDao().membershipRetrieveAll())) {
+        if (gcGrouperSyncMembership.isInTarget()) {
+          totalCount++;
+        }
+      }
+      GrouperProvisioningLogic.this.grouperProvisioner.retrieveGrouperProvisioningOutput().setTotalCount(totalCount);
+      GrouperProvisioningLogic.this.grouperProvisioner.retrieveGrouperProvisioningOutput().copyToHib3LoaderLog();
+    }
+
+    // sync-back drain: re-read changed target ids not captured on their own write, so the
+    // mirror reflects post-change state. Then flush. (Both run at the END, after the write
+    // phase, matching provisionIncremental.)
+    debugMap.put("state", "syncBackDrainGroups");
+    syncBackDrainGroups();
+    debugMap.put("state", "syncBackDrainUsers");
+    syncBackDrainUsers();
+    // recover any entities whose update collided with a pre-existing target account: re-link onto
+    // that account and dispose the orphan per settings.  Runs before storeAllObjects() so the
+    // re-linked sync member is persisted this run.
+    debugMap.put("state", "drainEntityRelinks");
+    drainEntityRelinks();
+    debugMap.put("state", "loadDataToGenericProvisionerTables");
+    loadDataToGenericProvisionerTables();
+    
+    {
+      Timestamp nowTimestamp = new Timestamp(System.currentTimeMillis());
+
+      GcGrouperSync gcGrouperSync = this.grouperProvisioner.getGcGrouperSync();
+      gcGrouperSync.setLastFullSyncStart(startTimestamp);
+      gcGrouperSync.setLastFullSyncRun(nowTimestamp);
+
+      GcGrouperSyncJob gcGrouperSyncJob = this.grouperProvisioner.getGcGrouperSyncJob();
+      gcGrouperSyncJob.setLastSyncTimestamp(nowTimestamp);
+      if (this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().wasWorkDone()) {
+        gcGrouperSyncJob.setLastTimeWorkWasDone(nowTimestamp);
+      }
+      gcGrouperSyncJob.setPercentComplete(100);
+      // 257 this.getGrouperProvisioner().getGcGrouperSync().getGcGrouperSyncMemberDao()
+      // do this in the right spot, after assigning correct sync info about sync
+      int objectStoreCount = this.getGrouperProvisioner().getGcGrouperSync().getGcGrouperSyncDao().storeAllObjects();
+      this.grouperProvisioner.getProvisioningSyncResult().setSyncObjectStoreCount(objectStoreCount);
+  
+      this.grouperProvisioner.getDebugMap().put("syncObjectStoreCount", objectStoreCount);
+    }
+    
+    // TODO flesh this out, resolve subjects, linked cached data, etc, try individually again
+//    this.getGrouperProvisioner().retrieveTargetDao().resolveErrors();
+//    this.getGrouperProvisioner().retrieveTargetDao().sendErrorFixesToTarget();
+
+//    this.getGrouperProvisioner().getGrouperProvisioningLogicAlgorithm().syncGrouperTranslatedGroupsToTarget();
+//    this.getGrouperProvisioner().getGrouperProvisioningLogicAlgorithm().syncGrouperTranslatedMembershipsToTarget();
+
+    // make sure the sync objects are correct
+//    new ProvisioningSyncIntegration().assignTarget(this.getGrouperProvisioner().getConfigId()).fullSync();
+
+//    // step 1
+//    debugMap.put("state", "retrieveData");
+//    this.gcTableSyncConfiguration.getGcTableSyncSubtype().retrieveData(debugMap, this);
+//    
+//    this.gcGrouperSyncLog.setRecordsProcessed(Math.max(this.gcTableSyncOutput.getRowsSelectedFrom(), this.gcTableSyncOutput.getRowsSelectedTo()));
+//
+//    if (this.gcGrouperSyncHeartbeat.isInterrupted()) {
+//      debugMap.put("interrupted", true);
+//      debugMap.put("state", "done");
+//      gcGrouperSyncLog.setStatus(GcGrouperSyncLogState.INTERRUPTED);
+//      return;
+//    }
+    
+    garbageCollectAndLogMemoryIfDebug(debugMap, "End");
+    
+    if (GrouperClientUtils.isBlank(this.getGrouperProvisioner().getGcGrouperSyncLog().getStatus())) {
+      this.getGrouperProvisioner().getGcGrouperSyncLog().setStatus(GcGrouperSyncLogState.SUCCESS);
+    }
+    
+  }
+  
+  public void identifyTargetValuesThatExistInGrouper() {
+    
+    String attributeNameForMemberships = this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().getAttributeNameForMemberships();
+
+    Set<Object> membershipValuesThatExistInGrouperLowerCaseIfNeeded = new HashSet<>();
+
+    if (GrouperProvisioningLogic.this.grouperProvisioner.retrieveGrouperProvisioningBehavior().getGrouperProvisioningBehaviorMembershipType() 
+        == GrouperProvisioningBehaviorMembershipType.groupAttributes) {
+      
+      GrouperProvisioningConfigurationAttribute grouperProvisioningConfigurationAttribute = this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().getTargetGroupAttributeNameToConfig().get(attributeNameForMemberships);
+      boolean caseSensitiveCompare = grouperProvisioningConfigurationAttribute == null || grouperProvisioningConfigurationAttribute.isCaseSensitiveCompare();
+
+      Set<ProvisioningGroupWrapper> provisioningGroupWrappers = this.grouperProvisioner.retrieveGrouperProvisioningData().getProvisioningGroupWrappers();
+      
+      for (ProvisioningGroupWrapper provisioningGroupWrapper: provisioningGroupWrappers) {
+        
+        ProvisioningGroup grouperTargetGroup = provisioningGroupWrapper.getGrouperTargetGroup();
+        if (grouperTargetGroup != null) {          
+          Set<?> setForMemberships = grouperTargetGroup.retrieveAttributeValueSetForMemberships();
+          for (Object value : GrouperUtil.nonNull(setForMemberships)) {
+            
+            if (value instanceof String && !caseSensitiveCompare) {
+              membershipValuesThatExistInGrouperLowerCaseIfNeeded.add(((String)value).toLowerCase());
+            } else {
+              membershipValuesThatExistInGrouperLowerCaseIfNeeded.add(value);
+            }
+          }
+        }
+        
+      }
+      
+      Set<ProvisioningEntityWrapper> provisioningEntityWrappers = this.grouperProvisioner.retrieveGrouperProvisioningData().getProvisioningEntityWrappers();
+      String entityCacheName = this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().getGroupMembershipAttributeValue();
+      
+      for (ProvisioningEntityWrapper provisioningEntityWrapper: provisioningEntityWrappers) {
+        GcGrouperSyncMember gcGrouperSyncMember = provisioningEntityWrapper.getGcGrouperSyncMember();
+        if (gcGrouperSyncMember != null) {
+          String entityCacheValue = provisioningEntityWrapper.getGcGrouperSyncMember().retrieveField(entityCacheName);
+          
+          if (entityCacheValue instanceof String && !caseSensitiveCompare) {
+            membershipValuesThatExistInGrouperLowerCaseIfNeeded.add(((String)entityCacheValue).toLowerCase());
+          } else {
+            membershipValuesThatExistInGrouperLowerCaseIfNeeded.add(entityCacheValue);
+          }
+        }
+      }
+      
+      this.getGrouperProvisioner().retrieveGrouperProvisioningData().setMembershipValuesThatExistInGrouperLowercaseIfNeeded(membershipValuesThatExistInGrouperLowerCaseIfNeeded);
+      
+      for (ProvisioningGroupWrapper provisioningGroupWrapper: provisioningGroupWrappers) {
+        ProvisioningGroup targetProvisioningGroup = provisioningGroupWrapper.getTargetProvisioningGroup();
+        if (targetProvisioningGroup == null) {
+          continue;
+        } 
+        Set<?> setForMemberships = targetProvisioningGroup.retrieveAttributeValueSetForMemberships();
+        String membershipAttributeName = this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().getAttributeNameForMemberships();
+        for (Object obj: GrouperUtil.nonNull(setForMemberships)) {
+          
+          Object objLowerCaseIfNeeded = obj;
+          if (obj instanceof String && !caseSensitiveCompare) {
+            objLowerCaseIfNeeded = ((String)obj).toLowerCase();
+          }
+          
+          if (membershipValuesThatExistInGrouperLowerCaseIfNeeded.contains(objLowerCaseIfNeeded)) {
+            
+            ProvisioningAttribute membershipAttribute = targetProvisioningGroup.retrieveProvisioningAttribute(membershipAttributeName);
+            Map<Object,ProvisioningMembershipWrapper> valueToProvisioningMembershipWrapper = membershipAttribute.getValueToProvisioningMembershipWrapper();
+            if (valueToProvisioningMembershipWrapper != null) {
+              ProvisioningMembershipWrapper provisioningMembershipWrapper = membershipAttribute.getValueToProvisioningMembershipWrapper().get(obj);
+              if (provisioningMembershipWrapper != null) {
+                provisioningMembershipWrapper.getProvisioningStateMembership().setValueExistsInGrouper(true);
+              }
+            }
+          }
+        }
+      }
+      
+    } else if (GrouperProvisioningLogic.this.grouperProvisioner.retrieveGrouperProvisioningBehavior().getGrouperProvisioningBehaviorMembershipType() 
+        == GrouperProvisioningBehaviorMembershipType.entityAttributes) {
+      
+      GrouperProvisioningConfigurationAttribute grouperProvisioningConfigurationAttribute = this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().getTargetEntityAttributeNameToConfig().get(attributeNameForMemberships);
+      boolean caseSensitiveCompare = grouperProvisioningConfigurationAttribute == null || grouperProvisioningConfigurationAttribute.isCaseSensitiveCompare();
+
+      Set<Object> membershipValuesThatExistInGrouper = new HashSet<>();
+      
+      Set<ProvisioningEntityWrapper> provisioningEntityWrappers = this.grouperProvisioner.retrieveGrouperProvisioningData().getProvisioningEntityWrappers();
+      
+      for (ProvisioningEntityWrapper provisioningEntityWrapper: provisioningEntityWrappers) {
+        
+        ProvisioningEntity grouperTargetEntity = provisioningEntityWrapper.getGrouperTargetEntity();
+        if (grouperTargetEntity != null) {          
+          Set<?> setForMemberships = grouperTargetEntity.retrieveAttributeValueSetForMemberships();
+          
+          for (Object value : GrouperUtil.nonNull(setForMemberships)) {
+            
+            if (value instanceof String && !caseSensitiveCompare) {
+              membershipValuesThatExistInGrouperLowerCaseIfNeeded.add(((String)value).toLowerCase());
+            } else {
+              membershipValuesThatExistInGrouperLowerCaseIfNeeded.add(value);
+            }
+          }
+        }
+        
+      }
+      
+      Set<ProvisioningGroupWrapper> provisioningGroupWrappers = this.grouperProvisioner.retrieveGrouperProvisioningData().getProvisioningGroupWrappers();
+      String groupCacheName = this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().getEntityMembershipAttributeValue();
+      
+      for (ProvisioningGroupWrapper provisioningGroupWrapper: provisioningGroupWrappers) {
+        if (provisioningGroupWrapper.getGcGrouperSyncGroup() != null) {
+          String groupCacheValue = provisioningGroupWrapper.getGcGrouperSyncGroup().retrieveField(groupCacheName);
+          
+          if (groupCacheValue instanceof String && !caseSensitiveCompare) {
+            membershipValuesThatExistInGrouperLowerCaseIfNeeded.add(((String)groupCacheValue).toLowerCase());
+          } else {
+            membershipValuesThatExistInGrouperLowerCaseIfNeeded.add(groupCacheValue);
+          }
+
+        }
+      }
+      
+      this.getGrouperProvisioner().retrieveGrouperProvisioningData().setMembershipValuesThatExistInGrouperLowercaseIfNeeded(membershipValuesThatExistInGrouperLowerCaseIfNeeded);
+      
+      for (ProvisioningEntityWrapper provisioningEntityWrapper: provisioningEntityWrappers) {
+        ProvisioningEntity targetProvisioningEntity = provisioningEntityWrapper.getTargetProvisioningEntity();
+        if (targetProvisioningEntity == null) {
+          continue;
+        }
+        Set<?> setForMemberships = targetProvisioningEntity.retrieveAttributeValueSetForMemberships();
+        String membershipAttributeName = this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().getAttributeNameForMemberships();
+        
+        for (Object obj: GrouperUtil.nonNull(setForMemberships)) {
+          Object objLowerCaseIfNeeded = obj;
+          if (obj instanceof String && !caseSensitiveCompare) {
+            objLowerCaseIfNeeded = ((String)obj).toLowerCase();
+          }
+          
+          if (membershipValuesThatExistInGrouperLowerCaseIfNeeded.contains(objLowerCaseIfNeeded)) {
+            
+            ProvisioningAttribute membershipAttribute = targetProvisioningEntity.retrieveProvisioningAttribute(membershipAttributeName);
+            Map<Object,ProvisioningMembershipWrapper> valueToProvisioningMembershipWrapper = membershipAttribute.getValueToProvisioningMembershipWrapper();
+            if (valueToProvisioningMembershipWrapper != null) {
+              ProvisioningMembershipWrapper provisioningMembershipWrapper = membershipAttribute.getValueToProvisioningMembershipWrapper().get(obj);
+              if (provisioningMembershipWrapper != null) {
+                provisioningMembershipWrapper.getProvisioningStateMembership().setValueExistsInGrouper(true);
+              }
+            }
+            
+          }
+        }
+      }
+      
+    }
+    
+  }
+
+  public void assignRecalcForGroupsAndEntities() {
+    
+    this.grouperProvisioner.getDebugMap().put("state", "assignRecalc");
+    
+    if (this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isSelectGroups()
+        || this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isSelectGroupsAll()) {
+    
+      // everything in a full sync is a recalc if it can be
+      for (ProvisioningGroupWrapper provisioningGroupWrapper : GrouperUtil.nonNull(this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningGroupWrappers())) {
+        
+        provisioningGroupWrapper.getProvisioningStateGroup().setRecalcObject(this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isSelectGroupsForRecalc());
+        provisioningGroupWrapper.getProvisioningStateGroup().setRecalcGroupMemberships(this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isSelectGroupMembershipsForRecalc());
+      }
+    }
+    
+    if (this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isSelectEntities()
+        || this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isSelectEntitiesAll()) {
+      for (ProvisioningEntityWrapper provisioningEntityWrapper : GrouperUtil.nonNull(this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningEntityWrappers())) {
+        
+        provisioningEntityWrapper.getProvisioningStateEntity().setRecalcObject(this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isSelectEntitiesForRecalc());
+        provisioningEntityWrapper.getProvisioningStateEntity().setRecalcEntityMemberships(this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isSelectEntityMembershipsForRecalc());
+      }
+    }
+  }
+
+  public void retrieveFullIndividualTargetGroupsAndEntities() {
+
+    Map<String, Object> debugMap = this.getGrouperProvisioner().getDebugMap();
+    
+    long start = System.currentTimeMillis();
+    debugMap.put("state", "retrieveIndividualEntitiesIfNeeded");
+    
+    // when select all entities is false e.g AWS then we need to fetch entities one by one.
+    List<ProvisioningEntity> targetEntities = this.grouperProvisioner.retrieveGrouperProvisioningLogic().retrieveIndividualTargetEntitiesIfNeeded();
+    if (targetEntities != null) {
+      processTargetDataEntities(targetEntities, false);
+    }
+    debugMap.put("state", "retrieveIndividualGroupsIfNeeded");
+    
+    // when select all groups is false e.g AWS then we need to fetch groups one by one.
+    List<ProvisioningGroup> targetGroups = this.grouperProvisioner.retrieveGrouperProvisioningLogic().retrieveIndividualTargetGroupsIfNeeded();
+    if (targetGroups != null) {
+      
+      processTargetDataGroups(targetGroups, false);
+    }    
+
+    long retrieveTargetDataMillis = System.currentTimeMillis()-start;
+    debugMap.put("retrieveTargetGroupsAndEntitiesMillis", retrieveTargetDataMillis);
+
+  }
+
+  public void retrieveFullIndividualTargetMemberships() {
+
+    Map<String, Object> debugMap = this.getGrouperProvisioner().getDebugMap();
+    
+    long start = System.currentTimeMillis();
+
+    debugMap.put("state", "retrieveIndividualMembershipsIfNeeded");
+    
+    // when select all memberships is false fetch groups one by one.
+    List<ProvisioningMembership> targetMemberships = this.grouperProvisioner.retrieveGrouperProvisioningLogic().retrieveIndividualTargetMembershipsIfNeeded();
+    if (targetMemberships != null) {
+      processTargetDataMemberships(targetMemberships, false);
+    }
+
+    if (this.grouperProvisioner.getProvisioningStateGlobal().isSelectResultProcessedIndividualMemberships()) {
+      Set<ProvisioningMembershipWrapper> membershipWrappers = this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningMembershipWrappers();
+      
+      for (ProvisioningMembershipWrapper membershipWrapper: membershipWrappers) {
+        membershipWrapper.getProvisioningStateMembership().setSelectResultProcessed(true);
+      }
+    }
+    
+    // get the total count of what is in the target
+    int totalTargetCount = 0;
+            
+    int originalTargetMembershipCount = GrouperUtil.length(this.grouperProvisioner.retrieveGrouperProvisioningData().retrieveTargetProvisioningMemberships());
+    
+    String membershipAttribute = GrouperProvisioningLogic.this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().getAttributeNameForMemberships();
+    if (!StringUtils.isBlank(membershipAttribute)) {
+      if (GrouperProvisioningLogic.this.grouperProvisioner.retrieveGrouperProvisioningBehavior().getGrouperProvisioningBehaviorMembershipType() 
+          == GrouperProvisioningBehaviorMembershipType.groupAttributes) {
+
+        for (ProvisioningGroup provisioningGroup : GrouperUtil.nonNull(this.grouperProvisioner.retrieveGrouperProvisioningData().retrieveTargetProvisioningGroups())) {
+          originalTargetMembershipCount += GrouperUtil.length(provisioningGroup.retrieveAttributeValueSetForMemberships());
+        }
+      }
+      if (GrouperProvisioningLogic.this.grouperProvisioner.retrieveGrouperProvisioningBehavior().getGrouperProvisioningBehaviorMembershipType() 
+          == GrouperProvisioningBehaviorMembershipType.entityAttributes) {
+
+        for (ProvisioningEntity provisioningEntity : GrouperUtil.nonNull(this.grouperProvisioner.retrieveGrouperProvisioningData().retrieveTargetProvisioningEntities())) {
+          originalTargetMembershipCount += GrouperUtil.length(provisioningEntity.retrieveAttributeValueSetForMemberships());
+        }
+      }
+    }
+    totalTargetCount += originalTargetMembershipCount;
+
+    long retrieveTargetDataMillis = System.currentTimeMillis()-start;
+    debugMap.put("retrieveTargetMembershipsMillis", retrieveTargetDataMillis);
+
+  }
+
+  public void validateAndThrowExceptionIfInvalid() {
+    int fatalValidationProblems = 0;
+    int nonfatalValidationProblems = 0;
+    
+    List<ProvisioningValidationIssue> validationIssues = this.grouperProvisioner.retrieveGrouperProvisioningConfigurationValidation().validate();
+    
+    ProvisioningValidationIssue fatalError = null;
+    for (ProvisioningValidationIssue provisioningValidationIssue : GrouperUtil.nonNull(validationIssues)) {
+      if (provisioningValidationIssue.isRuntimeError()) {
+        if (fatalError == null) {
+          fatalError = provisioningValidationIssue;
+        }
+        fatalValidationProblems++;
+      } else {
+        nonfatalValidationProblems++;
+      }
+    }
+
+    if (fatalValidationProblems > 0) {
+      this.getGrouperProvisioner().getDebugMap().put("fatalValidationProblems", fatalValidationProblems);
+    }
+    if (nonfatalValidationProblems > 0) {
+      this.getGrouperProvisioner().getDebugMap().put("nonfatalValidationProblems", nonfatalValidationProblems);
+    }
+    
+    if (fatalError != null) {
+      throw new RuntimeException("Fatal validation problem: " + fatalError.getMessage());
+    }
+  }
+  
+  
+  public void loadEntityAttributesDataToGrouper() {
+    
+    if (!this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isLoadEntitiesToGrouperTable()) {
+      return;
+    }
+    
+    GrouperProvisioningLoader grouperProvisioningLoader = this.grouperProvisioner.retrieveGrouperProvisioningLoader();
+    
+    String attributesTableName = grouperProvisioningLoader.getLoaderEntityAttributesTableName();
+    if (StringUtils.isBlank(attributesTableName)) {
+      return;
+    }
+    
+    GcTableSync loadUsersAttributesToTableGcTableSync = new GcTableSync();
+    GcTableSyncTableBean loadUsersAttributesToTableGcTableSyncTableBeanSql = new GcTableSyncTableBean(loadUsersAttributesToTableGcTableSync);
+    loadUsersAttributesToTableGcTableSyncTableBeanSql.configureMetadata("grouper", attributesTableName);
+    loadUsersAttributesToTableGcTableSync.setDataBeanTo(loadUsersAttributesToTableGcTableSyncTableBeanSql);
+    
+    Set<String> databaseColumnNames = new LinkedHashSet(grouperProvisioningLoader.getLoaderEntityAttributesColumnNames());
+
+    Set<String> loadUsersToTableUniqueKeyColumnNames = new LinkedHashSet(grouperProvisioningLoader.getLoaderEntityAttributesKeyColumnNames());
+
+    GcTableSyncTableMetadata gcTableSyncTableMetadata = loadUsersAttributesToTableGcTableSyncTableBeanSql.getTableMetadata();
+    
+    gcTableSyncTableMetadata.assignColumns(GrouperUtil.join(databaseColumnNames.iterator(), ','));
+    gcTableSyncTableMetadata.assignPrimaryKeyColumns(GrouperUtil.join(loadUsersToTableUniqueKeyColumnNames.iterator(), ','));
+    
+    GcDbAccess gcDbAccess = new GcDbAccess().connectionName("grouper");
+    
+    String configId = this.getGrouperProvisioner().getConfigId();
+    
+    String sql = "select " + gcTableSyncTableMetadata.columnListAll() + " from " + gcTableSyncTableMetadata.getTableName() + " where config_id = ?";
+    
+    List<Object[]> results = gcDbAccess.sql(sql).addBindVar(configId).selectList(Object[].class);
+
+    GcTableSyncTableData loadUsersToTableGcTableSyncTableDataSql = new GcTableSyncTableData();
+    loadUsersToTableGcTableSyncTableDataSql.init(loadUsersAttributesToTableGcTableSyncTableBeanSql, gcTableSyncTableMetadata.lookupColumns(loadUsersAttributesToTableGcTableSyncTableBeanSql.getTableMetadata().columnListAll()), results);
+    loadUsersToTableGcTableSyncTableDataSql.indexData();
+ 
+    loadUsersAttributesToTableGcTableSyncTableBeanSql.setDataInitialQuery(loadUsersToTableGcTableSyncTableDataSql);
+    loadUsersAttributesToTableGcTableSyncTableBeanSql.setGcTableSync(loadUsersAttributesToTableGcTableSync);
+
+    Map<String, Object> debugMap = this.getGrouperProvisioner().getDebugMap();
+    debugMap.put("loadUserAttrsDbUniqueKeys", loadUsersToTableGcTableSyncTableDataSql.allPrimaryKeys().size());
+    
+    GcTableSyncTableBean gcTableSyncTableBeanFrom = new GcTableSyncTableBean();
+    loadUsersAttributesToTableGcTableSync.setDataBeanFrom(gcTableSyncTableBeanFrom);
+    gcTableSyncTableBeanFrom.setTableMetadata(loadUsersAttributesToTableGcTableSyncTableBeanSql.getTableMetadata());
+    gcTableSyncTableBeanFrom.setGcTableSync(loadUsersAttributesToTableGcTableSync);
+
+    GcTableSyncTableData loadUsersToTableGcTableSyncTableData = new GcTableSyncTableData();
+    loadUsersAttributesToTableGcTableSync.getDataBeanFrom().setDataInitialQuery(loadUsersToTableGcTableSyncTableData);
+
+    List<Object[]> targetTableData = grouperProvisioningLoader.retrieveLoaderEntityAttrTableDataFromDataBean();
+
+    // init() rather than setRows(): init() runs each row through normalizeRow(), coercing every
+    // value to its column's canonical java type.  The TO side always gets that (it comes back
+    // through a jdbc driver); the loader builds these rows as plain java objects with no
+    // conversion, so without init() the same value can be a Long here and a BigDecimal there.
+    // MultiKey compares with equals(), so mismatched types make every row look changed.
+    loadUsersToTableGcTableSyncTableData.init(loadUsersToTableGcTableSyncTableDataSql.getGcTableSyncTableBean(),
+        loadUsersToTableGcTableSyncTableDataSql.getColumnMetadata(), targetTableData);
+
+    // compare and sync
+    GcTableSyncConfiguration gcTableSyncConfiguration = new GcTableSyncConfiguration();
+    loadUsersAttributesToTableGcTableSync.setGcTableSyncConfiguration(gcTableSyncConfiguration);
+
+    loadUsersAttributesToTableGcTableSync.setGcTableSyncOutput(new GcTableSyncOutput());
+
+    Map<String, Object> debugMapLocal = new LinkedHashMap<String, Object>();
+    GcTableSyncSubtype.fullSyncFull.syncData(debugMapLocal, loadUsersAttributesToTableGcTableSync);
+
+    // merge the debug maps
+    for (String key : debugMapLocal.keySet()) {
+      
+      Object newValue = debugMapLocal.get(key);
+ 
+      // convert micros to millis
+      if (key.endsWith("Millis")) {
+        if (newValue instanceof Number) {
+          newValue = ((Number)newValue).longValue()/1000;
+        }
+      }
+
+      
+      String newKey = "loadUsers" + StringUtils.capitalize(key);
+      debugMap.put(newKey, newValue);
+
+    }
+    
+  }
+  
+  public void loadDataToGrouper() {
+    loadEntityDataToGrouper();
+    loadEntityAttributesDataToGrouper();
+
+    loadGroupDataToGrouper();
+    loadMembershipDataToGrouper();
+    // sync-back flush moved out — fullSyncLogic invokes loadDataToGenericProvisionerTables()
+    // directly AFTER retrieveFullIndividualTargetMemberships so the flush sees memberships
+    // captured via the scoped retrieveMembershipsByGroup* path (selectAll=false case).
+  }
+
+  public void loadEntityDataToGrouper() {
+    
+    if (!this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isLoadEntitiesToGrouperTable()) {
+      return;
+    }
+    
+    // we need to get data from the table
+    GcTableSync loadUsersToTableGcTableSync = new GcTableSync();
+    
+    //retrieve the existing data from database
+    GcTableSyncTableBean loadUsersToTableGcTableSyncTableBeanSql = new GcTableSyncTableBean(loadUsersToTableGcTableSync);
+    
+    GrouperProvisioningLoader grouperProvisioningLoader = this.grouperProvisioner.retrieveGrouperProvisioningLoader();
+    String tableName = grouperProvisioningLoader.getLoaderEntityTableName();
+    if (StringUtils.isBlank(tableName)) {
+      return;
+    }
+    
+    loadUsersToTableGcTableSyncTableBeanSql.configureMetadata("grouper", tableName);
+    loadUsersToTableGcTableSync.setDataBeanTo(loadUsersToTableGcTableSyncTableBeanSql);
+    
+    Set<String> databaseColumnNames = new LinkedHashSet<>(grouperProvisioningLoader.getLoaderEntityColumnNames());
+
+    Set<String> loadUsersToTableUniqueKeyColumnNames = new LinkedHashSet<>(grouperProvisioningLoader.getLoaderEntityKeyColumnNames());
+
+    GcTableSyncTableMetadata gcTableSyncTableMetadata = loadUsersToTableGcTableSyncTableBeanSql.getTableMetadata();
+
+    gcTableSyncTableMetadata.assignColumns(GrouperUtil.join(databaseColumnNames.iterator(), ','));
+    gcTableSyncTableMetadata.assignPrimaryKeyColumns(GrouperUtil.join(loadUsersToTableUniqueKeyColumnNames.iterator(), ','));
+    
+    GcDbAccess gcDbAccess = new GcDbAccess().connectionName("grouper");
+    
+    String configId = this.getGrouperProvisioner().getConfigId();
+    
+    String sql = "select " + gcTableSyncTableMetadata.columnListAll() + " from " + gcTableSyncTableMetadata.getTableName() + " where config_id = ?";
+    
+    List<Object[]> results = gcDbAccess.sql(sql).addBindVar(configId).selectList(Object[].class);
+
+    GcTableSyncTableData loadUsersToTableGcTableSyncTableDataSql = new GcTableSyncTableData();
+    loadUsersToTableGcTableSyncTableDataSql.init(loadUsersToTableGcTableSyncTableBeanSql, gcTableSyncTableMetadata.lookupColumns(loadUsersToTableGcTableSyncTableBeanSql.getTableMetadata().columnListAll()), results);
+    loadUsersToTableGcTableSyncTableDataSql.indexData();
+ 
+    loadUsersToTableGcTableSyncTableBeanSql.setDataInitialQuery(loadUsersToTableGcTableSyncTableDataSql);
+    loadUsersToTableGcTableSyncTableBeanSql.setGcTableSync(loadUsersToTableGcTableSync);
+
+    Map<String, Object> debugMap = this.getGrouperProvisioner().getDebugMap();
+    debugMap.put("loadUsersDbUniqueKeys", loadUsersToTableGcTableSyncTableDataSql.allPrimaryKeys().size());
+    
+    GcTableSyncTableBean gcTableSyncTableBeanFrom = new GcTableSyncTableBean();
+    loadUsersToTableGcTableSync.setDataBeanFrom(gcTableSyncTableBeanFrom);
+    gcTableSyncTableBeanFrom.setTableMetadata(loadUsersToTableGcTableSyncTableBeanSql.getTableMetadata());
+    gcTableSyncTableBeanFrom.setGcTableSync(loadUsersToTableGcTableSync);
+
+    GcTableSyncTableData loadUsersToTableGcTableSyncTableDataLdap = new GcTableSyncTableData();
+    loadUsersToTableGcTableSync.getDataBeanFrom().setDataInitialQuery(loadUsersToTableGcTableSyncTableDataLdap);
+
+    List<Object[]> targetTableData = grouperProvisioningLoader.retrieveLoaderEntityTableDataFromDataBean();
+
+    // init() rather than setRows(): init() runs each row through normalizeRow(), coercing every
+    // value to its column's canonical java type.  The TO side always gets that (it comes back
+    // through a jdbc driver); the loader builds these rows as plain java objects with no
+    // conversion, so without init() the same value can be a Long here and a BigDecimal there.
+    // MultiKey compares with equals(), so mismatched types make every row look changed.
+    loadUsersToTableGcTableSyncTableDataLdap.init(loadUsersToTableGcTableSyncTableDataSql.getGcTableSyncTableBean(),
+        loadUsersToTableGcTableSyncTableDataSql.getColumnMetadata(), targetTableData);
+
+    // compare and sync
+    GcTableSyncConfiguration gcTableSyncConfiguration = new GcTableSyncConfiguration();
+    loadUsersToTableGcTableSync.setGcTableSyncConfiguration(gcTableSyncConfiguration);
+
+    loadUsersToTableGcTableSync.setGcTableSyncOutput(new GcTableSyncOutput());
+
+    Map<String, Object> debugMapLocal = new LinkedHashMap<String, Object>();
+    GcTableSyncSubtype.fullSyncFull.syncData(debugMapLocal, loadUsersToTableGcTableSync);
+
+    // merge the debug maps
+    for (String key : debugMapLocal.keySet()) {
+      
+      Object newValue = debugMapLocal.get(key);
+ 
+      // convert micros to millis
+      if (key.endsWith("Millis")) {
+        if (newValue instanceof Number) {
+          newValue = ((Number)newValue).longValue()/1000;
+        }
+      }
+
+      
+      String newKey = "loadUsers" + StringUtils.capitalize(key);
+      debugMap.put(newKey, newValue);
+
+    }
+    
+  }
+  
+  public void loadGroupDataToGrouper() {
+    
+    if (!this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isLoadEntitiesToGrouperTable()) {
+      return;
+    }
+    
+    if (!this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isSelectGroupsAll()) {
+      return;
+    }
+    
+ // we need to get data from the table
+    GcTableSync loadGroupsToTableGcTableSync = new GcTableSync();
+    
+    //retrieve the existing data from database
+    GcTableSyncTableBean loadGroupsToTableGcTableSyncTableBeanSql = new GcTableSyncTableBean(loadGroupsToTableGcTableSync);
+    
+    GrouperProvisioningLoader grouperProvisioningLoader = this.grouperProvisioner.retrieveGrouperProvisioningLoader();
+    String tableName = grouperProvisioningLoader.getLoaderGroupTableName();
+    if (StringUtils.isBlank(tableName)) {
+      return;
+    }
+    
+    loadGroupsToTableGcTableSyncTableBeanSql.configureMetadata("grouper", tableName);
+    loadGroupsToTableGcTableSync.setDataBeanTo(loadGroupsToTableGcTableSyncTableBeanSql);
+    
+    Set<String> databaseColumnNames = new LinkedHashSet(grouperProvisioningLoader.getLoaderGroupColumnNames());
+
+    Set<String> loadGroupsToTableUniqueKeyColumnNames = new LinkedHashSet(grouperProvisioningLoader.getLoaderGroupKeyColumnNames());
+
+    GcTableSyncTableMetadata gcTableSyncTableMetadata = loadGroupsToTableGcTableSyncTableBeanSql.getTableMetadata();
+
+    gcTableSyncTableMetadata.assignColumns(GrouperUtil.join(databaseColumnNames.iterator(), ','));
+    gcTableSyncTableMetadata.assignPrimaryKeyColumns(GrouperUtil.join(loadGroupsToTableUniqueKeyColumnNames.iterator(), ','));
+    
+    GcDbAccess gcDbAccess = new GcDbAccess().connectionName("grouper");
+    
+    String configId = this.getGrouperProvisioner().getConfigId();
+    
+    String sql = "select " + gcTableSyncTableMetadata.columnListAll() + " from " + gcTableSyncTableMetadata.getTableName() + " where config_id = ?";
+    
+    List<Object[]> results = gcDbAccess.sql(sql).addBindVar(configId).selectList(Object[].class);
+
+    GcTableSyncTableData loadGroupsToTableGcTableSyncTableDataSql = new GcTableSyncTableData();
+    loadGroupsToTableGcTableSyncTableDataSql.init(loadGroupsToTableGcTableSyncTableBeanSql, gcTableSyncTableMetadata.lookupColumns(loadGroupsToTableGcTableSyncTableBeanSql.getTableMetadata().columnListAll()), results);
+    loadGroupsToTableGcTableSyncTableDataSql.indexData();
+ 
+    loadGroupsToTableGcTableSyncTableBeanSql.setDataInitialQuery(loadGroupsToTableGcTableSyncTableDataSql);
+    loadGroupsToTableGcTableSyncTableBeanSql.setGcTableSync(loadGroupsToTableGcTableSync);
+
+    Map<String, Object> debugMap = this.getGrouperProvisioner().getDebugMap();
+    debugMap.put("loadGroupsDbUniqueKeys", loadGroupsToTableGcTableSyncTableDataSql.allPrimaryKeys().size());
+    
+    GcTableSyncTableBean gcTableSyncTableBeanFrom = new GcTableSyncTableBean();
+    loadGroupsToTableGcTableSync.setDataBeanFrom(gcTableSyncTableBeanFrom);
+    gcTableSyncTableBeanFrom.setTableMetadata(loadGroupsToTableGcTableSyncTableBeanSql.getTableMetadata());
+    gcTableSyncTableBeanFrom.setGcTableSync(loadGroupsToTableGcTableSync);
+
+    GcTableSyncTableData loadGroupsToTableGcTableSyncTableDataLdap = new GcTableSyncTableData();
+    loadGroupsToTableGcTableSync.getDataBeanFrom().setDataInitialQuery(loadGroupsToTableGcTableSyncTableDataLdap);
+
+    List<Object[]> targetTableData = grouperProvisioningLoader.retrieveLoaderGroupTableDataFromDataBean();
+
+    // init() rather than setRows(): init() runs each row through normalizeRow(), coercing every
+    // value to its column's canonical java type.  The TO side always gets that (it comes back
+    // through a jdbc driver); the loader builds these rows as plain java objects with no
+    // conversion, so without init() the same value can be a Long here and a BigDecimal there.
+    // MultiKey compares with equals(), so mismatched types make every row look changed.
+    loadGroupsToTableGcTableSyncTableDataLdap.init(loadGroupsToTableGcTableSyncTableDataSql.getGcTableSyncTableBean(),
+        loadGroupsToTableGcTableSyncTableDataSql.getColumnMetadata(), targetTableData);
+
+    // compare and sync
+    GcTableSyncConfiguration gcTableSyncConfiguration = new GcTableSyncConfiguration();
+    loadGroupsToTableGcTableSync.setGcTableSyncConfiguration(gcTableSyncConfiguration);
+
+    loadGroupsToTableGcTableSync.setGcTableSyncOutput(new GcTableSyncOutput());
+
+    Map<String, Object> debugMapLocal = new LinkedHashMap<String, Object>();
+    GcTableSyncSubtype.fullSyncFull.syncData(debugMapLocal, loadGroupsToTableGcTableSync);
+
+    // merge the debug maps
+    for (String key : debugMapLocal.keySet()) {
+      
+      Object newValue = debugMapLocal.get(key);
+ 
+      // convert micros to millis
+      if (key.endsWith("Millis")) {
+        if (newValue instanceof Number) {
+          newValue = ((Number)newValue).longValue()/1000;
+        }
+      }
+
+      
+      String newKey = "loadGroups" + StringUtils.capitalize(key);
+      debugMap.put(newKey, newValue);
+
+    }
+    
+  }
+  
+  public void loadMembershipDataToGrouper() {
+    
+    if (!this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isLoadEntitiesToGrouperTable()) {
+      return;
+    }
+    
+    if (!this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isSelectGroupsAll()) {
+      return;
+    }
+    
+    // we need to get data from the table
+    GcTableSync loadMembershipsToTableGcTableSync = new GcTableSync();
+    
+    //retrieve the existing data from database
+    GcTableSyncTableBean loadMembershipsToTableGcTableSyncTableBeanSql = new GcTableSyncTableBean(loadMembershipsToTableGcTableSync);
+    
+    GrouperProvisioningLoader grouperProvisioningLoader = this.grouperProvisioner.retrieveGrouperProvisioningLoader();
+    String tableName = grouperProvisioningLoader.getLoaderMembershipTableName();
+    if (StringUtils.isBlank(tableName)) {
+      return;
+    }
+    
+    loadMembershipsToTableGcTableSyncTableBeanSql.configureMetadata("grouper", tableName);
+    loadMembershipsToTableGcTableSync.setDataBeanTo(loadMembershipsToTableGcTableSyncTableBeanSql);
+    
+    Set<String> databaseColumnNames = new LinkedHashSet(grouperProvisioningLoader.getLoaderMembershipColumnNames());
+
+    Set<String> loadMembershipsToTableUniqueKeyColumnNames = new LinkedHashSet(grouperProvisioningLoader.getLoaderMembershipKeyColumnNames());
+
+    GcTableSyncTableMetadata gcTableSyncTableMetadata = loadMembershipsToTableGcTableSyncTableBeanSql.getTableMetadata();
+
+    gcTableSyncTableMetadata.assignColumns(GrouperUtil.join(databaseColumnNames.iterator(), ','));
+    gcTableSyncTableMetadata.assignPrimaryKeyColumns(GrouperUtil.join(loadMembershipsToTableUniqueKeyColumnNames.iterator(), ','));
+    
+    GcDbAccess gcDbAccess = new GcDbAccess().connectionName("grouper");
+    
+    String configId = this.getGrouperProvisioner().getConfigId();
+    
+    String sql = "select " + gcTableSyncTableMetadata.columnListAll() + " from " + gcTableSyncTableMetadata.getTableName() + " where config_id = ?";
+    
+    List<Object[]> results = gcDbAccess.sql(sql).addBindVar(configId).selectList(Object[].class);
+
+    GcTableSyncTableData loadMembershipsToTableGcTableSyncTableDataSql = new GcTableSyncTableData();
+    loadMembershipsToTableGcTableSyncTableDataSql.init(loadMembershipsToTableGcTableSyncTableBeanSql, gcTableSyncTableMetadata.lookupColumns(loadMembershipsToTableGcTableSyncTableBeanSql.getTableMetadata().columnListAll()), results);
+    loadMembershipsToTableGcTableSyncTableDataSql.indexData();
+ 
+    loadMembershipsToTableGcTableSyncTableBeanSql.setDataInitialQuery(loadMembershipsToTableGcTableSyncTableDataSql);
+    loadMembershipsToTableGcTableSyncTableBeanSql.setGcTableSync(loadMembershipsToTableGcTableSync);
+
+    Map<String, Object> debugMap = this.getGrouperProvisioner().getDebugMap();
+    debugMap.put("loadMembershipsDbUniqueKeys", loadMembershipsToTableGcTableSyncTableDataSql.allPrimaryKeys().size());
+    
+    GcTableSyncTableBean gcTableSyncTableBeanFrom = new GcTableSyncTableBean();
+    loadMembershipsToTableGcTableSync.setDataBeanFrom(gcTableSyncTableBeanFrom);
+    gcTableSyncTableBeanFrom.setTableMetadata(loadMembershipsToTableGcTableSyncTableBeanSql.getTableMetadata());
+    gcTableSyncTableBeanFrom.setGcTableSync(loadMembershipsToTableGcTableSync);
+
+    GcTableSyncTableData loadMembershipsToTableGcTableSyncTableDataLdap = new GcTableSyncTableData();
+    loadMembershipsToTableGcTableSync.getDataBeanFrom().setDataInitialQuery(loadMembershipsToTableGcTableSyncTableDataLdap);
+
+    List<Object[]> targetTableData = grouperProvisioningLoader.retrieveLoaderMembershipTableDataFromDataBean();
+
+    // init() rather than setRows(): init() runs each row through normalizeRow(), coercing every
+    // value to its column's canonical java type.  The TO side always gets that (it comes back
+    // through a jdbc driver); the loader builds these rows as plain java objects with no
+    // conversion, so without init() the same value can be a Long here and a BigDecimal there.
+    // MultiKey compares with equals(), so mismatched types make every row look changed.
+    loadMembershipsToTableGcTableSyncTableDataLdap.init(loadMembershipsToTableGcTableSyncTableDataSql.getGcTableSyncTableBean(),
+        loadMembershipsToTableGcTableSyncTableDataSql.getColumnMetadata(), targetTableData);
+    // compare and sync
+    GcTableSyncConfiguration gcTableSyncConfiguration = new GcTableSyncConfiguration();
+    loadMembershipsToTableGcTableSync.setGcTableSyncConfiguration(gcTableSyncConfiguration);
+
+    loadMembershipsToTableGcTableSync.setGcTableSyncOutput(new GcTableSyncOutput());
+
+    Map<String, Object> debugMapLocal = new LinkedHashMap<String, Object>();
+    GcTableSyncSubtype.fullSyncFull.syncData(debugMapLocal, loadMembershipsToTableGcTableSync);
+
+    // merge the debug maps
+    for (String key : debugMapLocal.keySet()) {
+      
+      Object newValue = debugMapLocal.get(key);
+ 
+      // convert micros to millis
+      if (key.endsWith("Millis")) {
+        if (newValue instanceof Number) {
+          newValue = ((Number)newValue).longValue()/1000;
+        }
+      }
+
+      
+      String newKey = "loadGroups" + StringUtils.capitalize(key);
+      debugMap.put(newKey, newValue);
+    }
+    
+  }
+
+  private interface GenericProvisioningRecord {
+    long getInternalId();
+    void setInternalId(long internalId);
+    String getTargetId();
+    Map<String, List<Object>> getAttributeNameToValues();
+  }
+
+  private static class GenericProvisioningUserRecord implements GenericProvisioningRecord {
+    private long internalId;
+    private Long memberInternalId;
+    private final String targetId;
+    private final Map<String, List<Object>> attributeNameToValues = new LinkedHashMap<String, List<Object>>();
+
+    private GenericProvisioningUserRecord(String targetId) {
+      this.targetId = targetId;
+    }
+
+    @Override
+    public long getInternalId() { return internalId; }
+    @Override
+    public void setInternalId(long internalId) { this.internalId = internalId; }
+    @Override
+    public String getTargetId() { return targetId; }
+    @Override
+    public Map<String, List<Object>> getAttributeNameToValues() { return attributeNameToValues; }
+    public Long getMemberInternalId() { return memberInternalId; }
+    public void setMemberInternalId(Long memberInternalId) { this.memberInternalId = memberInternalId; }
+
+    @Override
+    public boolean equals(Object obj) {
+      if (this == obj)
+        return true;
+      if (obj == null)
+        return false;
+      if (getClass() != obj.getClass())
+        return false;
+      GenericProvisioningUserRecord other = (GenericProvisioningUserRecord) obj;
+      return new EqualsBuilder()
+          .append(this.targetId, other.targetId)
+          .isEquals();
+    }
+
+    @Override
+    public int hashCode() {
+      return new HashCodeBuilder()
+          .append(this.targetId)
+          .toHashCode();
+    }
+  }
+
+  private static class GenericProvisioningGroupRecord implements GenericProvisioningRecord {
+    private long internalId;
+    private Long groupInternalId;
+    private final String targetId;
+    private final Map<String, List<Object>> attributeNameToValues = new LinkedHashMap<String, List<Object>>();
+
+    private GenericProvisioningGroupRecord(String targetId) {
+      this.targetId = targetId;
+    }
+
+    @Override
+    public long getInternalId() { return internalId; }
+    @Override
+    public void setInternalId(long internalId) { this.internalId = internalId; }
+    @Override
+    public String getTargetId() { return targetId; }
+    @Override
+    public Map<String, List<Object>> getAttributeNameToValues() { return attributeNameToValues; }
+    public Long getGroupInternalId() { return groupInternalId; }
+    public void setGroupInternalId(Long groupInternalId) { this.groupInternalId = groupInternalId; }
+
+    @Override
+    public boolean equals(Object obj) {
+      if (this == obj)
+        return true;
+      if (obj == null)
+        return false;
+      if (getClass() != obj.getClass())
+        return false;
+      GenericProvisioningGroupRecord other = (GenericProvisioningGroupRecord) obj;
+      return new EqualsBuilder()
+          .append(this.targetId, other.targetId)
+          .isEquals();
+    }
+
+    @Override
+    public int hashCode() {
+      return new HashCodeBuilder()
+          .append(this.targetId)
+          .toHashCode();
+    }
+  }
+  
+  private static class GenericProvisioningTypedValue {
+    private String attributeType;
+    private Long valueInteger;
+    private String stringValue;
+  }
+  
+  private static class GenericProvisioningAttributeRecord {
+    private long internalId;     // FK to catalog row in grouper_prov_*_attr (per-name, per-provisioner)
+    private long objectInternalId;
+    private String attributeName;
+    private String attributeType;
+    private final List<GenericProvisioningTypedValue> values = new ArrayList<GenericProvisioningTypedValue>();
+  }
+
+  /**
+   * one row per (provisioner, attribute_name) — backs grouper_prov_user_attr / grouper_prov_group_attr.
+   * value rows reference this catalog by internal_id; type is coerced to "string" when the same name
+   * has been observed with multiple non-empty types across objects in the run. All-empty records
+   * (preserved for "attribute present, value empty") do not influence catalog type.
+   */
+  private static class GenericProvisioningAttrCatalog {
+    private long internalId;
+    private String attributeName;
+    private String attributeType;
+    /** true once we've observed at least one non-empty value for this attribute name */
+    private boolean hasNonEmptyValue;
+  }
+  
+  private static class GenericProvisioningMembershipRecord {
+    private String targetUserId;
+    private String targetGroupId;
+    private String roleName;
+
+    @Override
+    public boolean equals(Object obj) {
+      if (this == obj)
+        return true;
+      if (obj == null)
+        return false;
+      if (getClass() != obj.getClass())
+        return false;
+      GenericProvisioningMembershipRecord other = (GenericProvisioningMembershipRecord) obj;
+      return new EqualsBuilder()
+          .append(this.targetUserId, other.targetUserId)
+          .append(this.targetGroupId, other.targetGroupId)
+          .append(this.roleName, other.roleName)
+          .isEquals();
+    }
+
+    @Override
+    public int hashCode() {
+      return new HashCodeBuilder()
+          .append(this.targetUserId)
+          .append(this.targetGroupId)
+          .append(this.roleName)
+          .toHashCode();
+    }
+  }
+  
+  /**
+   * Sync-back group drain: runs after the write phase, before the generic-table flush, in
+   * both full and incremental. For every target group id marked for sync-back read
+   * ({@code GrouperProvisioningData.getSyncBackGroupNativeIdsToRead()}):
+   * <ul>
+   *   <li>if the read map already holds it (its own write registered the native, or a read
+   *       captured it) -- skip, no re-read;</li>
+   *   <li>otherwise bulk re-read it (resolving the id back to the group written this run)
+   *       so the mirror reflects post-write state.</li>
+   * </ul>
+   * Then the to-read set is cleared. No-op when group reporting is off or nothing is marked.
+   */
+  public void syncBackDrainGroups() {
+    GrouperProvisioningBehavior behavior = this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior();
+    if (!behavior.isLoadGroupsToGenericGrouperTable()) {
+      return;
+    }
+    GrouperProvisioningData grouperProvisioningData = this.getGrouperProvisioner().retrieveGrouperProvisioningData();
+    Set<String> syncBackGroupNativeIdsToRead = grouperProvisioningData.getSyncBackGroupNativeIdsToRead();
+    if (syncBackGroupNativeIdsToRead == null || syncBackGroupNativeIdsToRead.isEmpty()) {
+      return;
+    }
+
+    Map<String, GrouperProvisioningTargetNativeGroup> targetGroupIdToNativeGroup =
+        grouperProvisioningData.getTargetGroupIdToNativeGroup();
+
+    // ids marked for read whose post-write native was NOT captured on the write itself
+    Set<String> targetIdsNeedingRead = new LinkedHashSet<String>();
+    for (String targetId : syncBackGroupNativeIdsToRead) {
+      if (targetId != null && !targetGroupIdToNativeGroup.containsKey(targetId)) {
+        targetIdsNeedingRead.add(targetId);
+      }
+    }
+
+    if (!targetIdsNeedingRead.isEmpty()) {
+      // resolve the uncaptured ids back to the groups written this run, then bulk re-read.
+      // (capture-on-write protocols don't reach here; this is the no-response / re-read path.)
+      List<ProvisioningGroup> groupsToReRead = new ArrayList<ProvisioningGroup>();
+      GrouperProvisioningDataChanges grouperProvisioningDataChanges =
+          this.getGrouperProvisioner().retrieveGrouperProvisioningDataChanges();
+      // inserts, updates, and deletes: each can leave an id needing a re-read (a delete
+      // re-reads to confirm the object is actually gone before dropping it from the mirror)
+      List<GrouperProvisioningLists> writeSources = new ArrayList<GrouperProvisioningLists>();
+      writeSources.add(grouperProvisioningDataChanges.getTargetObjectInserts());
+      writeSources.add(grouperProvisioningDataChanges.getTargetObjectUpdates());
+      writeSources.add(grouperProvisioningDataChanges.getTargetObjectDeletes());
+      for (GrouperProvisioningLists writeSource : writeSources) {
+        if (writeSource == null) {
+          continue;
+        }
+        for (ProvisioningGroup writtenGroup : GrouperUtil.nonNull(writeSource.getProvisioningGroups())) {
+          if (writtenGroup != null && targetIdsNeedingRead.contains(writtenGroup.getId())) {
+            groupsToReRead.add(writtenGroup);
+          }
+        }
+      }
+      if (!groupsToReRead.isEmpty()) {
+        this.getGrouperProvisioner().retrieveGrouperProvisioningTargetDaoAdapter()
+            .retrieveGroups(new TargetDaoRetrieveGroupsRequest(groupsToReRead, true));
+      }
+      int unresolved = targetIdsNeedingRead.size() - groupsToReRead.size();
+      if (unresolved > 0) {
+        // ids we could not map back to a written group reference (cannot re-read by object)
+        this.getGrouperProvisioner().getDebugMap().put("syncBackGroupDrainUnresolved", unresolved);
+      }
+    }
+
+    // every marked id is now captured (own write / read) or just re-read; clear the marks
+    syncBackGroupNativeIdsToRead.clear();
+  }
+
+  /**
+   * Sync-back entity drain; the user-axis mirror of {@link #syncBackDrainGroups()}. Marked
+   * ids already in the read map (captured on their own write or a read) are skipped; the rest
+   * are bulk re-read from the target. Then the to-read set is cleared.
+   */
+  public void syncBackDrainUsers() {
+    GrouperProvisioningBehavior behavior = this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior();
+    if (!behavior.isLoadEntitiesToGenericGrouperTable()) {
+      return;
+    }
+    GrouperProvisioningData grouperProvisioningData = this.getGrouperProvisioner().retrieveGrouperProvisioningData();
+    Set<String> syncBackUserNativeIdsToRead = grouperProvisioningData.getSyncBackUserNativeIdsToRead();
+    if (syncBackUserNativeIdsToRead == null || syncBackUserNativeIdsToRead.isEmpty()) {
+      return;
+    }
+
+    Map<String, GrouperProvisioningTargetNativeUser> targetUserIdToNativeUser =
+        grouperProvisioningData.getTargetUserIdToNativeUser();
+
+    // ids marked for read whose post-write native was NOT captured on the write itself
+    Set<String> targetIdsNeedingRead = new LinkedHashSet<String>();
+    for (String targetId : syncBackUserNativeIdsToRead) {
+      if (targetId != null && !targetUserIdToNativeUser.containsKey(targetId)) {
+        targetIdsNeedingRead.add(targetId);
+      }
+    }
+
+    if (!targetIdsNeedingRead.isEmpty()) {
+      // resolve the uncaptured ids back to the entities written this run, then bulk re-read.
+      List<ProvisioningEntity> entitiesToReRead = new ArrayList<ProvisioningEntity>();
+      GrouperProvisioningDataChanges grouperProvisioningDataChanges =
+          this.getGrouperProvisioner().retrieveGrouperProvisioningDataChanges();
+      // inserts, updates, and deletes: each can leave an id needing a re-read (a delete
+      // re-reads to confirm the object is actually gone before dropping it from the mirror)
+      List<GrouperProvisioningLists> writeSources = new ArrayList<GrouperProvisioningLists>();
+      writeSources.add(grouperProvisioningDataChanges.getTargetObjectInserts());
+      writeSources.add(grouperProvisioningDataChanges.getTargetObjectUpdates());
+      writeSources.add(grouperProvisioningDataChanges.getTargetObjectDeletes());
+      for (GrouperProvisioningLists writeSource : writeSources) {
+        if (writeSource == null) {
+          continue;
+        }
+        for (ProvisioningEntity writtenEntity : GrouperUtil.nonNull(writeSource.getProvisioningEntities())) {
+          if (writtenEntity != null && targetIdsNeedingRead.contains(writtenEntity.getId())) {
+            entitiesToReRead.add(writtenEntity);
+          }
+        }
+      }
+      if (!entitiesToReRead.isEmpty()) {
+        this.getGrouperProvisioner().retrieveGrouperProvisioningTargetDaoAdapter()
+            .retrieveEntities(new TargetDaoRetrieveEntitiesRequest(entitiesToReRead, true));
+      }
+      int unresolved = targetIdsNeedingRead.size() - entitiesToReRead.size();
+      if (unresolved > 0) {
+        this.getGrouperProvisioner().getDebugMap().put("syncBackUserDrainUnresolved", unresolved);
+      }
+    }
+
+    // every marked id is now captured (own write / read) or just re-read; clear the marks
+    syncBackUserNativeIdsToRead.clear();
+  }
+
+  /**
+   * Drain entity re-link requests recorded by a target dao during the write phase.  These happen
+   * when an entity update is rejected because a DIFFERENT, pre-existing target account already holds
+   * the desired identity (e.g. a SCIM PATCH rename rejected with HTTP 409 scimType "uniqueness"):
+   * the linked account cannot be renamed into the collision, but the other account already has the
+   * identity we wanted.  The dao only detects and records the conflict; all of the recovery policy
+   * lives here so it is framework-generic and honored uniformly for any provisioner.  For each
+   * request this:
+   * <ol>
+   *   <li>runs the OLD (orphaned) account through the standard entity-delete decision, so it is
+   *       deleted, disabled, or left alone exactly per this provisioner's delete settings
+   *       ({@code isDeleteEntity} honors "never delete", "delete if grouper deleted", and "delete
+   *       only if grouper created it"; the dao's deleteEntity then applies "disable instead of
+   *       delete"); then</li>
+   *   <li>re-links the entity's sync member onto the pre-existing account, so subsequent runs
+   *       operate on that account rather than re-attempting the doomed rename every run.</li>
+   * </ol>
+   * Runs near end-of-run, before {@code storeAllObjects()}, so the re-linked sync member persists.
+   * Always on -- there is nothing to configure; a provisioner that never hits an update conflict
+   * simply has no requests to drain.
+   */
+  public void drainEntityRelinks() {
+
+    List<ProvisioningEntityRelinkRequest> entityRelinkRequests =
+        this.getGrouperProvisioner().retrieveGrouperProvisioningData().getEntityRelinkRequests();
+
+    if (GrouperUtil.length(entityRelinkRequests) == 0) {
+      return;
+    }
+
+    GrouperProvisioningBehavior behavior = this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior();
+
+    int relinkedCount = 0;
+    int orphanDisposedCount = 0;
+    int orphanLeftCount = 0;
+    int skippedCount = 0;
+    // keep up to ten human-readable examples (oldId -> newId) for the end-of-run debug log
+    List<String> examples = new ArrayList<String>();
+
+    // copy then clear, so disposal/re-link side effects can't disturb iteration and a second drain
+    // in the same run is a no-op
+    List<ProvisioningEntityRelinkRequest> requests =
+        new ArrayList<ProvisioningEntityRelinkRequest>(entityRelinkRequests);
+    entityRelinkRequests.clear();
+
+    for (ProvisioningEntityRelinkRequest relinkRequest : requests) {
+
+      ProvisioningEntityWrapper provisioningEntityWrapper = relinkRequest.getProvisioningEntityWrapper();
+      ProvisioningEntity newTargetEntity = relinkRequest.getNewTargetEntity();
+      String oldTargetId = relinkRequest.getOldTargetId();
+
+      if (provisioningEntityWrapper == null || newTargetEntity == null) {
+        skippedCount++;
+        continue;
+      }
+
+      GcGrouperSyncMember gcGrouperSyncMember = provisioningEntityWrapper.getGcGrouperSyncMember();
+      if (gcGrouperSyncMember == null) {
+        skippedCount++;
+        continue;
+      }
+
+      // the old account we were linked to, retrieved this run (has its target id + attributes); this
+      // is what we dispose.  Fall back to a minimal entity carrying just the old id if the wrapper
+      // has no target representation.
+      ProvisioningEntity oldTargetEntity = provisioningEntityWrapper.getTargetProvisioningEntity();
+      if (oldTargetEntity == null && !StringUtils.isBlank(oldTargetId)) {
+        oldTargetEntity = new ProvisioningEntity();
+        oldTargetEntity.setId(oldTargetId);
+      }
+
+      // 1) dispose the orphaned old account per settings.  If disposal fails we still re-link below --
+      // leaving an orphan is far better than resurrecting the error storm.
+      boolean disposeOldAccount = behavior.isDeleteEntity(gcGrouperSyncMember);
+      if (disposeOldAccount && oldTargetEntity != null) {
+        try {
+          this.getGrouperProvisioner().retrieveGrouperProvisioningTargetDaoAdapter().deleteEntityHelper(oldTargetEntity);
+          orphanDisposedCount++;
+        } catch (RuntimeException re) {
+          LOG.error("Provisioner '" + this.getGrouperProvisioner().getConfigId()
+              + "' error disposing orphaned account '" + oldTargetId
+              + "' during entity re-link; leaving it in place", re);
+        }
+      } else {
+        orphanLeftCount++;
+      }
+
+      // 2) re-link the entity's sync member onto the pre-existing account.  Point the wrapper's
+      // target representation at the new account and recompute the link (copyFromTargetOrGrouperTarget
+      // = true recomputes the stored target-id cache from the target attributes).  For provisioners
+      // that don't cache the target id this is a no-op and the next run re-matches by userName.
+      provisioningEntityWrapper.setTargetProvisioningEntity(newTargetEntity);
+      newTargetEntity.setProvisioningEntityWrapper(provisioningEntityWrapper);
+      List<ProvisioningEntityWrapper> singleWrapper = new ArrayList<ProvisioningEntityWrapper>();
+      singleWrapper.add(provisioningEntityWrapper);
+      this.getGrouperProvisioner().retrieveGrouperProvisioningLinkLogic().updateEntityLink(singleWrapper, true);
+      relinkedCount++;
+
+      if (examples.size() < 10) {
+        examples.add(oldTargetId + " -> " + newTargetEntity.getId());
+      }
+    }
+
+    Map<String, Object> debugMap = this.getGrouperProvisioner().getDebugMap();
+    debugMap.put("entityRelinkCount", relinkedCount);
+    debugMap.put("entityRelinkOrphanDisposedCount", orphanDisposedCount);
+    debugMap.put("entityRelinkOrphanLeftCount", orphanLeftCount);
+    if (skippedCount > 0) {
+      debugMap.put("entityRelinkSkippedCount", skippedCount);
+    }
+    if (!examples.isEmpty()) {
+      debugMap.put("entityRelinkExamples", StringUtils.join(examples, ", "));
+    }
+    if (relinkedCount > 0 || orphanDisposedCount > 0) {
+      LOG.info("Provisioner '" + this.getGrouperProvisioner().getConfigId() + "' re-linked " + relinkedCount
+          + " entit" + (relinkedCount == 1 ? "y" : "ies")
+          + " to a pre-existing target account after an update conflict; disposed " + orphanDisposedCount
+          + " orphaned account(s), left " + orphanLeftCount + " per settings."
+          + (examples.isEmpty() ? "" : "  Examples (oldId -> newId): " + StringUtils.join(examples, ", ")));
+    }
+  }
+
+  private void loadDataToGenericProvisionerTables() {
+
+    GrouperProvisioningBehavior behavior = this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior();
+    if (!behavior.isLoadEntitiesToGenericGrouperTable()
+        && !behavior.isLoadGroupsToGenericGrouperTable()
+        && !behavior.isLoadMembershipsToGenericGrouperTable()) {
+      return;
+    }
+
+    GcGrouperSync gcGrouperSync = this.getGrouperProvisioner().getGcGrouperSync();
+    if (gcGrouperSync == null || gcGrouperSync.getInternalId() == null) {
+      return;
+    }
+    
+    long grouperSyncInternalId = gcGrouperSync.getInternalId();
+    long nowMicros = System.currentTimeMillis() * 1000L;
+
+    // strict native-target view: only what the target select actually returned. If a provisioner
+    // doesn't fetch a given axis (e.g. selectGroups=false), no rows are written for that axis.
+    GrouperProvisioningData grouperProvisioningData = this.getGrouperProvisioner().retrieveGrouperProvisioningData();
+    List<GrouperProvisioningTargetNativeUser> targetNativeUsers = GrouperUtil.nonNull(grouperProvisioningData.getTargetNativeUsers());
+    List<GrouperProvisioningTargetNativeGroup> targetNativeGroups = GrouperUtil.nonNull(grouperProvisioningData.getTargetNativeGroups());
+    List<GrouperProvisioningTargetNativeMembership> targetNativeMemberships = GrouperUtil.nonNull(grouperProvisioningData.getTargetNativeMemberships());
+
+    Map<String, GenericProvisioningUserRecord> targetUserIdToRecord = new LinkedHashMap<String, GenericProvisioningUserRecord>();
+    for (GrouperProvisioningTargetNativeUser grouperProvisioningTargetNativeUser : targetNativeUsers) {
+      // defensive: protocol capture impls may put nulls in the map for not-found scoped retrieves
+      if (grouperProvisioningTargetNativeUser == null) {
+        continue;
+      }
+      String targetUserId = this.normalizeTargetId(grouperProvisioningTargetNativeUser.getTargetId());
+      if (StringUtils.isBlank(targetUserId)) {
+        continue;
+      }
+      GenericProvisioningUserRecord userRecord = targetUserIdToRecord.get(targetUserId);
+      if (userRecord == null) {
+        userRecord = new GenericProvisioningUserRecord(targetUserId);
+        targetUserIdToRecord.put(targetUserId, userRecord);
+      }
+      if (userRecord.getMemberInternalId() == null && grouperProvisioningTargetNativeUser.getMemberInternalId() != null) {
+        userRecord.setMemberInternalId(grouperProvisioningTargetNativeUser.getMemberInternalId());
+      }
+      for (Map.Entry<String, Object> attributeEntry : GrouperUtil.nonNull(grouperProvisioningTargetNativeUser.getAttributes()).entrySet()) {
+        this.addProvisioningAttributeValue(userRecord, attributeEntry.getKey(), attributeEntry.getValue());
+      }
+    }
+
+    Map<String, GenericProvisioningGroupRecord> targetGroupIdToRecord = new LinkedHashMap<String, GenericProvisioningGroupRecord>();
+    for (GrouperProvisioningTargetNativeGroup grouperProvisioningTargetNativeGroup : targetNativeGroups) {
+      if (grouperProvisioningTargetNativeGroup == null) {
+        continue;
+      }
+      String targetGroupId = this.normalizeTargetId(grouperProvisioningTargetNativeGroup.getTargetId());
+      if (StringUtils.isBlank(targetGroupId)) {
+        continue;
+      }
+      GenericProvisioningGroupRecord groupRecord = targetGroupIdToRecord.get(targetGroupId);
+      if (groupRecord == null) {
+        groupRecord = new GenericProvisioningGroupRecord(targetGroupId);
+        targetGroupIdToRecord.put(targetGroupId, groupRecord);
+      }
+      if (groupRecord.getGroupInternalId() == null && grouperProvisioningTargetNativeGroup.getGroupInternalId() != null) {
+        groupRecord.setGroupInternalId(grouperProvisioningTargetNativeGroup.getGroupInternalId());
+      }
+      for (Map.Entry<String, Object> attributeEntry : GrouperUtil.nonNull(grouperProvisioningTargetNativeGroup.getAttributes()).entrySet()) {
+        this.addProvisioningAttributeValue(groupRecord, attributeEntry.getKey(), attributeEntry.getValue());
+      }
+    }
+
+    List<GenericProvisioningMembershipRecord> membershipRecords = new ArrayList<GenericProvisioningMembershipRecord>();
+    Set<MultiKey> membershipDedup = new HashSet<MultiKey>();
+    for (GrouperProvisioningTargetNativeMembership grouperProvisioningTargetNativeMembership : targetNativeMemberships) {
+      if (grouperProvisioningTargetNativeMembership == null) {
+        continue;
+      }
+      String targetGroupId = StringUtils.trimToNull(grouperProvisioningTargetNativeMembership.getTargetGroupId());
+      String targetUserId = StringUtils.trimToNull(grouperProvisioningTargetNativeMembership.getTargetUserId());
+      if (StringUtils.isBlank(targetGroupId) || StringUtils.isBlank(targetUserId)) {
+        continue;
+      }
+
+      GenericProvisioningGroupRecord groupRecord = targetGroupIdToRecord.get(targetGroupId);
+      if (groupRecord == null) {
+        continue;
+      }
+
+      GenericProvisioningUserRecord userRecord = targetUserIdToRecord.get(targetUserId);
+      if (userRecord == null) {
+        continue;
+      }
+
+      String roleName = StringUtils.trimToNull(grouperProvisioningTargetNativeMembership.getRoleName());
+      MultiKey membershipKey = new MultiKey(targetGroupId, targetUserId, roleName);
+      if (!membershipDedup.add(membershipKey)) {
+        continue;
+      }
+
+      GenericProvisioningMembershipRecord membershipRecord = new GenericProvisioningMembershipRecord();
+      membershipRecord.targetGroupId = targetGroupId;
+      membershipRecord.targetUserId = targetUserId;
+      membershipRecord.roleName = roleName;
+      membershipRecords.add(membershipRecord);
+    }
+    
+    // GRP-7474: reuse the internal_id a target user / group already has in the sync-back tables.  Reserving a
+    // fresh internal_id for every object on every run made the table sync (keyed on internal_id) delete every
+    // existing user, group, attribute value, and membership row and insert them all again: very slow for large
+    // targets (e.g. Duo, 226k users and 3.6M value rows), and the tables were half empty for other readers
+    // while it ran.  New ids are only reserved for objects that are not in the table yet.
+    Map<String, ExistingGenericProvisioningObjectRow> existingUserRows = this.fetchExistingGenericProvisioningObjectRows(
+        "grouper_prov_user", "target_user_id", "member_internal_id", grouperSyncInternalId);
+    Map<String, ExistingGenericProvisioningObjectRow> existingGroupRows = this.fetchExistingGenericProvisioningObjectRows(
+        "grouper_prov_group", "target_group_id", "group_internal_id", grouperSyncInternalId);
+    this.reuseOrAssignProvisioningObjectInternalIds(targetUserIdToRecord, TableIndexType.provUser, existingUserRows);
+    this.reuseOrAssignProvisioningObjectInternalIds(targetGroupIdToRecord, TableIndexType.provGroup, existingGroupRows);
+
+    // populate the Grouper-side linkage columns (member_internal_id / group_internal_id) on
+    // the records by looking up the in-memory wrappers. Target-side orphans (target_ids the
+    // daemon never processed) won't appear in the wrappers and stay null.
+    this.resolveGrouperMemberInternalIdsForUsers(targetUserIdToRecord);
+    this.resolveGrouperGroupInternalIdsForGroups(targetGroupIdToRecord);
+
+    Map<String, GenericProvisioningAttrCatalog> userAttrCatalog = new LinkedHashMap<String, GenericProvisioningAttrCatalog>();
+    Map<String, GenericProvisioningAttrCatalog> groupAttrCatalog = new LinkedHashMap<String, GenericProvisioningAttrCatalog>();
+
+    // pre-fetch existing catalog rows so we reuse internal_ids for names that already exist.
+    // unique constraint is on (grouper_sync_internal_id, attribute_name); reusing prevents
+    // duplicate-key collisions on subsequent runs.
+    Map<String, Long> existingUserAttrCatalogIds = this.fetchExistingAttrCatalogIds(
+        "grouper_prov_user_attr", grouperSyncInternalId);
+    Map<String, Long> existingGroupAttrCatalogIds = this.fetchExistingAttrCatalogIds(
+        "grouper_prov_group_attr", grouperSyncInternalId);
+
+    List<GenericProvisioningAttributeRecord> userAttributeRecords = this.buildProvisioningAttributeRecords(
+        targetUserIdToRecord, userAttrCatalog, TableIndexType.provUserAttr, existingUserAttrCatalogIds);
+    List<GenericProvisioningAttributeRecord> groupAttributeRecords = this.buildProvisioningAttributeRecords(
+        targetGroupIdToRecord, groupAttrCatalog, TableIndexType.provGroupAttr, existingGroupAttrCatalogIds);
+
+    Set<String> stringValues = new LinkedHashSet<String>();
+    this.addProvisioningStringValues(userAttributeRecords, stringValues);
+    this.addProvisioningStringValues(groupAttributeRecords, stringValues);
+    Map<String, Long> valueStringToDictionaryInternalId = GrouperDictionaryDao.findOrAdd(stringValues);
+
+    // build user row data.  GRP-7474: an unchanged row keeps its last_updated, so the table sync sees no
+    // difference and does not write it
+    List<Object[]> userRowData = new ArrayList<Object[]>();
+    for (GenericProvisioningUserRecord userRecord : targetUserIdToRecord.values()) {
+      ExistingGenericProvisioningObjectRow existingRow = existingUserRows.get(userRecord.getTargetId());
+      long lastUpdated = existingRow != null && existingRow.internalId == userRecord.getInternalId()
+          && Objects.equals(existingRow.linkInternalId, userRecord.getMemberInternalId()) ? existingRow.lastUpdated : nowMicros;
+      userRowData.add(new Object[] {userRecord.getInternalId(), grouperSyncInternalId, userRecord.getMemberInternalId(), userRecord.getTargetId(), lastUpdated});
+    }
+
+    // build group row data
+    List<Object[]> groupRowData = new ArrayList<Object[]>();
+    for (GenericProvisioningGroupRecord groupRecord : targetGroupIdToRecord.values()) {
+      ExistingGenericProvisioningObjectRow existingRow = existingGroupRows.get(groupRecord.getTargetId());
+      long lastUpdated = existingRow != null && existingRow.internalId == groupRecord.getInternalId()
+          && Objects.equals(existingRow.linkInternalId, groupRecord.getGroupInternalId()) ? existingRow.lastUpdated : nowMicros;
+      groupRowData.add(new Object[] {groupRecord.getInternalId(), grouperSyncInternalId, groupRecord.getGroupInternalId(), groupRecord.getTargetId(), lastUpdated});
+    }
+
+    // build user attribute catalog row data (one row per distinct attribute_name)
+    List<Object[]> userAttributeRowData = this.buildProvisioningAttrCatalogRowData(userAttrCatalog, grouperSyncInternalId, nowMicros);
+
+    // build group attribute catalog row data (one row per distinct attribute_name)
+    List<Object[]> groupAttributeRowData = this.buildProvisioningAttrCatalogRowData(groupAttrCatalog, grouperSyncInternalId, nowMicros);
+
+    // build user attribute value row data.  GRP-7474: reuse the internal_id (and last_updated) of a value row
+    // that is already there with the same object, attribute, and value, so unchanged values are not rewritten
+    List<Object[]> userAttributeValueRowData = this.buildProvisioningAttributeValueRowData(
+        userAttributeRecords, TableIndexType.provUserAttrValue, valueStringToDictionaryInternalId, nowMicros,
+        this.fetchExistingGenericProvisioningValueRows(
+            "select internal_id, prov_user_attr_internal_id, prov_user_internal_id, value_integer, value_dictionary_internal_id, last_updated "
+            + "from grouper_prov_user_attr_value where prov_user_internal_id in (select internal_id from grouper_prov_user where grouper_sync_internal_id = ?)",
+            grouperSyncInternalId));
+
+    // build group attribute value row data
+    List<Object[]> groupAttributeValueRowData = this.buildProvisioningAttributeValueRowData(
+        groupAttributeRecords, TableIndexType.provGroupAttrValue, valueStringToDictionaryInternalId, nowMicros,
+        this.fetchExistingGenericProvisioningValueRows(
+            "select internal_id, prov_group_attr_internal_id, prov_group_internal_id, value_integer, value_dictionary_internal_id, last_updated "
+            + "from grouper_prov_group_attr_value where prov_group_internal_id in (select internal_id from grouper_prov_group where grouper_sync_internal_id = ?)",
+            grouperSyncInternalId));
+
+    // build role row data - always include the default role so every membership has a non-null role FK.
+    // GRP-7474: reuse existing role rows by name, reserve ids only for new role names
+    Map<String, ExistingGenericProvisioningObjectRow> existingRoleRows = this.fetchExistingGenericProvisioningObjectRows(
+        "grouper_prov_mship_role", "role_name", null, grouperSyncInternalId);
+    Map<String, Long> roleNameToInternalId = new LinkedHashMap<String, Long>();
+    Set<String> roleNames = new LinkedHashSet<String>();
+    roleNames.add(DEFAULT_MSHIP_ROLE_NAME);
+    for (GenericProvisioningMembershipRecord membershipRecord : membershipRecords) {
+      if (membershipRecord.roleName != null) {
+        roleNames.add(membershipRecord.roleName);
+      }
+    }
+    List<String> newRoleNames = new ArrayList<String>();
+    for (String roleName : roleNames) {
+      ExistingGenericProvisioningObjectRow existingRole = existingRoleRows.get(roleName);
+      if (existingRole != null) {
+        roleNameToInternalId.put(roleName, existingRole.internalId);
+      } else {
+        newRoleNames.add(roleName);
+      }
+    }
+    if (newRoleNames.size() > 0) {
+      List<Long> roleInternalIds = TableIndex.reserveIds(TableIndexType.provMshipRole, newRoleNames.size());
+      for (int i = 0; i < newRoleNames.size(); i++) {
+        roleNameToInternalId.put(newRoleNames.get(i), roleInternalIds.get(i));
+      }
+    }
+
+    List<Object[]> roleRowData = new ArrayList<Object[]>();
+    for (String roleName : roleNameToInternalId.keySet()) {
+      ExistingGenericProvisioningObjectRow existingRole = existingRoleRows.get(roleName);
+      long lastUpdated = existingRole != null ? existingRole.lastUpdated : nowMicros;
+      roleRowData.add(new Object[] {roleNameToInternalId.get(roleName), roleName, grouperSyncInternalId, lastUpdated});
+    }
+
+    // build membership row data.  GRP-7474: reuse the existing row for the same user, group, and role
+    Map<MultiKey, long[]> existingMembershipRows = this.fetchExistingGenericProvisioningMembershipRows(grouperSyncInternalId);
+    List<Object[]> membershipRowData = new ArrayList<Object[]>();
+    List<Object[]> newMembershipRowData = new ArrayList<Object[]>();
+    for (GenericProvisioningMembershipRecord membershipRecord : membershipRecords) {
+      GenericProvisioningUserRecord userRecord = targetUserIdToRecord.get(membershipRecord.targetUserId);
+      GenericProvisioningGroupRecord groupRecord = targetGroupIdToRecord.get(membershipRecord.targetGroupId);
+      String effectiveRoleName = membershipRecord.roleName != null ? membershipRecord.roleName : DEFAULT_MSHIP_ROLE_NAME;
+      Long roleInternalId = roleNameToInternalId.get(effectiveRoleName);
+      if (userRecord == null || groupRecord == null) {
+        continue;
+      }
+      long[] existingMembership = existingMembershipRows.get(
+          new MultiKey(userRecord.getInternalId(), groupRecord.getInternalId(), roleInternalId));
+      Object[] row = new Object[] {existingMembership == null ? null : existingMembership[0], grouperSyncInternalId,
+          userRecord.getInternalId(), groupRecord.getInternalId(), roleInternalId,
+          existingMembership == null ? nowMicros : existingMembership[1]};
+      membershipRowData.add(row);
+      if (existingMembership == null) {
+        newMembershipRowData.add(row);
+      }
+    }
+    if (newMembershipRowData.size() > 0) {
+      List<Long> membershipInternalIds = TableIndex.reserveIds(TableIndexType.provMship, newMembershipRowData.size());
+      for (int i = 0; i < newMembershipRowData.size(); i++) {
+        newMembershipRowData.get(i)[0] = membershipInternalIds.get(i);
+      }
+    }
+    
+    Map<String, Object> debugMap = this.getGrouperProvisioner().getDebugMap();
+    
+    // sync users
+    this.syncGenericProvisionerTable("grouper_prov_user",
+        "internal_id,grouper_sync_internal_id,member_internal_id,target_user_id,last_updated",
+        "internal_id",
+        "select internal_id,grouper_sync_internal_id,member_internal_id,target_user_id,last_updated from grouper_prov_user where grouper_sync_internal_id = ?",
+        grouperSyncInternalId,
+        userRowData, debugMap, "loadGenericUsers");
+    
+    // sync user attribute catalog: insert/update first so value rows can reference catalog rows
+    this.syncGenericProvisionerTable("grouper_prov_user_attr",
+        "internal_id,grouper_sync_internal_id,attribute_name,attribute_type,last_updated",
+        "internal_id",
+        "select internal_id,grouper_sync_internal_id,attribute_name,attribute_type,last_updated from grouper_prov_user_attr where grouper_sync_internal_id = ?",
+        grouperSyncInternalId,
+        userAttributeRowData, debugMap, "loadGenericUserAttrsIns",
+        GcTableSyncPhase.INSERTS_UPDATES_ONLY);
+
+    // sync user attribute values
+    this.syncGenericProvisionerTable("grouper_prov_user_attr_value",
+        "internal_id,prov_user_attr_internal_id,prov_user_internal_id,value_integer,value_dictionary_internal_id,last_updated",
+        "internal_id",
+        "select internal_id,prov_user_attr_internal_id,prov_user_internal_id,value_integer,value_dictionary_internal_id,last_updated from grouper_prov_user_attr_value where prov_user_internal_id in (select internal_id from grouper_prov_user where grouper_sync_internal_id = ?)",
+        grouperSyncInternalId,
+        userAttributeValueRowData, debugMap, "loadGenericUserAttrValues");
+
+    // delete obsolete catalog entries after value sync removed any rows that referenced them
+    this.syncGenericProvisionerTable("grouper_prov_user_attr",
+        "internal_id,grouper_sync_internal_id,attribute_name,attribute_type,last_updated",
+        "internal_id",
+        "select internal_id,grouper_sync_internal_id,attribute_name,attribute_type,last_updated from grouper_prov_user_attr where grouper_sync_internal_id = ?",
+        grouperSyncInternalId,
+        userAttributeRowData, debugMap, "loadGenericUserAttrsDel",
+        GcTableSyncPhase.DELETES_ONLY);
+
+    // sync groups
+    this.syncGenericProvisionerTable("grouper_prov_group",
+        "internal_id,grouper_sync_internal_id,group_internal_id,target_group_id,last_updated",
+        "internal_id",
+        "select internal_id,grouper_sync_internal_id,group_internal_id,target_group_id,last_updated from grouper_prov_group where grouper_sync_internal_id = ?",
+        grouperSyncInternalId,
+        groupRowData, debugMap, "loadGenericGroups");
+
+    // sync group attribute catalog: insert/update first so value rows can reference catalog rows
+    this.syncGenericProvisionerTable("grouper_prov_group_attr",
+        "internal_id,grouper_sync_internal_id,attribute_name,attribute_type,last_updated",
+        "internal_id",
+        "select internal_id,grouper_sync_internal_id,attribute_name,attribute_type,last_updated from grouper_prov_group_attr where grouper_sync_internal_id = ?",
+        grouperSyncInternalId,
+        groupAttributeRowData, debugMap, "loadGenericGroupAttrsIns",
+        GcTableSyncPhase.INSERTS_UPDATES_ONLY);
+
+    // sync group attribute values
+    this.syncGenericProvisionerTable("grouper_prov_group_attr_value",
+        "internal_id,prov_group_attr_internal_id,prov_group_internal_id,value_integer,value_dictionary_internal_id,last_updated",
+        "internal_id",
+        "select internal_id,prov_group_attr_internal_id,prov_group_internal_id,value_integer,value_dictionary_internal_id,last_updated from grouper_prov_group_attr_value where prov_group_internal_id in (select internal_id from grouper_prov_group where grouper_sync_internal_id = ?)",
+        grouperSyncInternalId,
+        groupAttributeValueRowData, debugMap, "loadGenericGroupAttrValues");
+
+    // delete obsolete catalog entries after value sync removed any rows that referenced them
+    this.syncGenericProvisionerTable("grouper_prov_group_attr",
+        "internal_id,grouper_sync_internal_id,attribute_name,attribute_type,last_updated",
+        "internal_id",
+        "select internal_id,grouper_sync_internal_id,attribute_name,attribute_type,last_updated from grouper_prov_group_attr where grouper_sync_internal_id = ?",
+        grouperSyncInternalId,
+        groupAttributeRowData, debugMap, "loadGenericGroupAttrsDel",
+        GcTableSyncPhase.DELETES_ONLY);
+    
+    // sync membership roles: insert/update first so mship can reference new roles
+    this.syncGenericProvisionerTable("grouper_prov_mship_role",
+        "internal_id,role_name,grouper_sync_internal_id,last_updated",
+        "internal_id",
+        "select internal_id,role_name,grouper_sync_internal_id,last_updated from grouper_prov_mship_role where grouper_sync_internal_id = ?",
+        grouperSyncInternalId,
+        roleRowData, debugMap, "loadGenericMshipRolesIns",
+        GcTableSyncPhase.INSERTS_UPDATES_ONLY);
+
+    // sync memberships
+    this.syncGenericProvisionerTable("grouper_prov_mship",
+        "internal_id,grouper_sync_internal_id,prov_user_internal_id,prov_group_internal_id,prov_mship_role_internal_id,last_updated",
+        "internal_id",
+        "select internal_id,grouper_sync_internal_id,prov_user_internal_id,prov_group_internal_id,prov_mship_role_internal_id,last_updated from grouper_prov_mship where grouper_sync_internal_id = ?",
+        grouperSyncInternalId,
+        membershipRowData, debugMap, "loadGenericMemberships");
+
+    // delete obsolete roles after mship sync removed any rows that referenced them
+    this.syncGenericProvisionerTable("grouper_prov_mship_role",
+        "internal_id,role_name,grouper_sync_internal_id,last_updated",
+        "internal_id",
+        "select internal_id,role_name,grouper_sync_internal_id,last_updated from grouper_prov_mship_role where grouper_sync_internal_id = ?",
+        grouperSyncInternalId,
+        roleRowData, debugMap, "loadGenericMshipRolesDel",
+        GcTableSyncPhase.DELETES_ONLY);
+  }
+
+  /**
+   * GRP-7048: read the sync-back cache (grouper_prov_user + grouper_prov_user_attr +
+   * grouper_prov_user_attr_value + grouper_dictionary) for this provisioner and rebuild the
+   * target-side {@link ProvisioningEntity} objects, so a full sync can treat the cache as the
+   * target snapshot instead of pulling every user from the target.
+   *
+   * <p>The decode is symmetric with the write path in {@link #loadDataToGenericProvisionerTables()}:
+   * string values come from the dictionary ({@code the_text}), and int/boolean/timestamp values are
+   * decoded from {@code value_integer} using {@code attribute_type}.
+   *
+   * <p>Two important behaviors:
+   * <ul>
+   *   <li>Users whose {@code grouper_sync_member} is in an error state are intentionally NOT
+   *       reconstructed. By leaving them without a target object, the normal missing-entity
+   *       re-read ({@link #retrieveIndividualMissingEntities()}) fetches fresh target state for
+   *       them.</li>
+   *   <li>Every reconstructed user is re-recorded as a native-target user
+   *       ({@code GrouperProvisioningData.getTargetUserIdToNativeUser()}), so the end-of-run
+   *       generic-table flush preserves the cache row rather than deleting a user we served from
+   *       cache but never re-read from the target.</li>
+   * </ul>
+   *
+   * @return the reconstructed target entities (one per cached, non-error user)
+   */
+  public List<ProvisioningEntity> retrieveTargetEntitiesFromSyncBack() {
+
+    List<ProvisioningEntity> result = new ArrayList<ProvisioningEntity>();
+
+    GcGrouperSync gcGrouperSync = this.getGrouperProvisioner().getGcGrouperSync();
+    if (gcGrouperSync == null || gcGrouperSync.getInternalId() == null) {
+      return result;
+    }
+    long grouperSyncInternalId = gcGrouperSync.getInternalId();
+
+    GrouperProvisioningData grouperProvisioningData = this.getGrouperProvisioner().retrieveGrouperProvisioningData();
+    GrouperProvisioningConfiguration grouperProvisioningConfiguration = this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration();
+
+    // 1) the cached users for this provisioner. We reconstruct ALL of them; users that are in the
+    // target but NOT in the cache (referenced by a membership, or otherwise needed) are the ones the
+    // existing missing-entity re-read fetches individually from the target.
+    List<Object[]> userRows = new GcDbAccess().connectionName("grouper")
+        .sql("select internal_id, target_user_id, member_internal_id from grouper_prov_user where grouper_sync_internal_id = ?")
+        .addBindVar(grouperSyncInternalId).selectList(Object[].class);
+
+    Map<Long, ProvisioningEntity> userInternalIdToEntity = new LinkedHashMap<Long, ProvisioningEntity>();
+    Map<Long, GrouperProvisioningTargetNativeUser> userInternalIdToNative = new LinkedHashMap<Long, GrouperProvisioningTargetNativeUser>();
+
+    for (Object[] userRow : GrouperUtil.nonNull(userRows)) {
+      if (userRow == null || userRow[0] == null) {
+        continue;
+      }
+      Long userInternalId = ((Number) userRow[0]).longValue();
+      String targetUserId = userRow[1] == null ? null : userRow[1].toString();
+      Long memberInternalId = userRow[2] == null ? null : ((Number) userRow[2]).longValue();
+
+      if (StringUtils.isBlank(targetUserId)) {
+        continue;
+      }
+
+      ProvisioningEntity provisioningEntity = new ProvisioningEntity();
+      provisioningEntity.setId(targetUserId);
+
+      GrouperProvisioningTargetNativeUser nativeUser = new GrouperProvisioningTargetNativeUser();
+      nativeUser.setTargetId(targetUserId);
+      nativeUser.setMemberInternalId(memberInternalId);
+
+      userInternalIdToEntity.put(userInternalId, provisioningEntity);
+      userInternalIdToNative.put(userInternalId, nativeUser);
+    }
+
+    if (userInternalIdToEntity.isEmpty()) {
+      return result;
+    }
+
+    // 2) attribute values for those users -- one set-based read scoped to this provisioner
+    // (mirrors the write-path value query), rather than batching by user id
+    Map<Long, Map<String, List<Object>>> userInternalIdToAttributeValues = new LinkedHashMap<Long, Map<String, List<Object>>>();
+    List<Object[]> attrRows = new GcDbAccess().connectionName("grouper")
+        .sql("select v.prov_user_internal_id, a.attribute_name, a.attribute_type, v.value_integer, d.the_text "
+            + "from grouper_prov_user_attr_value v "
+            + "join grouper_prov_user_attr a on a.internal_id = v.prov_user_attr_internal_id "
+            + "left join grouper_dictionary d on d.internal_id = v.value_dictionary_internal_id "
+            + "where v.prov_user_internal_id in (select internal_id from grouper_prov_user where grouper_sync_internal_id = ?)")
+        .addBindVar(grouperSyncInternalId).selectList(Object[].class);
+    for (Object[] attrRow : GrouperUtil.nonNull(attrRows)) {
+      if (attrRow == null || attrRow[0] == null || attrRow[1] == null) {
+        continue;
+      }
+      Long userInternalId = ((Number) attrRow[0]).longValue();
+      // skip attribute rows for users we didn't reconstruct (e.g. error-state users we excluded)
+      if (!userInternalIdToEntity.containsKey(userInternalId)) {
+        continue;
+      }
+      String attributeName = attrRow[1].toString();
+      String attributeType = attrRow[2] == null ? "string" : attrRow[2].toString();
+      Long valueInteger = attrRow[3] == null ? null : ((Number) attrRow[3]).longValue();
+      String theText = attrRow[4] == null ? null : attrRow[4].toString();
+
+      Object decodedValue = this.decodeSyncBackAttributeValue(attributeType, valueInteger, theText);
+
+      Map<String, List<Object>> attributeNameToValues = userInternalIdToAttributeValues.get(userInternalId);
+      if (attributeNameToValues == null) {
+        attributeNameToValues = new LinkedHashMap<String, List<Object>>();
+        userInternalIdToAttributeValues.put(userInternalId, attributeNameToValues);
+      }
+      List<Object> values = attributeNameToValues.get(attributeName);
+      if (values == null) {
+        values = new ArrayList<Object>();
+        attributeNameToValues.put(attributeName, values);
+      }
+      values.add(decodedValue);
+    }
+
+    // 3) assemble the entities and native beans
+    for (Map.Entry<Long, ProvisioningEntity> entry : userInternalIdToEntity.entrySet()) {
+      Long userInternalId = entry.getKey();
+      ProvisioningEntity provisioningEntity = entry.getValue();
+      GrouperProvisioningTargetNativeUser nativeUser = userInternalIdToNative.get(userInternalId);
+
+      Map<String, List<Object>> attributeNameToValues = userInternalIdToAttributeValues.get(userInternalId);
+      if (attributeNameToValues != null) {
+        for (Map.Entry<String, List<Object>> attributeEntry : attributeNameToValues.entrySet()) {
+          String attributeName = attributeEntry.getKey();
+          List<Object> values = attributeEntry.getValue();
+          if (GrouperUtil.length(values) == 0) {
+            continue;
+          }
+          GrouperProvisioningConfigurationAttribute configAttribute =
+              grouperProvisioningConfiguration.getTargetEntityAttributeNameToConfig().get(attributeName);
+          boolean multiValued = (configAttribute != null && configAttribute.isMultiValued()) || values.size() > 1;
+          if (multiValued) {
+            for (Object value : values) {
+              provisioningEntity.addAttributeValue(attributeName, value);
+            }
+            nativeUser.getAttributes().put(attributeName, new ArrayList<Object>(values));
+          } else {
+            provisioningEntity.assignAttributeValue(attributeName, values.get(0));
+            nativeUser.getAttributes().put(attributeName, values.get(0));
+          }
+        }
+      }
+
+      // re-record the native user so the end-of-run generic-table flush preserves this cache row
+      grouperProvisioningData.getTargetUserIdToNativeUser().put(nativeUser.getTargetId(), nativeUser);
+
+      result.add(provisioningEntity);
+    }
+
+    this.getGrouperProvisioner().getDebugMap().put("syncBackEntitiesReconstructed", result.size());
+
+    return result;
+  }
+
+  /**
+   * GRP-7048: decode a single sync-back attribute value, symmetric with the type encoding in the
+   * write path (Boolean -&gt; "boolean"/1|0, Timestamp/Date -&gt; "timestamp"/micros,
+   * Number -&gt; "int", everything else -&gt; "string" stored via the dictionary).
+   */
+  private Object decodeSyncBackAttributeValue(String attributeType, Long valueInteger, String theText) {
+    if (StringUtils.equals("int", attributeType)) {
+      return valueInteger;
+    }
+    if (StringUtils.equals("boolean", attributeType)) {
+      return valueInteger == null ? null : Boolean.valueOf(valueInteger.longValue() != 0L);
+    }
+    if (StringUtils.equals("timestamp", attributeType)) {
+      // the write path stored getTime() * 1000 (micros); reverse it back to millis
+      return valueInteger == null ? null : new Timestamp(valueInteger.longValue() / 1000L);
+    }
+    // "string" (and any unknown type): dictionary text, or empty string when both value columns
+    // were null (the write path preserves "attribute present, value empty" as null/null)
+    return theText == null ? "" : theText;
+  }
+
+  /**
+   * GRP-7048: when {@link GrouperProvisioningConfiguration#isFullSyncUsersFromSyncBack()} is on,
+   * seed the target users from the sync-back cache instead of pulling them from the target. The
+   * users that aren't in the cache yet (new) or are in an error state are intentionally left
+   * unseeded, so the existing {@link #retrieveIndividualMissingEntities()} re-reads just that
+   * (small, since the cache is kept warm by incremental sync) subset from the target.
+   *
+   * <p>By design this NEVER does a bulk "select all users" from the target -- that is exactly the
+   * expensive operation the feature exists to avoid. If a bulk-target safety valve is ever wanted
+   * (e.g. for a cold cache), it would be a separate opt-in config.
+   *
+   * <p>No-op unless the feature is enabled and this run selects entities. Called from
+   * {@link #retrieveAllData()} after Grouper data and sync objects are loaded.
+   */
+  /**
+   * GRP-7048: whether this run should resolve users from the sync-back cache. True only when the
+   * config flag is on AND the DAO advertises that its {@code retrieveAllData} honors
+   * {@code retrieveEntities=false} (see
+   * {@link GrouperProvisionerDaoCapabilities#isCanFullSyncEntitiesFromSyncBack()}). The
+   * capability guard prevents double-loading users on a DAO that would ignore the request flag.
+   */
+  public boolean isFullSyncUsersFromSyncBackEffective() {
+    if (!this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().isFullSyncUsersFromSyncBack()) {
+      return false;
+    }
+    return this.getGrouperProvisioner().retrieveGrouperProvisioningTargetDaoAdapter()
+        .getGrouperProvisionerDaoCapabilities().isCanFullSyncEntitiesFromSyncBack();
+  }
+
+  /** GRP-7048: memoized decision for this run of whether to serve entities from the sync-back cache */
+  private Boolean entitiesFromSyncBackCacheThisRun;
+
+  /**
+   * GRP-7048: whether THIS run resolves users from the sync-back cache. Cache-first: only when the
+   * feature is effective, this run selects entities, AND the cache already has users for this
+   * provisioner. A cold/empty cache returns false so the run does a normal full target pull (which
+   * repopulates the cache for next time). Memoized -- the cache count doesn't change mid-run (the
+   * generic-table flush is at the very end).
+   */
+  public boolean isEntitiesFromSyncBackCacheThisRun() {
+    if (this.entitiesFromSyncBackCacheThisRun == null) {
+      this.entitiesFromSyncBackCacheThisRun = this.computeEntitiesFromSyncBackCacheThisRun();
+      this.getGrouperProvisioner().getDebugMap().put("syncBackUsingCache", this.entitiesFromSyncBackCacheThisRun);
+    }
+    return this.entitiesFromSyncBackCacheThisRun;
+  }
+
+  private boolean computeEntitiesFromSyncBackCacheThisRun() {
+    if (!this.isFullSyncUsersFromSyncBackEffective()) {
+      return false;
+    }
+    if (!this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isSelectEntities()) {
+      return false;
+    }
+    GcGrouperSync gcGrouperSync = this.getGrouperProvisioner().getGcGrouperSync();
+    if (gcGrouperSync == null || gcGrouperSync.getInternalId() == null) {
+      // no sync row yet -> cache is necessarily empty -> full target pull
+      return false;
+    }
+    Integer cachedUserCount = new GcDbAccess().connectionName("grouper")
+        .sql("select count(1) from grouper_prov_user where grouper_sync_internal_id = ?")
+        .addBindVar(gcGrouperSync.getInternalId()).select(int.class);
+    return cachedUserCount != null && cachedUserCount > 0;
+  }
+
+  /**
+   * GRP-7048: advisory-only logging (never blocks the run) about the fullSyncUsersFromSyncBack
+   * feature. Currently warns when the feature is configured on but the target DAO does not support
+   * it (so the run silently falls back to retrieving users from the target).
+   */
+  private void logFullSyncUsersFromSyncBackAdvisories() {
+    GrouperProvisioningConfiguration configuration = this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration();
+    if (!configuration.isFullSyncUsersFromSyncBack()) {
+      return;
+    }
+    if (!this.isFullSyncUsersFromSyncBackEffective()) {
+      LOG.warn("Provisioner '" + this.getGrouperProvisioner().getConfigId()
+          + "': fullSyncUsersFromSyncBack is enabled but the target DAO does not advertise support for it "
+          + "(canFullSyncEntitiesFromSyncBack); ignoring it and retrieving users from the target normally.");
+      return;
+    }
+    this.warnMissingManagedAttributesForSyncBack("users",
+        configuration.getTargetEntityAttributeNameToConfig(),
+        this.getGrouperProvisioner().retrieveGrouperProvisioningTargetNativeSync().effectiveNativeAttributeConfigsEntities(),
+        "nativeAttributesEntities");
+  }
+
+  /**
+   * GRP-7048: groups analogue of {@link #logFullSyncUsersFromSyncBackAdvisories()} -- warn when the
+   * feature is configured but unsupported, and (when effective) when a managed group attribute is
+   * not captured into the sync-back mirror. Advisory only.
+   */
+  private void logFullSyncGroupsFromSyncBackAdvisories() {
+    GrouperProvisioningConfiguration configuration = this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration();
+    if (!configuration.isFullSyncGroupsFromSyncBack()) {
+      return;
+    }
+    if (!this.isFullSyncGroupsFromSyncBackEffective()) {
+      LOG.warn("Provisioner '" + this.getGrouperProvisioner().getConfigId()
+          + "': fullSyncGroupsFromSyncBack is enabled but the target DAO does not advertise support for it "
+          + "(canFullSyncGroupsFromSyncBack); ignoring it and retrieving groups from the target normally.");
+      return;
+    }
+    this.warnMissingManagedAttributesForSyncBack("groups",
+        configuration.getTargetGroupAttributeNameToConfig(),
+        this.getGrouperProvisioner().retrieveGrouperProvisioningTargetNativeSync().effectiveNativeAttributeConfigsGroups(),
+        "nativeAttributesGroups");
+  }
+
+  /**
+   * GRP-7048 guardrail: when a from-cache axis is effective, warn for each MANAGED target attribute
+   * (one Grouper updates -- hence compares every run) that is NOT in the effective sync-back capture
+   * set. A managed attribute missing from the shadow makes a cache-reconstructed object look changed
+   * on that attribute, triggering a spurious update on every run (and, depending on the target, worse
+   * -- e.g. a replace that nulls other fields). The operator must add it to the given
+   * nativeAttributes* config (JSON with a path for nested or renamed fields). Advisory only -- this
+   * never blocks the run. Compares by grouper attribute name (both sides use grouper names).
+   */
+  private void warnMissingManagedAttributesForSyncBack(String axisLabel,
+      Map<String, GrouperProvisioningConfigurationAttribute> targetAttributeNameToConfig,
+      List<GrouperProvisioningNativeAttributeConfig> effectiveCapture,
+      String nativeAttributesConfigKey) {
+
+    Set<String> capturedNames = new HashSet<String>();
+    if (effectiveCapture != null) {
+      for (GrouperProvisioningNativeAttributeConfig config : effectiveCapture) {
+        if (config != null && config.getName() != null) {
+          capturedNames.add(config.getName());
+        }
+      }
+    }
+
+    List<String> missing = new ArrayList<String>();
+    if (targetAttributeNameToConfig != null) {
+      for (GrouperProvisioningConfigurationAttribute attribute : targetAttributeNameToConfig.values()) {
+        // only attributes Grouper updates (and reads back to compare) can drive a spurious update
+        if (attribute == null || !attribute.isUpdate() || !attribute.isSelect()) {
+          continue;
+        }
+        if (attribute.getName() != null && !capturedNames.contains(attribute.getName())) {
+          missing.add(attribute.getName());
+        }
+      }
+    }
+
+    if (!missing.isEmpty()) {
+      LOG.warn("Provisioner '" + this.getGrouperProvisioner().getConfigId() + "': from-cache is on for "
+          + axisLabel + " but these managed attribute(s) are NOT captured into the sync-back mirror: "
+          + missing + ". A cache-reconstructed object will look changed on them and trigger a spurious "
+          + "update every run. Add them to '" + nativeAttributesConfigKey
+          + "' (use JSON with a \"path\" for nested or renamed fields).");
+    }
+  }
+
+  /**
+   * GRP-7490: take the dao's filtered list of cache-reconstructed objects, counting how many it dropped
+   * @param reconstructed what was reconstructed from the cache
+   * @param filtered what the dao returned (null means none)
+   * @param debugMapKey debug map key for the number filtered out
+   * @return the filtered list (never null)
+   */
+  private <T> List<T> filterFromSyncBack(List<T> reconstructed, List<T> filtered, String debugMapKey) {
+    List<T> result = filtered == null ? new ArrayList<T>() : filtered;
+    int filteredOut = GrouperUtil.length(reconstructed) - result.size();
+    if (filteredOut > 0) {
+      this.getGrouperProvisioner().getDebugMap().put(debugMapKey, filteredOut);
+    }
+    return result;
+  }
+
+  private void seedTargetEntitiesFromSyncBack() {
+
+    if (!this.isEntitiesFromSyncBackCacheThisRun()) {
+      return;
+    }
+
+    List<ProvisioningEntity> cachedTargetEntities = this.retrieveTargetEntitiesFromSyncBack();
+    // GRP-7490: let the dao apply the same filtering it applies to a live retrieve (the mirror keeps them)
+    cachedTargetEntities = this.filterFromSyncBack(cachedTargetEntities, this.getGrouperProvisioner()
+        .retrieveGrouperProvisioningTargetDaoAdapter().getWrappedDao().filterTargetEntitiesFromSyncBack(
+            GrouperUtil.nonNull(cachedTargetEntities)), "syncBackEntitiesFilteredByDao");
+    if (GrouperUtil.length(cachedTargetEntities) > 0) {
+      this.processTargetDataEntities(cachedTargetEntities, false);
+      for (ProvisioningEntity provisioningEntity : GrouperUtil.nonNull(cachedTargetEntities)) {
+        if (provisioningEntity.getProvisioningEntityWrapper() != null) {
+          provisioningEntity.getProvisioningEntityWrapper().getProvisioningStateEntity().setSelectResultProcessed(true);
+          // mark that this target view came from the sync-back cache, not a live target read
+          provisioningEntity.getProvisioningEntityWrapper().getProvisioningStateEntity().setReadFromSyncBackCache(true);
+        }
+      }
+    }
+  }
+
+  // ========================= GRP-7048: memberships axis =========================
+
+  /**
+   * GRP-7048: memberships analogue of {@link #isFullSyncUsersFromSyncBackEffective()} -- feature
+   * flag on AND the DAO advertises it honors {@code retrieveMemberships=false}.
+   */
+  public boolean isFullSyncMembershipsFromSyncBackEffective() {
+    if (!this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().isFullSyncMembershipsFromSyncBack()) {
+      return false;
+    }
+    return this.getGrouperProvisioner().retrieveGrouperProvisioningTargetDaoAdapter()
+        .getGrouperProvisionerDaoCapabilities().isCanFullSyncMembershipsFromSyncBack();
+  }
+
+  /** GRP-7048: memoized decision for this run of whether to serve memberships from the sync-back cache */
+  private Boolean membershipsFromSyncBackCacheThisRun;
+
+  /**
+   * GRP-7048: whether THIS run resolves memberships from the sync-back cache. Cache-first, same as
+   * the entities axis: only when the feature is effective, this run selects memberships, AND the
+   * cache already has memberships for this provisioner. A cold/empty cache does the normal target
+   * membership retrieval (which repopulates the cache).
+   */
+  public boolean isMembershipsFromSyncBackCacheThisRun() {
+    if (this.membershipsFromSyncBackCacheThisRun == null) {
+      this.membershipsFromSyncBackCacheThisRun = this.computeMembershipsFromSyncBackCacheThisRun();
+      this.getGrouperProvisioner().getDebugMap().put("syncBackUsingCacheMemberships", this.membershipsFromSyncBackCacheThisRun);
+    }
+    return this.membershipsFromSyncBackCacheThisRun;
+  }
+
+  private boolean computeMembershipsFromSyncBackCacheThisRun() {
+    if (!this.isFullSyncMembershipsFromSyncBackEffective()) {
+      return false;
+    }
+    // use the computed behavior (isSelectMembershipsInGeneral), not the raw config flag: a
+    // group-centric target selects memberships via the group pull, which isSelectMembershipsInGeneral
+    // now accounts for. Mirrors computeEntitiesFromSyncBackCacheThisRun's use of Behavior.isSelectEntities().
+    if (!this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isSelectMembershipsInGeneral()) {
+      return false;
+    }
+    GcGrouperSync gcGrouperSync = this.getGrouperProvisioner().getGcGrouperSync();
+    if (gcGrouperSync == null || gcGrouperSync.getInternalId() == null) {
+      return false;
+    }
+    Integer cachedCount = new GcDbAccess().connectionName("grouper")
+        .sql("select count(1) from grouper_prov_mship where grouper_sync_internal_id = ?")
+        .addBindVar(gcGrouperSync.getInternalId()).select(int.class);
+    return cachedCount != null && cachedCount > 0;
+  }
+
+  /**
+   * GRP-7048: reconstruct target memberships from grouper_prov_mship, resolving each row's target
+   * ids from the cached user and group rows (grouper_prov_user / grouper_prov_group). Each membership
+   * is also re-recorded as a native membership so the end-of-run generic-table flush preserves it.
+   */
+  public List<ProvisioningMembership> retrieveTargetMembershipsFromSyncBack() {
+
+    List<ProvisioningMembership> result = new ArrayList<ProvisioningMembership>();
+
+    GcGrouperSync gcGrouperSync = this.getGrouperProvisioner().getGcGrouperSync();
+    if (gcGrouperSync == null || gcGrouperSync.getInternalId() == null) {
+      return result;
+    }
+    long grouperSyncInternalId = gcGrouperSync.getInternalId();
+
+    GrouperProvisioningData grouperProvisioningData = this.getGrouperProvisioner().retrieveGrouperProvisioningData();
+
+    List<Object[]> rows = new GcDbAccess().connectionName("grouper")
+        .sql("select pg.target_group_id, pu.target_user_id "
+            + "from grouper_prov_mship pm "
+            + "join grouper_prov_user pu on pu.internal_id = pm.prov_user_internal_id "
+            + "join grouper_prov_group pg on pg.internal_id = pm.prov_group_internal_id "
+            + "where pm.grouper_sync_internal_id = ?")
+        .addBindVar(grouperSyncInternalId).selectList(Object[].class);
+
+    for (Object[] row : GrouperUtil.nonNull(rows)) {
+      if (row == null || row[0] == null || row[1] == null) {
+        continue;
+      }
+      String targetGroupId = row[0].toString();
+      String targetUserId = row[1].toString();
+      if (StringUtils.isBlank(targetGroupId) || StringUtils.isBlank(targetUserId)) {
+        continue;
+      }
+
+      ProvisioningMembership provisioningMembership = new ProvisioningMembership(false);
+      provisioningMembership.setProvisioningGroupId(targetGroupId);
+      provisioningMembership.setProvisioningEntityId(targetUserId);
+      result.add(provisioningMembership);
+
+      // re-record the native membership so the end-of-run flush preserves this cache row
+      GrouperProvisioningTargetNativeMembership nativeMembership = new GrouperProvisioningTargetNativeMembership();
+      nativeMembership.setTargetGroupId(targetGroupId);
+      nativeMembership.setTargetUserId(targetUserId);
+      grouperProvisioningData.getTargetGroupIdTargetUserIdToNativeMembership()
+          .put(new MultiKey(targetGroupId, targetUserId), nativeMembership);
+    }
+
+    this.getGrouperProvisioner().getDebugMap().put("syncBackMembershipsReconstructed", result.size());
+
+    return result;
+  }
+
+  private void seedTargetMembershipsFromSyncBack() {
+
+    if (!this.isMembershipsFromSyncBackCacheThisRun()) {
+      return;
+    }
+
+    List<ProvisioningMembership> cachedTargetMemberships = this.retrieveTargetMembershipsFromSyncBack();
+    // GRP-7490: let the dao apply the same filtering it applies to a live retrieve (the mirror keeps them)
+    cachedTargetMemberships = this.filterFromSyncBack(cachedTargetMemberships, this.getGrouperProvisioner()
+        .retrieveGrouperProvisioningTargetDaoAdapter().getWrappedDao().filterTargetMembershipsFromSyncBack(
+            GrouperUtil.nonNull(cachedTargetMemberships)), "syncBackMembershipsFilteredByDao");
+    if (GrouperUtil.length(cachedTargetMemberships) > 0) {
+      this.processTargetDataMemberships(cachedTargetMemberships, false);
+      for (ProvisioningMembership provisioningMembership : GrouperUtil.nonNull(cachedTargetMemberships)) {
+        if (provisioningMembership.getProvisioningMembershipWrapper() != null) {
+          provisioningMembership.getProvisioningMembershipWrapper().getProvisioningStateMembership().setSelectResultProcessed(true);
+          provisioningMembership.getProvisioningMembershipWrapper().getProvisioningStateMembership().setReadFromSyncBackCache(true);
+        }
+      }
+    }
+  }
+
+  // ========================= GRP-7048: groups axis =========================
+
+  /** GRP-7048: groups analogue of {@link #isFullSyncUsersFromSyncBackEffective()}. */
+  public boolean isFullSyncGroupsFromSyncBackEffective() {
+    if (!this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().isFullSyncGroupsFromSyncBack()) {
+      return false;
+    }
+    return this.getGrouperProvisioner().retrieveGrouperProvisioningTargetDaoAdapter()
+        .getGrouperProvisionerDaoCapabilities().isCanFullSyncGroupsFromSyncBack();
+  }
+
+  /** GRP-7048: memoized decision for this run of whether to serve groups from the sync-back cache */
+  private Boolean groupsFromSyncBackCacheThisRun;
+
+  /**
+   * GRP-7048: whether THIS run resolves groups from the sync-back cache. Cache-first, same as the
+   * other axes -- feature effective, this run selects groups, and the group cache is warm. PLUS a
+   * both-or-neither pairing with memberships: groups are only served from the cache when memberships
+   * are ALSO from the cache, so a target that fetches memberships by iterating groups (e.g. Okta)
+   * never loses its group list when the group pull is skipped.
+   */
+  public boolean isGroupsFromSyncBackCacheThisRun() {
+    if (this.groupsFromSyncBackCacheThisRun == null) {
+      this.groupsFromSyncBackCacheThisRun = this.computeGroupsFromSyncBackCacheThisRun();
+      this.getGrouperProvisioner().getDebugMap().put("syncBackUsingCacheGroups", this.groupsFromSyncBackCacheThisRun);
+    }
+    return this.groupsFromSyncBackCacheThisRun;
+  }
+
+  private boolean computeGroupsFromSyncBackCacheThisRun() {
+    if (!this.isFullSyncGroupsFromSyncBackEffective()) {
+      return false;
+    }
+    // computed behavior (isSelectGroupsInGeneral), not the raw config flag -- consistent with the
+    // entities/memberships compute methods (Behavior.isSelect*InGeneral)
+    if (!this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isSelectGroupsInGeneral()) {
+      return false;
+    }
+    // both-or-neither pairing with memberships -- but ONLY when the target retrieves memberships
+    // group-centrically (retrieveMembershipsByGroup / canRetrieveMembershipsAllByGroup). That loop
+    // needs the group list, and the from-cache path does not feed cached group ids into it, so we
+    // require memberships-from-cache too. A target that fetches memberships another way (by entity
+    // or all-at-once) can serve groups from the cache independently, so the coupling does not apply.
+    if (this.isMembershipRetrievalGroupCentric() && !this.isMembershipsFromSyncBackCacheThisRun()) {
+      return false;
+    }
+    GcGrouperSync gcGrouperSync = this.getGrouperProvisioner().getGcGrouperSync();
+    if (gcGrouperSync == null || gcGrouperSync.getInternalId() == null) {
+      return false;
+    }
+    Integer cachedCount = new GcDbAccess().connectionName("grouper")
+        .sql("select count(1) from grouper_prov_group where grouper_sync_internal_id = ?")
+        .addBindVar(gcGrouperSync.getInternalId()).select(int.class);
+    return cachedCount != null && cachedCount > 0;
+  }
+
+  /**
+   * GRP-7048: true if the target retrieves memberships group-centrically (implements
+   * retrieveMembershipsByGroup, i.e. declares {@code canRetrieveMembershipsAllByGroup}). That is the
+   * condition under which the groups/memberships both-or-neither pairing is needed -- see
+   * {@link #computeGroupsFromSyncBackCacheThisRun()} and the config validation.
+   */
+  private boolean isMembershipRetrievalGroupCentric() {
+    return GrouperUtil.booleanValue(this.getGrouperProvisioner().retrieveGrouperProvisioningTargetDaoAdapter()
+        .getGrouperProvisionerDaoCapabilities().getCanRetrieveMembershipsAllByGroup(), false);
+  }
+
+  /**
+   * GRP-7048: reconstruct target groups from grouper_prov_group (+ _attr / _attr_value / dictionary),
+   * mirroring {@link #retrieveTargetEntitiesFromSyncBack()}. Each group is re-recorded as a native
+   * group so the end-of-run generic-table flush preserves it.
+   */
+  public List<ProvisioningGroup> retrieveTargetGroupsFromSyncBack() {
+
+    List<ProvisioningGroup> result = new ArrayList<ProvisioningGroup>();
+
+    GcGrouperSync gcGrouperSync = this.getGrouperProvisioner().getGcGrouperSync();
+    if (gcGrouperSync == null || gcGrouperSync.getInternalId() == null) {
+      return result;
+    }
+    long grouperSyncInternalId = gcGrouperSync.getInternalId();
+
+    GrouperProvisioningData grouperProvisioningData = this.getGrouperProvisioner().retrieveGrouperProvisioningData();
+    GrouperProvisioningConfiguration grouperProvisioningConfiguration = this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration();
+
+    // 1) the cached groups for this provisioner
+    List<Object[]> groupRows = new GcDbAccess().connectionName("grouper")
+        .sql("select internal_id, target_group_id, group_internal_id from grouper_prov_group where grouper_sync_internal_id = ?")
+        .addBindVar(grouperSyncInternalId).selectList(Object[].class);
+
+    Map<Long, ProvisioningGroup> provGroupInternalIdToGroup = new LinkedHashMap<Long, ProvisioningGroup>();
+    Map<Long, GrouperProvisioningTargetNativeGroup> provGroupInternalIdToNative = new LinkedHashMap<Long, GrouperProvisioningTargetNativeGroup>();
+
+    for (Object[] groupRow : GrouperUtil.nonNull(groupRows)) {
+      if (groupRow == null || groupRow[0] == null) {
+        continue;
+      }
+      Long provGroupInternalId = ((Number) groupRow[0]).longValue();
+      String targetGroupId = groupRow[1] == null ? null : groupRow[1].toString();
+      Long groupInternalId = groupRow[2] == null ? null : ((Number) groupRow[2]).longValue();
+
+      if (StringUtils.isBlank(targetGroupId)) {
+        continue;
+      }
+
+      ProvisioningGroup provisioningGroup = new ProvisioningGroup();
+      provisioningGroup.setId(targetGroupId);
+
+      GrouperProvisioningTargetNativeGroup nativeGroup = new GrouperProvisioningTargetNativeGroup();
+      nativeGroup.setTargetId(targetGroupId);
+      nativeGroup.setGroupInternalId(groupInternalId);
+
+      provGroupInternalIdToGroup.put(provGroupInternalId, provisioningGroup);
+      provGroupInternalIdToNative.put(provGroupInternalId, nativeGroup);
+    }
+
+    if (provGroupInternalIdToGroup.isEmpty()) {
+      return result;
+    }
+
+    // 2) attribute values for those groups -- one set-based read scoped to this provisioner
+    Map<Long, Map<String, List<Object>>> provGroupInternalIdToAttributeValues = new LinkedHashMap<Long, Map<String, List<Object>>>();
+    List<Object[]> attrRows = new GcDbAccess().connectionName("grouper")
+        .sql("select v.prov_group_internal_id, a.attribute_name, a.attribute_type, v.value_integer, d.the_text "
+            + "from grouper_prov_group_attr_value v "
+            + "join grouper_prov_group_attr a on a.internal_id = v.prov_group_attr_internal_id "
+            + "left join grouper_dictionary d on d.internal_id = v.value_dictionary_internal_id "
+            + "where v.prov_group_internal_id in (select internal_id from grouper_prov_group where grouper_sync_internal_id = ?)")
+        .addBindVar(grouperSyncInternalId).selectList(Object[].class);
+    for (Object[] attrRow : GrouperUtil.nonNull(attrRows)) {
+      if (attrRow == null || attrRow[0] == null || attrRow[1] == null) {
+        continue;
+      }
+      Long provGroupInternalId = ((Number) attrRow[0]).longValue();
+      if (!provGroupInternalIdToGroup.containsKey(provGroupInternalId)) {
+        continue;
+      }
+      String attributeName = attrRow[1].toString();
+      String attributeType = attrRow[2] == null ? "string" : attrRow[2].toString();
+      Long valueInteger = attrRow[3] == null ? null : ((Number) attrRow[3]).longValue();
+      String theText = attrRow[4] == null ? null : attrRow[4].toString();
+
+      Object decodedValue = this.decodeSyncBackAttributeValue(attributeType, valueInteger, theText);
+
+      Map<String, List<Object>> attributeNameToValues = provGroupInternalIdToAttributeValues.get(provGroupInternalId);
+      if (attributeNameToValues == null) {
+        attributeNameToValues = new LinkedHashMap<String, List<Object>>();
+        provGroupInternalIdToAttributeValues.put(provGroupInternalId, attributeNameToValues);
+      }
+      List<Object> values = attributeNameToValues.get(attributeName);
+      if (values == null) {
+        values = new ArrayList<Object>();
+        attributeNameToValues.put(attributeName, values);
+      }
+      values.add(decodedValue);
+    }
+
+    // 3) assemble the groups and native beans
+    for (Map.Entry<Long, ProvisioningGroup> entry : provGroupInternalIdToGroup.entrySet()) {
+      Long provGroupInternalId = entry.getKey();
+      ProvisioningGroup provisioningGroup = entry.getValue();
+      GrouperProvisioningTargetNativeGroup nativeGroup = provGroupInternalIdToNative.get(provGroupInternalId);
+
+      Map<String, List<Object>> attributeNameToValues = provGroupInternalIdToAttributeValues.get(provGroupInternalId);
+      if (attributeNameToValues != null) {
+        for (Map.Entry<String, List<Object>> attributeEntry : attributeNameToValues.entrySet()) {
+          String attributeName = attributeEntry.getKey();
+          List<Object> values = attributeEntry.getValue();
+          if (GrouperUtil.length(values) == 0) {
+            continue;
+          }
+          GrouperProvisioningConfigurationAttribute configAttribute =
+              grouperProvisioningConfiguration.getTargetGroupAttributeNameToConfig().get(attributeName);
+          boolean multiValued = (configAttribute != null && configAttribute.isMultiValued()) || values.size() > 1;
+          if (multiValued) {
+            for (Object value : values) {
+              provisioningGroup.addAttributeValue(attributeName, value);
+            }
+            nativeGroup.getAttributes().put(attributeName, new ArrayList<Object>(values));
+          } else {
+            provisioningGroup.assignAttributeValue(attributeName, values.get(0));
+            nativeGroup.getAttributes().put(attributeName, values.get(0));
+          }
+        }
+      }
+
+      // re-record the native group so the end-of-run flush preserves this cache row
+      grouperProvisioningData.getTargetGroupIdToNativeGroup().put(nativeGroup.getTargetId(), nativeGroup);
+
+      result.add(provisioningGroup);
+    }
+
+    this.getGrouperProvisioner().getDebugMap().put("syncBackGroupsReconstructed", result.size());
+
+    return result;
+  }
+
+  private void seedTargetGroupsFromSyncBack() {
+
+    if (!this.isGroupsFromSyncBackCacheThisRun()) {
+      return;
+    }
+
+    List<ProvisioningGroup> cachedTargetGroups = this.retrieveTargetGroupsFromSyncBack();
+    // GRP-7490: let the dao apply the same filtering it applies to a live retrieve (the mirror keeps them)
+    cachedTargetGroups = this.filterFromSyncBack(cachedTargetGroups, this.getGrouperProvisioner()
+        .retrieveGrouperProvisioningTargetDaoAdapter().getWrappedDao().filterTargetGroupsFromSyncBack(
+            GrouperUtil.nonNull(cachedTargetGroups)), "syncBackGroupsFilteredByDao");
+    if (GrouperUtil.length(cachedTargetGroups) > 0) {
+      this.processTargetDataGroups(cachedTargetGroups, false);
+      for (ProvisioningGroup provisioningGroup : GrouperUtil.nonNull(cachedTargetGroups)) {
+        if (provisioningGroup.getProvisioningGroupWrapper() != null) {
+          provisioningGroup.getProvisioningGroupWrapper().getProvisioningStateGroup().setSelectResultProcessed(true);
+          provisioningGroup.getProvisioningGroupWrapper().getProvisioningStateGroup().setReadFromSyncBackCache(true);
+        }
+      }
+    }
+  }
+
+  private void loadDataToGenericProvisionerTablesIncremental() {
+
+    GrouperProvisioningBehavior behavior = this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior();
+    if (!behavior.isLoadEntitiesToGenericGrouperTable()
+        && !behavior.isLoadGroupsToGenericGrouperTable()
+        && !behavior.isLoadMembershipsToGenericGrouperTable()) {
+      return;
+    }
+
+    GcGrouperSync gcGrouperSync = this.getGrouperProvisioner().getGcGrouperSync();
+    if (gcGrouperSync == null || gcGrouperSync.getInternalId() == null) {
+      return;
+    }
+    
+    long grouperSyncInternalId = gcGrouperSync.getInternalId();
+    long nowMicros = System.currentTimeMillis() * 1000L;
+
+    // strict native-target view: incremental sync reads the same native lists populated by
+    // the DAO during its scoped target select. Empty list = nothing to do for that axis.
+    GrouperProvisioningData grouperProvisioningData = this.getGrouperProvisioner().retrieveGrouperProvisioningData();
+    List<GrouperProvisioningTargetNativeUser> targetNativeUsers = GrouperUtil.nonNull(grouperProvisioningData.getTargetNativeUsers());
+    List<GrouperProvisioningTargetNativeGroup> targetNativeGroups = GrouperUtil.nonNull(grouperProvisioningData.getTargetNativeGroups());
+    List<GrouperProvisioningTargetNativeMembership> targetNativeMemberships = GrouperUtil.nonNull(grouperProvisioningData.getTargetNativeMemberships());
+
+    Map<String, GenericProvisioningUserRecord> targetUserIdToRecord = new LinkedHashMap<String, GenericProvisioningUserRecord>();
+    for (GrouperProvisioningTargetNativeUser grouperProvisioningTargetNativeUser : targetNativeUsers) {
+      // defensive: protocol capture impls may put nulls in the map for not-found scoped retrieves
+      if (grouperProvisioningTargetNativeUser == null) {
+        continue;
+      }
+      String targetUserId = this.normalizeTargetId(grouperProvisioningTargetNativeUser.getTargetId());
+      if (StringUtils.isBlank(targetUserId)) {
+        continue;
+      }
+      GenericProvisioningUserRecord userRecord = targetUserIdToRecord.get(targetUserId);
+      if (userRecord == null) {
+        userRecord = new GenericProvisioningUserRecord(targetUserId);
+        targetUserIdToRecord.put(targetUserId, userRecord);
+      }
+      if (userRecord.getMemberInternalId() == null && grouperProvisioningTargetNativeUser.getMemberInternalId() != null) {
+        userRecord.setMemberInternalId(grouperProvisioningTargetNativeUser.getMemberInternalId());
+      }
+      for (Map.Entry<String, Object> attributeEntry : GrouperUtil.nonNull(grouperProvisioningTargetNativeUser.getAttributes()).entrySet()) {
+        this.addProvisioningAttributeValue(userRecord, attributeEntry.getKey(), attributeEntry.getValue());
+      }
+    }
+
+    Map<String, GenericProvisioningGroupRecord> targetGroupIdToRecord = new LinkedHashMap<String, GenericProvisioningGroupRecord>();
+    for (GrouperProvisioningTargetNativeGroup grouperProvisioningTargetNativeGroup : targetNativeGroups) {
+      if (grouperProvisioningTargetNativeGroup == null) {
+        continue;
+      }
+      String targetGroupId = this.normalizeTargetId(grouperProvisioningTargetNativeGroup.getTargetId());
+      if (StringUtils.isBlank(targetGroupId)) {
+        continue;
+      }
+      GenericProvisioningGroupRecord groupRecord = targetGroupIdToRecord.get(targetGroupId);
+      if (groupRecord == null) {
+        groupRecord = new GenericProvisioningGroupRecord(targetGroupId);
+        targetGroupIdToRecord.put(targetGroupId, groupRecord);
+      }
+      if (groupRecord.getGroupInternalId() == null && grouperProvisioningTargetNativeGroup.getGroupInternalId() != null) {
+        groupRecord.setGroupInternalId(grouperProvisioningTargetNativeGroup.getGroupInternalId());
+      }
+      for (Map.Entry<String, Object> attributeEntry : GrouperUtil.nonNull(grouperProvisioningTargetNativeGroup.getAttributes()).entrySet()) {
+        this.addProvisioningAttributeValue(groupRecord, attributeEntry.getKey(), attributeEntry.getValue());
+      }
+    }
+
+    List<GenericProvisioningMembershipRecord> membershipRecords = new ArrayList<GenericProvisioningMembershipRecord>();
+    for (GrouperProvisioningTargetNativeMembership grouperProvisioningTargetNativeMembership : targetNativeMemberships) {
+      if (grouperProvisioningTargetNativeMembership == null) {
+        continue;
+      }
+      String targetGroupId = StringUtils.trimToNull(grouperProvisioningTargetNativeMembership.getTargetGroupId());
+      String targetUserId = StringUtils.trimToNull(grouperProvisioningTargetNativeMembership.getTargetUserId());
+      if (StringUtils.isBlank(targetGroupId) || StringUtils.isBlank(targetUserId)) {
+        continue;
+      }
+      String roleName = StringUtils.trimToNull(grouperProvisioningTargetNativeMembership.getRoleName());
+
+      GenericProvisioningMembershipRecord membershipRecord = new GenericProvisioningMembershipRecord();
+      membershipRecord.targetGroupId = targetGroupId;
+      membershipRecord.targetUserId = targetUserId;
+      membershipRecord.roleName = roleName;
+      membershipRecords.add(membershipRecord);
+    }
+    
+    // collect membership target IDs to delete (successfully deleted from target)
+    Set<MultiKey> membershipTargetIdsToDelete = new LinkedHashSet<MultiKey>();
+    for (ProvisioningMembershipWrapper provisioningMembershipWrapper :
+        this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningMembershipWrappers()) {
+      if (!provisioningMembershipWrapper.getProvisioningStateMembership().isDeleteResultProcessed()) {
+        continue;
+      }
+      ProvisioningMembership grouperTargetMembership = provisioningMembershipWrapper.getGrouperTargetMembership();
+      if (grouperTargetMembership == null) {
+        continue;
+      }
+      String targetGroupId = this.resolveMembershipGroupId(grouperTargetMembership);
+      String targetUserId = this.resolveMembershipUserId(grouperTargetMembership);
+      if (StringUtils.isBlank(targetGroupId) || StringUtils.isBlank(targetUserId)) {
+        continue;
+      }
+      membershipTargetIdsToDelete.add(new MultiKey(targetGroupId, targetUserId));
+    }
+
+    // GRP-7475: memberships removed by a write hook (e.g. SCIM PATCH op=remove on a group's members) have no
+    // membership wrapper in a delete state, they were only dropped from the native membership map.  This flush
+    // only sees this run's map keys, so without these the removed rows stayed in grouper_prov_mship until the
+    // next full sync.
+    GrouperProvisioningData grouperProvisioningDataForMshipDeletes = this.getGrouperProvisioner().retrieveGrouperProvisioningData();
+    synchronized (grouperProvisioningDataForMshipDeletes.getTargetNativeMembershipDeletes()) {
+      for (MultiKey hookDeleteKey : grouperProvisioningDataForMshipDeletes.getTargetNativeMembershipDeletes()) {
+        String targetGroupId = StringUtils.trimToNull((String) hookDeleteKey.getKey(0));
+        String targetUserId = StringUtils.trimToNull((String) hookDeleteKey.getKey(1));
+        if (targetGroupId != null && targetUserId != null) {
+          membershipTargetIdsToDelete.add(new MultiKey(targetGroupId, targetUserId));
+        }
+      }
+    }
+    // groups whose members were replaced: the group's rows for users not in the new set are deleted below
+    Map<String, Set<String>> replacedGroupTargetIdToUserTargetIds = new LinkedHashMap<String, Set<String>>();
+    synchronized (grouperProvisioningDataForMshipDeletes.getTargetNativeMembershipReplacedGroups()) {
+      replacedGroupTargetIdToUserTargetIds.putAll(grouperProvisioningDataForMshipDeletes.getTargetNativeMembershipReplacedGroups());
+    }
+
+    // collect group target IDs to delete (successfully deleted from target)
+    Set<String> groupTargetIdsToDelete = new LinkedHashSet<String>();
+    for (ProvisioningGroupWrapper provisioningGroupWrapper : 
+        this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningGroupWrappers()) {
+      if (!provisioningGroupWrapper.getProvisioningStateGroup().isDeleteResultProcessed()) {
+        continue;
+      }
+      ProvisioningGroup grouperTargetGroup = provisioningGroupWrapper.getGrouperTargetGroup();
+      if (grouperTargetGroup == null) {
+        continue;
+      }
+      String targetGroupId = this.normalizeTargetId(grouperTargetGroup.getId());
+      if (!StringUtils.isBlank(targetGroupId)) {
+        groupTargetIdsToDelete.add(targetGroupId);
+      }
+    }
+    
+    // collect entity/user target IDs to delete (successfully deleted from target)
+    Set<String> userTargetIdsToDelete = new LinkedHashSet<String>();
+    for (ProvisioningEntityWrapper provisioningEntityWrapper : 
+        this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningEntityWrappers()) {
+      if (!provisioningEntityWrapper.getProvisioningStateEntity().isDeleteResultProcessed()) {
+        continue;
+      }
+      ProvisioningEntity grouperTargetEntity = provisioningEntityWrapper.getGrouperTargetEntity();
+      if (grouperTargetEntity == null) {
+        continue;
+      }
+      String targetUserId = this.normalizeTargetId(grouperTargetEntity.getId());
+      if (!StringUtils.isBlank(targetUserId)) {
+        userTargetIdsToDelete.add(targetUserId);
+      }
+    }
+    
+    // remove deleted groups/users from upsert maps so they don't get re-inserted
+    for (String targetGroupId : groupTargetIdsToDelete) {
+      targetGroupIdToRecord.remove(targetGroupId);
+    }
+    for (String targetUserId : userTargetIdsToDelete) {
+      targetUserIdToRecord.remove(targetUserId);
+    }
+    
+    // collect all target IDs we need to scope our DB queries to (upserts + deletes)
+    Set<String> allUserTargetIds = new LinkedHashSet<String>();
+    allUserTargetIds.addAll(targetUserIdToRecord.keySet());
+    allUserTargetIds.addAll(userTargetIdsToDelete);
+    
+    Set<String> allGroupTargetIds = new LinkedHashSet<String>();
+    allGroupTargetIds.addAll(targetGroupIdToRecord.keySet());
+    allGroupTargetIds.addAll(groupTargetIdsToDelete);
+    
+    if (GrouperUtil.length(allUserTargetIds) == 0 && GrouperUtil.length(allGroupTargetIds) == 0
+        && GrouperUtil.length(membershipRecords) == 0 && GrouperUtil.length(membershipTargetIdsToDelete) == 0
+        && GrouperUtil.length(replacedGroupTargetIdToUserTargetIds) == 0) {
+      return;
+    }
+    
+    Map<String, Object> debugMap = this.getGrouperProvisioner().getDebugMap();
+    
+    // look up existing user internal IDs from DB for the scoped target IDs
+    Map<String, Long> existingUserTargetIdToInternalId = new LinkedHashMap<String, Long>();
+    if (GrouperUtil.length(allUserTargetIds) > 0) {
+      List<String> allUserTargetIdsList = new ArrayList<String>(allUserTargetIds);
+      int batchSize = 900;
+      for (int i = 0; i < allUserTargetIdsList.size(); i += batchSize) {
+        List<String> batch = allUserTargetIdsList.subList(i, Math.min(i + batchSize, allUserTargetIdsList.size()));
+        String inClause = GrouperClientUtils.appendQuestions(batch.size());
+        GcDbAccess gcDbAccess = new GcDbAccess().connectionName("grouper");
+        gcDbAccess.sql("select internal_id, target_user_id from grouper_prov_user where grouper_sync_internal_id = ? and target_user_id in (" + inClause + ")");
+        gcDbAccess.addBindVar(grouperSyncInternalId);
+        for (String targetUserId : batch) {
+          gcDbAccess.addBindVar(targetUserId);
+        }
+        List<Object[]> rows = gcDbAccess.selectList(Object[].class);
+        for (Object[] row : rows) {
+          Long internalId = GrouperUtil.longObjectValue(row[0], false);
+          String targetUserId = GrouperUtil.stringValue(row[1]);
+          if (internalId != null && !StringUtils.isBlank(targetUserId)) {
+            existingUserTargetIdToInternalId.put(targetUserId, internalId);
+          }
+        }
+      }
+    }
+    
+    // look up existing group internal IDs from DB for the scoped target IDs
+    Map<String, Long> existingGroupTargetIdToInternalId = new LinkedHashMap<String, Long>();
+    if (GrouperUtil.length(allGroupTargetIds) > 0) {
+      List<String> allGroupTargetIdsList = new ArrayList<String>(allGroupTargetIds);
+      int batchSize = 900;
+      for (int i = 0; i < allGroupTargetIdsList.size(); i += batchSize) {
+        List<String> batch = allGroupTargetIdsList.subList(i, Math.min(i + batchSize, allGroupTargetIdsList.size()));
+        String inClause = GrouperClientUtils.appendQuestions(batch.size());
+        GcDbAccess gcDbAccess = new GcDbAccess().connectionName("grouper");
+        gcDbAccess.sql("select internal_id, target_group_id from grouper_prov_group where grouper_sync_internal_id = ? and target_group_id in (" + inClause + ")");
+        gcDbAccess.addBindVar(grouperSyncInternalId);
+        for (String targetGroupId : batch) {
+          gcDbAccess.addBindVar(targetGroupId);
+        }
+        List<Object[]> rows = gcDbAccess.selectList(Object[].class);
+        for (Object[] row : rows) {
+          Long internalId = GrouperUtil.longObjectValue(row[0], false);
+          String targetGroupId = GrouperUtil.stringValue(row[1]);
+          if (internalId != null && !StringUtils.isBlank(targetGroupId)) {
+            existingGroupTargetIdToInternalId.put(targetGroupId, internalId);
+          }
+        }
+      }
+    }
+    
+    // delete users (and cascade to attributes, attribute values, and memberships)
+    if (GrouperUtil.length(userTargetIdsToDelete) > 0) {
+      Set<Long> userInternalIdsToDelete = new LinkedHashSet<Long>();
+      for (String targetUserId : userTargetIdsToDelete) {
+        Long internalId = existingUserTargetIdToInternalId.get(targetUserId);
+        if (internalId != null) {
+          userInternalIdsToDelete.add(internalId);
+        }
+      }
+      if (GrouperUtil.length(userInternalIdsToDelete) > 0) {
+        this.deleteGenericProvisionerCascadeUser(userInternalIdsToDelete, debugMap);
+      }
+    }
+    
+    // delete groups (and cascade to attributes, attribute values, and memberships)
+    if (GrouperUtil.length(groupTargetIdsToDelete) > 0) {
+      Set<Long> groupInternalIdsToDelete = new LinkedHashSet<Long>();
+      for (String targetGroupId : groupTargetIdsToDelete) {
+        Long internalId = existingGroupTargetIdToInternalId.get(targetGroupId);
+        if (internalId != null) {
+          groupInternalIdsToDelete.add(internalId);
+        }
+      }
+      if (GrouperUtil.length(groupInternalIdsToDelete) > 0) {
+        this.deleteGenericProvisionerCascadeGroup(groupInternalIdsToDelete, debugMap);
+      }
+    }
+    
+    // delete memberships that were successfully deleted from target
+    if (GrouperUtil.length(membershipTargetIdsToDelete) > 0) {
+      int deleteCount = 0;
+      for (MultiKey membershipTargetIdKey : membershipTargetIdsToDelete) {
+        String targetGroupId = (String) membershipTargetIdKey.getKey(0);
+        String targetUserId = (String) membershipTargetIdKey.getKey(1);
+        int rowsDeleted = new GcDbAccess().connectionName("grouper")
+            .sql("delete from grouper_prov_mship where prov_user_internal_id in "
+                + "(select internal_id from grouper_prov_user where grouper_sync_internal_id = ? and target_user_id = ?) "
+                + "and prov_group_internal_id in "
+                + "(select internal_id from grouper_prov_group where grouper_sync_internal_id = ? and target_group_id = ?)")
+            .addBindVar(grouperSyncInternalId).addBindVar(targetUserId)
+            .addBindVar(grouperSyncInternalId).addBindVar(targetGroupId).executeSql();
+        deleteCount += rowsDeleted;
+      }
+      debugMap.put("loadGenericIncrMshipDeletes", deleteCount);
+    }
+
+    // GRP-7475: a group whose member list was replaced keeps only the replaced set; delete its other rows.
+    // Users in the new set that are missing a row are inserted below from the membership map as usual.
+    if (GrouperUtil.length(replacedGroupTargetIdToUserTargetIds) > 0) {
+      int deleteCount = 0;
+      for (Map.Entry<String, Set<String>> replacedGroup : replacedGroupTargetIdToUserTargetIds.entrySet()) {
+        Set<String> keepUserTargetIds = GrouperUtil.nonNull(replacedGroup.getValue());
+        // read the group's current rows and pick the ones to drop in java: the keep set can be thousands of
+        // users, too many for a sql in-list on some databases
+        List<Object[]> groupMshipRows = new GcDbAccess().connectionName("grouper")
+            .sql("select m.internal_id, u.target_user_id from grouper_prov_mship m, grouper_prov_user u, grouper_prov_group g "
+                + "where m.prov_user_internal_id = u.internal_id and m.prov_group_internal_id = g.internal_id "
+                + "and m.grouper_sync_internal_id = ? and g.target_group_id = ?")
+            .addBindVar(grouperSyncInternalId).addBindVar(replacedGroup.getKey()).selectList(Object[].class);
+        List<Long> mshipInternalIdsToDelete = new ArrayList<Long>();
+        for (Object[] groupMshipRow : GrouperUtil.nonNull(groupMshipRows)) {
+          String rowUserTargetId = groupMshipRow[1] == null ? null : groupMshipRow[1].toString();
+          if (!keepUserTargetIds.contains(rowUserTargetId)) {
+            mshipInternalIdsToDelete.add(((Number) groupMshipRow[0]).longValue());
+          }
+        }
+        int batchSize = 900;
+        for (int i = 0; i < mshipInternalIdsToDelete.size(); i += batchSize) {
+          List<Long> batch = mshipInternalIdsToDelete.subList(i, Math.min(i + batchSize, mshipInternalIdsToDelete.size()));
+          GcDbAccess gcDbAccess = new GcDbAccess().connectionName("grouper")
+              .sql("delete from grouper_prov_mship where internal_id in (" + GrouperClientUtils.appendQuestions(batch.size()) + ")");
+          for (Long mshipInternalId : batch) {
+            gcDbAccess.addBindVar(mshipInternalId);
+          }
+          deleteCount += gcDbAccess.executeSql();
+        }
+      }
+      debugMap.put("loadGenericIncrMshipReplaceDeletes", deleteCount);
+    }
+    
+    // now handle upserts for users, groups, attributes, attribute values, memberships
+    // reuse existing internal IDs for rows that already exist; reserve new ones for new rows
+    for (GenericProvisioningUserRecord userRecord : targetUserIdToRecord.values()) {
+      Long existingInternalId = existingUserTargetIdToInternalId.get(userRecord.getTargetId());
+      if (existingInternalId != null) {
+        userRecord.setInternalId(existingInternalId);
+      }
+    }
+    // assign new internal IDs only for users that don't have existing ones
+    {
+      List<GenericProvisioningUserRecord> newUserRecords = new ArrayList<GenericProvisioningUserRecord>();
+      for (GenericProvisioningUserRecord userRecord : targetUserIdToRecord.values()) {
+        if (userRecord.getInternalId() == 0) {
+          newUserRecords.add(userRecord);
+        }
+      }
+      if (GrouperUtil.length(newUserRecords) > 0) {
+        List<Long> newInternalIds = TableIndex.reserveIds(TableIndexType.provUser, newUserRecords.size());
+        for (int i = 0; i < newUserRecords.size(); i++) {
+          newUserRecords.get(i).setInternalId(newInternalIds.get(i));
+        }
+      }
+    }
+    
+    for (GenericProvisioningGroupRecord groupRecord : targetGroupIdToRecord.values()) {
+      Long existingInternalId = existingGroupTargetIdToInternalId.get(groupRecord.getTargetId());
+      if (existingInternalId != null) {
+        groupRecord.setInternalId(existingInternalId);
+      }
+    }
+    // assign new internal IDs only for groups that don't have existing ones
+    {
+      List<GenericProvisioningGroupRecord> newGroupRecords = new ArrayList<GenericProvisioningGroupRecord>();
+      for (GenericProvisioningGroupRecord groupRecord : targetGroupIdToRecord.values()) {
+        if (groupRecord.getInternalId() == 0) {
+          newGroupRecords.add(groupRecord);
+        }
+      }
+      if (GrouperUtil.length(newGroupRecords) > 0) {
+        List<Long> newInternalIds = TableIndex.reserveIds(TableIndexType.provGroup, newGroupRecords.size());
+        for (int i = 0; i < newGroupRecords.size(); i++) {
+          newGroupRecords.get(i).setInternalId(newInternalIds.get(i));
+        }
+      }
+    }
+
+    // populate the Grouper-side linkage columns (member_internal_id / group_internal_id) on
+    // the records by looking up the in-memory wrappers. Target-side orphans (target_ids the
+    // daemon never processed) won't appear in the wrappers and stay null.
+    this.resolveGrouperMemberInternalIdsForUsers(targetUserIdToRecord);
+    this.resolveGrouperGroupInternalIdsForGroups(targetGroupIdToRecord);
+
+    Map<String, GenericProvisioningAttrCatalog> userAttrCatalog = new LinkedHashMap<String, GenericProvisioningAttrCatalog>();
+    Map<String, GenericProvisioningAttrCatalog> groupAttrCatalog = new LinkedHashMap<String, GenericProvisioningAttrCatalog>();
+
+    // pre-fetch existing catalog rows so we reuse internal_ids for names that already exist.
+    // unique constraint is on (grouper_sync_internal_id, attribute_name); reusing prevents
+    // duplicate-key collisions on subsequent runs.
+    Map<String, Long> existingUserAttrCatalogIds = this.fetchExistingAttrCatalogIds(
+        "grouper_prov_user_attr", grouperSyncInternalId);
+    Map<String, Long> existingGroupAttrCatalogIds = this.fetchExistingAttrCatalogIds(
+        "grouper_prov_group_attr", grouperSyncInternalId);
+
+    List<GenericProvisioningAttributeRecord> userAttributeRecords = this.buildProvisioningAttributeRecords(
+        targetUserIdToRecord, userAttrCatalog, TableIndexType.provUserAttr, existingUserAttrCatalogIds);
+    List<GenericProvisioningAttributeRecord> groupAttributeRecords = this.buildProvisioningAttributeRecords(
+        targetGroupIdToRecord, groupAttrCatalog, TableIndexType.provGroupAttr, existingGroupAttrCatalogIds);
+
+    Set<String> stringValues = new LinkedHashSet<String>();
+    this.addProvisioningStringValues(userAttributeRecords, stringValues);
+    this.addProvisioningStringValues(groupAttributeRecords, stringValues);
+    Map<String, Long> valueStringToDictionaryInternalId = GrouperDictionaryDao.findOrAdd(stringValues);
+
+    // build user row data
+    List<Object[]> userRowData = new ArrayList<Object[]>();
+    for (GenericProvisioningUserRecord userRecord : targetUserIdToRecord.values()) {
+      userRowData.add(new Object[] {userRecord.getInternalId(), grouperSyncInternalId, userRecord.getMemberInternalId(), userRecord.getTargetId(), nowMicros});
+    }
+
+    // build group row data
+    List<Object[]> groupRowData = new ArrayList<Object[]>();
+    for (GenericProvisioningGroupRecord groupRecord : targetGroupIdToRecord.values()) {
+      groupRowData.add(new Object[] {groupRecord.getInternalId(), grouperSyncInternalId, groupRecord.getGroupInternalId(), groupRecord.getTargetId(), nowMicros});
+    }
+
+    // build user attribute catalog row data (one row per distinct attribute_name)
+    List<Object[]> userAttributeRowData = this.buildProvisioningAttrCatalogRowData(userAttrCatalog, grouperSyncInternalId, nowMicros);
+
+    // build group attribute catalog row data (one row per distinct attribute_name)
+    List<Object[]> groupAttributeRowData = this.buildProvisioningAttrCatalogRowData(groupAttrCatalog, grouperSyncInternalId, nowMicros);
+
+    // build user attribute value row data
+    List<Object[]> userAttributeValueRowData = this.buildProvisioningAttributeValueRowData(
+        userAttributeRecords, TableIndexType.provUserAttrValue, valueStringToDictionaryInternalId, nowMicros);
+
+    // build group attribute value row data
+    List<Object[]> groupAttributeValueRowData = this.buildProvisioningAttributeValueRowData(
+        groupAttributeRecords, TableIndexType.provGroupAttrValue, valueStringToDictionaryInternalId, nowMicros);
+
+    // build role row data (roles only accumulate, no deletes)
+    // always include the default role so every membership has a non-null role FK
+    Map<String, Long> roleNameToInternalId = new LinkedHashMap<String, Long>();
+    Set<String> roleNames = new LinkedHashSet<String>();
+    roleNames.add(DEFAULT_MSHIP_ROLE_NAME);
+    for (GenericProvisioningMembershipRecord membershipRecord : membershipRecords) {
+      if (membershipRecord.roleName != null) {
+        roleNames.add(membershipRecord.roleName);
+      }
+    }
+
+    // look up existing roles first
+    Map<String, Long> existingRoleNameToInternalId = new LinkedHashMap<String, Long>();
+    List<Object[]> existingRoles = new GcDbAccess().connectionName("grouper")
+        .sql("select internal_id, role_name from grouper_prov_mship_role where grouper_sync_internal_id = ?")
+        .addBindVar(grouperSyncInternalId).selectList(Object[].class);
+    for (Object[] row : existingRoles) {
+      Long internalId = GrouperUtil.longObjectValue(row[0], false);
+      String roleName = GrouperUtil.stringValue(row[1]);
+      if (internalId != null && !StringUtils.isBlank(roleName)) {
+        existingRoleNameToInternalId.put(roleName, internalId);
+      }
+    }
+    
+    Set<String> newRoleNames = new LinkedHashSet<String>();
+    for (String roleName : roleNames) {
+      Long existingInternalId = existingRoleNameToInternalId.get(roleName);
+      if (existingInternalId != null) {
+        roleNameToInternalId.put(roleName, existingInternalId);
+      } else {
+        newRoleNames.add(roleName);
+      }
+    }
+    if (GrouperUtil.length(newRoleNames) > 0) {
+      List<String> newRoleNamesList = new ArrayList<String>(newRoleNames);
+      List<Long> roleInternalIds = TableIndex.reserveIds(TableIndexType.provMshipRole, newRoleNamesList.size());
+      for (int i = 0; i < newRoleNamesList.size(); i++) {
+        roleNameToInternalId.put(newRoleNamesList.get(i), roleInternalIds.get(i));
+      }
+    }
+    
+    List<Object[]> roleRowData = new ArrayList<Object[]>();
+    for (String roleName : newRoleNames) {
+      roleRowData.add(new Object[] {roleNameToInternalId.get(roleName), roleName, grouperSyncInternalId, nowMicros});
+    }
+    
+    // collect all user/group target IDs referenced by memberships that are not already in the record maps
+    Set<String> membershipUserTargetIdsToLookup = new LinkedHashSet<String>();
+    Set<String> membershipGroupTargetIdsToLookup = new LinkedHashSet<String>();
+    for (GenericProvisioningMembershipRecord membershipRecord : membershipRecords) {
+      if (!targetUserIdToRecord.containsKey(membershipRecord.targetUserId)) {
+        membershipUserTargetIdsToLookup.add(membershipRecord.targetUserId);
+      }
+      if (!targetGroupIdToRecord.containsKey(membershipRecord.targetGroupId)) {
+        membershipGroupTargetIdsToLookup.add(membershipRecord.targetGroupId);
+      }
+    }
+    
+    // look up internal IDs for membership user target IDs not in the record maps
+    Map<String, Long> membershipUserTargetIdToInternalId = new LinkedHashMap<String, Long>();
+    if (GrouperUtil.length(membershipUserTargetIdsToLookup) > 0) {
+      List<String> lookupList = new ArrayList<String>(membershipUserTargetIdsToLookup);
+      int batchSize = 900;
+      for (int i = 0; i < lookupList.size(); i += batchSize) {
+        List<String> batch = lookupList.subList(i, Math.min(i + batchSize, lookupList.size()));
+        String inClause = GrouperClientUtils.appendQuestions(batch.size());
+        GcDbAccess gcDbAccess = new GcDbAccess().connectionName("grouper");
+        gcDbAccess.sql("select internal_id, target_user_id from grouper_prov_user where grouper_sync_internal_id = ? and target_user_id in (" + inClause + ")");
+        gcDbAccess.addBindVar(grouperSyncInternalId);
+        for (String targetUserId : batch) {
+          gcDbAccess.addBindVar(targetUserId);
+        }
+        List<Object[]> rows = gcDbAccess.selectList(Object[].class);
+        for (Object[] row : rows) {
+          Long internalId = GrouperUtil.longObjectValue(row[0], false);
+          String targetUserId = GrouperUtil.stringValue(row[1]);
+          if (internalId != null && !StringUtils.isBlank(targetUserId)) {
+            membershipUserTargetIdToInternalId.put(targetUserId, internalId);
+          }
+        }
+      }
+    }
+    
+    // look up internal IDs for membership group target IDs not in the record maps
+    Map<String, Long> membershipGroupTargetIdToInternalId = new LinkedHashMap<String, Long>();
+    if (GrouperUtil.length(membershipGroupTargetIdsToLookup) > 0) {
+      List<String> lookupList = new ArrayList<String>(membershipGroupTargetIdsToLookup);
+      int batchSize = 900;
+      for (int i = 0; i < lookupList.size(); i += batchSize) {
+        List<String> batch = lookupList.subList(i, Math.min(i + batchSize, lookupList.size()));
+        String inClause = GrouperClientUtils.appendQuestions(batch.size());
+        GcDbAccess gcDbAccess = new GcDbAccess().connectionName("grouper");
+        gcDbAccess.sql("select internal_id, target_group_id from grouper_prov_group where grouper_sync_internal_id = ? and target_group_id in (" + inClause + ")");
+        gcDbAccess.addBindVar(grouperSyncInternalId);
+        for (String targetGroupId : batch) {
+          gcDbAccess.addBindVar(targetGroupId);
+        }
+        List<Object[]> rows = gcDbAccess.selectList(Object[].class);
+        for (Object[] row : rows) {
+          Long internalId = GrouperUtil.longObjectValue(row[0], false);
+          String targetGroupId = GrouperUtil.stringValue(row[1]);
+          if (internalId != null && !StringUtils.isBlank(targetGroupId)) {
+            membershipGroupTargetIdToInternalId.put(targetGroupId, internalId);
+          }
+        }
+      }
+    }
+    
+    // build membership row data
+    List<Object[]> membershipRowData = new ArrayList<Object[]>();
+    if (GrouperUtil.length(membershipRecords) > 0) {
+      List<Long> membershipInternalIds = TableIndex.reserveIds(TableIndexType.provMship, membershipRecords.size());
+      for (int i = 0; i < membershipRecords.size(); i++) {
+        GenericProvisioningMembershipRecord membershipRecord = membershipRecords.get(i);
+        
+        Long userInternalId = null;
+        GenericProvisioningUserRecord userRecord = targetUserIdToRecord.get(membershipRecord.targetUserId);
+        if (userRecord != null) {
+          userInternalId = userRecord.getInternalId();
+        } else {
+          userInternalId = membershipUserTargetIdToInternalId.get(membershipRecord.targetUserId);
+        }
+        
+        Long groupInternalId = null;
+        GenericProvisioningGroupRecord groupRecord = targetGroupIdToRecord.get(membershipRecord.targetGroupId);
+        if (groupRecord != null) {
+          groupInternalId = groupRecord.getInternalId();
+        } else {
+          groupInternalId = membershipGroupTargetIdToInternalId.get(membershipRecord.targetGroupId);
+        }
+        
+        String effectiveRoleName = membershipRecord.roleName != null ? membershipRecord.roleName : DEFAULT_MSHIP_ROLE_NAME;
+        Long roleInternalId = roleNameToInternalId.get(effectiveRoleName);
+        if (userInternalId == null || groupInternalId == null) {
+          continue;
+        }
+        membershipRowData.add(new Object[] {membershipInternalIds.get(i), grouperSyncInternalId, userInternalId,
+            groupInternalId, roleInternalId, nowMicros});
+      }
+    }
+    
+    // sync users (scoped to the target IDs involved)
+    if (GrouperUtil.length(allUserTargetIds) > 0) {
+      this.syncGenericProvisionerTableIncremental("grouper_prov_user",
+          "internal_id,grouper_sync_internal_id,member_internal_id,target_user_id,last_updated",
+          "internal_id",
+          grouperSyncInternalId, "target_user_id", allUserTargetIds,
+          userRowData, debugMap, "loadGenericIncrUsers");
+    }
+    
+    // sync user attribute catalog (per provisioner): insert/update only — never delete in incremental
+    if (GrouperUtil.length(userAttributeRowData) > 0) {
+      this.syncGenericProvisionerTable("grouper_prov_user_attr",
+          "internal_id,grouper_sync_internal_id,attribute_name,attribute_type,last_updated",
+          "internal_id",
+          "select internal_id,grouper_sync_internal_id,attribute_name,attribute_type,last_updated from grouper_prov_user_attr where grouper_sync_internal_id = ?",
+          grouperSyncInternalId,
+          userAttributeRowData, debugMap, "loadGenericIncrUserAttrs",
+          GcTableSyncPhase.INSERTS_UPDATES_ONLY);
+    }
+
+    // sync user attribute values (scoped to the user internal IDs involved)
+    Set<Long> allUserInternalIds = new LinkedHashSet<Long>();
+    for (GenericProvisioningUserRecord userRecord : targetUserIdToRecord.values()) {
+      allUserInternalIds.add(userRecord.getInternalId());
+    }
+    if (GrouperUtil.length(allUserInternalIds) > 0) {
+      this.syncGenericProvisionerTableByInternalIds("grouper_prov_user_attr_value",
+          "internal_id,prov_user_attr_internal_id,prov_user_internal_id,value_integer,value_dictionary_internal_id,last_updated",
+          "internal_id",
+          "prov_user_internal_id", allUserInternalIds,
+          userAttributeValueRowData, debugMap, "loadGenericIncrUserAttrValues");
+    }
+
+    // sync groups (scoped to the target IDs involved)
+    if (GrouperUtil.length(allGroupTargetIds) > 0) {
+      this.syncGenericProvisionerTableIncremental("grouper_prov_group",
+          "internal_id,grouper_sync_internal_id,group_internal_id,target_group_id,last_updated",
+          "internal_id",
+          grouperSyncInternalId, "target_group_id", allGroupTargetIds,
+          groupRowData, debugMap, "loadGenericIncrGroups");
+    }
+
+    // sync group attribute catalog (per provisioner): insert/update only — never delete in incremental
+    if (GrouperUtil.length(groupAttributeRowData) > 0) {
+      this.syncGenericProvisionerTable("grouper_prov_group_attr",
+          "internal_id,grouper_sync_internal_id,attribute_name,attribute_type,last_updated",
+          "internal_id",
+          "select internal_id,grouper_sync_internal_id,attribute_name,attribute_type,last_updated from grouper_prov_group_attr where grouper_sync_internal_id = ?",
+          grouperSyncInternalId,
+          groupAttributeRowData, debugMap, "loadGenericIncrGroupAttrs",
+          GcTableSyncPhase.INSERTS_UPDATES_ONLY);
+    }
+
+    // sync group attribute values (scoped to the group internal IDs involved)
+    Set<Long> allGroupInternalIds = new LinkedHashSet<Long>();
+    for (GenericProvisioningGroupRecord groupRecord : targetGroupIdToRecord.values()) {
+      allGroupInternalIds.add(groupRecord.getInternalId());
+    }
+    if (GrouperUtil.length(allGroupInternalIds) > 0) {
+      this.syncGenericProvisionerTableByInternalIds("grouper_prov_group_attr_value",
+          "internal_id,prov_group_attr_internal_id,prov_group_internal_id,value_integer,value_dictionary_internal_id,last_updated",
+          "internal_id",
+          "prov_group_internal_id", allGroupInternalIds,
+          groupAttributeValueRowData, debugMap, "loadGenericIncrGroupAttrValues");
+    }
+    
+    // insert new roles only (no sync needed, roles only accumulate)
+    if (GrouperUtil.length(roleRowData) > 0) {
+      for (Object[] row : roleRowData) {
+        new GcDbAccess().connectionName("grouper")
+            .sql("insert into grouper_prov_mship_role (internal_id, role_name, grouper_sync_internal_id, last_updated) values (?, ?, ?, ?)")
+            .addBindVar(row[0]).addBindVar(row[1]).addBindVar(row[2]).addBindVar(row[3]).executeSql();
+      }
+      debugMap.put("loadGenericIncrMshipRoleInserts", roleRowData.size());
+    }
+    
+    // insert new memberships (deletes are already handled above via isDeleteResultProcessed)
+    if (GrouperUtil.length(membershipRowData) > 0) {
+      int insertCount = 0;
+      for (Object[] row : membershipRowData) {
+        Long userInternalId = GrouperUtil.longObjectValue(row[2], false);
+        Long groupInternalId = GrouperUtil.longObjectValue(row[3], false);
+        // check if this membership already exists in the DB
+        int existingCount = new GcDbAccess().connectionName("grouper")
+            .sql("select count(*) from grouper_prov_mship where grouper_sync_internal_id = ? and prov_user_internal_id = ? and prov_group_internal_id = ?")
+            .addBindVar(grouperSyncInternalId).addBindVar(userInternalId).addBindVar(groupInternalId)
+            .select(int.class);
+        if (existingCount == 0) {
+          new GcDbAccess().connectionName("grouper")
+              .sql("insert into grouper_prov_mship (internal_id, grouper_sync_internal_id, prov_user_internal_id, prov_group_internal_id, prov_mship_role_internal_id, last_updated) values (?, ?, ?, ?, ?, ?)")
+              .addBindVar(row[0]).addBindVar(row[1]).addBindVar(row[2]).addBindVar(row[3]).addBindVar(row[4]).addBindVar(row[5])
+              .executeSql();
+          insertCount++;
+        }
+      }
+      debugMap.put("loadGenericIncrMshipInserts", insertCount);
+    }
+  }
+  
+  private void deleteGenericProvisionerCascadeUser(Set<Long> userInternalIds, Map<String, Object> debugMap) {
+    int deleteCount = 0;
+    List<Long> userInternalIdsList = new ArrayList<Long>(userInternalIds);
+    int batchSize = 900;
+    for (int i = 0; i < userInternalIdsList.size(); i += batchSize) {
+      List<Long> batch = userInternalIdsList.subList(i, Math.min(i + batchSize, userInternalIdsList.size()));
+      String inClause = GrouperClientUtils.appendQuestions(batch.size());
+      
+      // delete user (attributes, attribute values, and memberships cascade-deleted by DB)
+      GcDbAccess gcDbAccess = new GcDbAccess().connectionName("grouper");
+      gcDbAccess.sql("delete from grouper_prov_user where internal_id in (" + inClause + ")");
+      for (Long internalId : batch) {
+        gcDbAccess.addBindVar(internalId);
+      }
+      gcDbAccess.executeSql();
+      
+      deleteCount += batch.size();
+    }
+    debugMap.put("loadGenericIncrUserDeletes", deleteCount);
+  }
+  
+  private void deleteGenericProvisionerCascadeGroup(Set<Long> groupInternalIds, Map<String, Object> debugMap) {
+    int deleteCount = 0;
+    List<Long> groupInternalIdsList = new ArrayList<Long>(groupInternalIds);
+    int batchSize = 900;
+    for (int i = 0; i < groupInternalIdsList.size(); i += batchSize) {
+      List<Long> batch = groupInternalIdsList.subList(i, Math.min(i + batchSize, groupInternalIdsList.size()));
+      String inClause = GrouperClientUtils.appendQuestions(batch.size());
+      
+      // delete group (attributes, attribute values, and memberships cascade-deleted by DB)
+      GcDbAccess gcDbAccess = new GcDbAccess().connectionName("grouper");
+      gcDbAccess.sql("delete from grouper_prov_group where internal_id in (" + inClause + ")");
+      for (Long internalId : batch) {
+        gcDbAccess.addBindVar(internalId);
+      }
+      gcDbAccess.executeSql();
+      
+      deleteCount += batch.size();
+    }
+    debugMap.put("loadGenericIncrGroupDeletes", deleteCount);
+  }
+  
+  private void syncGenericProvisionerTableIncremental(String tableName, String columns, String primaryKeyColumns,
+      long grouperSyncInternalId, String targetIdColumn, Set<String> targetIds,
+      List<Object[]> targetRowData, Map<String, Object> debugMap, String debugKeyPrefix) {
+    
+    GcTableSync gcTableSync = new GcTableSync();
+    
+    GcTableSyncTableBean gcTableSyncTableBeanSql = new GcTableSyncTableBean(gcTableSync);
+    gcTableSyncTableBeanSql.configureMetadata("grouper", tableName);
+    gcTableSync.setDataBeanTo(gcTableSyncTableBeanSql);
+    
+    GcTableSyncTableMetadata gcTableSyncTableMetadata = gcTableSyncTableBeanSql.getTableMetadata();
+    gcTableSyncTableMetadata.assignColumns(columns);
+    gcTableSyncTableMetadata.assignPrimaryKeyColumns(primaryKeyColumns);
+    
+    // select only the rows matching the scoped target IDs
+    List<Object[]> existingResults = new ArrayList<Object[]>();
+    List<String> targetIdsList = new ArrayList<String>(targetIds);
+    int batchSize = 900;
+    for (int i = 0; i < targetIdsList.size(); i += batchSize) {
+      List<String> batch = targetIdsList.subList(i, Math.min(i + batchSize, targetIdsList.size()));
+      String inClause = GrouperClientUtils.appendQuestions(batch.size());
+      GcDbAccess gcDbAccess = new GcDbAccess().connectionName("grouper");
+      gcDbAccess.sql("select " + columns + " from " + tableName + " where grouper_sync_internal_id = ? and " + targetIdColumn + " in (" + inClause + ")");
+      gcDbAccess.addBindVar(grouperSyncInternalId);
+      for (String targetId : batch) {
+        gcDbAccess.addBindVar(targetId);
+      }
+      existingResults.addAll(gcDbAccess.selectList(Object[].class));
+    }
+    
+    GcTableSyncTableData gcTableSyncTableDataSql = new GcTableSyncTableData();
+    gcTableSyncTableDataSql.init(gcTableSyncTableBeanSql,
+        gcTableSyncTableMetadata.lookupColumns(gcTableSyncTableBeanSql.getTableMetadata().columnListAll()),
+        existingResults);
+    gcTableSyncTableDataSql.indexData();
+    
+    gcTableSyncTableBeanSql.setDataInitialQuery(gcTableSyncTableDataSql);
+    gcTableSyncTableBeanSql.setGcTableSync(gcTableSync);
+    
+    debugMap.put(debugKeyPrefix + "DbUniqueKeys", gcTableSyncTableDataSql.allPrimaryKeys().size());
+    
+    GcTableSyncTableBean gcTableSyncTableBeanFrom = new GcTableSyncTableBean();
+    gcTableSync.setDataBeanFrom(gcTableSyncTableBeanFrom);
+    gcTableSyncTableBeanFrom.setTableMetadata(gcTableSyncTableBeanSql.getTableMetadata());
+    gcTableSyncTableBeanFrom.setGcTableSync(gcTableSync);
+    
+    GcTableSyncTableData gcTableSyncTableDataFrom = new GcTableSyncTableData();
+    gcTableSync.getDataBeanFrom().setDataInitialQuery(gcTableSyncTableDataFrom);
+    // Build the FROM side with init() rather than setRows().  init() runs every row through
+    // GcTableSyncTableData.normalizeRow(), which coerces each value to the canonical java type
+    // of its column; setRows() stores the rows verbatim.  The TO side is always built with
+    // init() (it comes back through a jdbc driver), so skipping it here left the two sides
+    // holding the same id as different types - a Long we reserved in memory vs the BigDecimal
+    // the driver hands back.  MultiKey compares with equals(), and Long.equals(BigDecimal) is
+    // always false, so every TO row looked absent from FROM and a DELETES_ONLY pass deleted the
+    // rows the immediately preceding INSERTS_UPDATES_ONLY pass had just written.
+    gcTableSyncTableDataFrom.init(gcTableSyncTableDataSql.getGcTableSyncTableBean(),
+        gcTableSyncTableDataSql.getColumnMetadata(), targetRowData);
+    
+    GcTableSyncConfiguration gcTableSyncConfiguration = new GcTableSyncConfiguration();
+    gcTableSync.setGcTableSyncConfiguration(gcTableSyncConfiguration);
+    gcTableSync.setGcTableSyncOutput(new GcTableSyncOutput());
+    
+    Map<String, Object> debugMapLocal = new LinkedHashMap<String, Object>();
+    GcTableSyncSubtype.fullSyncFull.syncData(debugMapLocal, gcTableSync);
+    
+    for (String key : debugMapLocal.keySet()) {
+      Object newValue = debugMapLocal.get(key);
+      if (key.endsWith("Millis")) {
+        if (newValue instanceof Number) {
+          newValue = ((Number)newValue).longValue()/1000;
+        }
+      }
+      String newKey = debugKeyPrefix + StringUtils.capitalize(key);
+      debugMap.put(newKey, newValue);
+    }
+  }
+  
+  private void syncGenericProvisionerTableByInternalIds(String tableName, String columns, String primaryKeyColumns,
+      String foreignKeyColumn, Set<Long> foreignKeyIds,
+      List<Object[]> targetRowData, Map<String, Object> debugMap, String debugKeyPrefix) {
+    
+    GcTableSync gcTableSync = new GcTableSync();
+    
+    GcTableSyncTableBean gcTableSyncTableBeanSql = new GcTableSyncTableBean(gcTableSync);
+    gcTableSyncTableBeanSql.configureMetadata("grouper", tableName);
+    gcTableSync.setDataBeanTo(gcTableSyncTableBeanSql);
+    
+    GcTableSyncTableMetadata gcTableSyncTableMetadata = gcTableSyncTableBeanSql.getTableMetadata();
+    gcTableSyncTableMetadata.assignColumns(columns);
+    gcTableSyncTableMetadata.assignPrimaryKeyColumns(primaryKeyColumns);
+    
+    List<Object[]> existingResults = new ArrayList<Object[]>();
+    List<Long> foreignKeyIdsList = new ArrayList<Long>(foreignKeyIds);
+    int batchSize = 900;
+    for (int i = 0; i < foreignKeyIdsList.size(); i += batchSize) {
+      List<Long> batch = foreignKeyIdsList.subList(i, Math.min(i + batchSize, foreignKeyIdsList.size()));
+      String inClause = GrouperClientUtils.appendQuestions(batch.size());
+      GcDbAccess gcDbAccess = new GcDbAccess().connectionName("grouper");
+      gcDbAccess.sql("select " + columns + " from " + tableName + " where " + foreignKeyColumn + " in (" + inClause + ")");
+      for (Long foreignKeyId : batch) {
+        gcDbAccess.addBindVar(foreignKeyId);
+      }
+      existingResults.addAll(gcDbAccess.selectList(Object[].class));
+    }
+    
+    GcTableSyncTableData gcTableSyncTableDataSql = new GcTableSyncTableData();
+    gcTableSyncTableDataSql.init(gcTableSyncTableBeanSql,
+        gcTableSyncTableMetadata.lookupColumns(gcTableSyncTableBeanSql.getTableMetadata().columnListAll()),
+        existingResults);
+    gcTableSyncTableDataSql.indexData();
+    
+    gcTableSyncTableBeanSql.setDataInitialQuery(gcTableSyncTableDataSql);
+    gcTableSyncTableBeanSql.setGcTableSync(gcTableSync);
+    
+    debugMap.put(debugKeyPrefix + "DbUniqueKeys", gcTableSyncTableDataSql.allPrimaryKeys().size());
+    
+    GcTableSyncTableBean gcTableSyncTableBeanFrom = new GcTableSyncTableBean();
+    gcTableSync.setDataBeanFrom(gcTableSyncTableBeanFrom);
+    gcTableSyncTableBeanFrom.setTableMetadata(gcTableSyncTableBeanSql.getTableMetadata());
+    gcTableSyncTableBeanFrom.setGcTableSync(gcTableSync);
+    
+    GcTableSyncTableData gcTableSyncTableDataFrom = new GcTableSyncTableData();
+    gcTableSync.getDataBeanFrom().setDataInitialQuery(gcTableSyncTableDataFrom);
+    // Build the FROM side with init() rather than setRows().  init() runs every row through
+    // GcTableSyncTableData.normalizeRow(), which coerces each value to the canonical java type
+    // of its column; setRows() stores the rows verbatim.  The TO side is always built with
+    // init() (it comes back through a jdbc driver), so skipping it here left the two sides
+    // holding the same id as different types - a Long we reserved in memory vs the BigDecimal
+    // the driver hands back.  MultiKey compares with equals(), and Long.equals(BigDecimal) is
+    // always false, so every TO row looked absent from FROM and a DELETES_ONLY pass deleted the
+    // rows the immediately preceding INSERTS_UPDATES_ONLY pass had just written.
+    gcTableSyncTableDataFrom.init(gcTableSyncTableDataSql.getGcTableSyncTableBean(),
+        gcTableSyncTableDataSql.getColumnMetadata(), targetRowData);
+    
+    GcTableSyncConfiguration gcTableSyncConfiguration = new GcTableSyncConfiguration();
+    gcTableSync.setGcTableSyncConfiguration(gcTableSyncConfiguration);
+    gcTableSync.setGcTableSyncOutput(new GcTableSyncOutput());
+    
+    Map<String, Object> debugMapLocal = new LinkedHashMap<String, Object>();
+    GcTableSyncSubtype.fullSyncFull.syncData(debugMapLocal, gcTableSync);
+    
+    for (String key : debugMapLocal.keySet()) {
+      Object newValue = debugMapLocal.get(key);
+      if (key.endsWith("Millis")) {
+        if (newValue instanceof Number) {
+          newValue = ((Number)newValue).longValue()/1000;
+        }
+      }
+      String newKey = debugKeyPrefix + StringUtils.capitalize(key);
+      debugMap.put(newKey, newValue);
+    }
+  }
+  
+  
+  private String normalizeMembershipRoleName(Object roleValue) {
+    String roleName = StringUtils.trimToNull(GrouperUtil.stringValue(roleValue));
+    if (StringUtils.isBlank(roleName)) {
+      return null;
+    }
+    if (roleName.length() > 30) {
+      roleName = roleName.substring(0, 30);
+    }
+    return roleName;
+  }
+  
+  
+  private void syncGenericProvisionerTable(String tableName, String columns, String primaryKeyColumns,
+      String selectSql, long selectBindVar, List<Object[]> targetRowData,
+      Map<String, Object> debugMap, String debugKeyPrefix) {
+    syncGenericProvisionerTable(tableName, columns, primaryKeyColumns, selectSql, selectBindVar,
+        targetRowData, debugMap, debugKeyPrefix, GcTableSyncPhase.INSERTS_UPDATES_DELETES);
+  }
+
+  private void syncGenericProvisionerTable(String tableName, String columns, String primaryKeyColumns,
+      String selectSql, long selectBindVar, List<Object[]> targetRowData,
+      Map<String, Object> debugMap, String debugKeyPrefix, GcTableSyncPhase phase) {
+    
+    // set up the GcTableSync
+    GcTableSync gcTableSync = new GcTableSync();
+    
+    //retrieve the existing data from database (the "to" side)
+    GcTableSyncTableBean gcTableSyncTableBeanSql = new GcTableSyncTableBean(gcTableSync);
+    gcTableSyncTableBeanSql.configureMetadata("grouper", tableName);
+    gcTableSync.setDataBeanTo(gcTableSyncTableBeanSql);
+    
+    GcTableSyncTableMetadata gcTableSyncTableMetadata = gcTableSyncTableBeanSql.getTableMetadata();
+    gcTableSyncTableMetadata.assignColumns(columns);
+    gcTableSyncTableMetadata.assignPrimaryKeyColumns(primaryKeyColumns);
+    
+    GcDbAccess gcDbAccess = new GcDbAccess().connectionName("grouper");
+    List<Object[]> existingResults = gcDbAccess.sql(selectSql).addBindVar(selectBindVar).selectList(Object[].class);
+
+    // NB: no hand-rolled type coercion here.  Both sides are built with
+    // GcTableSyncTableData.init(), which runs normalizeRow() and coerces every value to the
+    // canonical java type of its column, so the TO and FROM rows are directly comparable.
+    GcTableSyncTableData gcTableSyncTableDataSql = new GcTableSyncTableData();
+    gcTableSyncTableDataSql.init(gcTableSyncTableBeanSql,
+        gcTableSyncTableMetadata.lookupColumns(gcTableSyncTableBeanSql.getTableMetadata().columnListAll()),
+        existingResults);
+    gcTableSyncTableDataSql.indexData();
+    
+    gcTableSyncTableBeanSql.setDataInitialQuery(gcTableSyncTableDataSql);
+    gcTableSyncTableBeanSql.setGcTableSync(gcTableSync);
+    
+    debugMap.put(debugKeyPrefix + "DbUniqueKeys", gcTableSyncTableDataSql.allPrimaryKeys().size());
+    
+    // set up the "from" side (target data)
+    GcTableSyncTableBean gcTableSyncTableBeanFrom = new GcTableSyncTableBean();
+    gcTableSync.setDataBeanFrom(gcTableSyncTableBeanFrom);
+    gcTableSyncTableBeanFrom.setTableMetadata(gcTableSyncTableBeanSql.getTableMetadata());
+    gcTableSyncTableBeanFrom.setGcTableSync(gcTableSync);
+    
+    GcTableSyncTableData gcTableSyncTableDataFrom = new GcTableSyncTableData();
+    gcTableSync.getDataBeanFrom().setDataInitialQuery(gcTableSyncTableDataFrom);
+    // Build the FROM side with init() rather than setRows().  init() runs every row through
+    // GcTableSyncTableData.normalizeRow(), which coerces each value to the canonical java type
+    // of its column; setRows() stores the rows verbatim.  The TO side is always built with
+    // init() (it comes back through a jdbc driver), so skipping it here left the two sides
+    // holding the same id as different types - a Long we reserved in memory vs the BigDecimal
+    // the driver hands back.  MultiKey compares with equals(), and Long.equals(BigDecimal) is
+    // always false, so every TO row looked absent from FROM and a DELETES_ONLY pass deleted the
+    // rows the immediately preceding INSERTS_UPDATES_ONLY pass had just written.
+    gcTableSyncTableDataFrom.init(gcTableSyncTableDataSql.getGcTableSyncTableBean(),
+        gcTableSyncTableDataSql.getColumnMetadata(), targetRowData);
+
+    // Log the FROM-side primary keys next to the TO-side ones above.  A DELETES_ONLY pass deletes
+    // (TO minus FROM), so when rows vanish immediately after an INSERTS_UPDATES_ONLY pass wrote
+    // them, this is the set that is wrong.  Log the element type too: the two sides are built
+    // differently (FROM from in-memory Longs, TO from a JDBC read), and a Long vs BigDecimal /
+    // Integer split compares unequal in the MultiKey and silently deletes live rows.
+    debugMap.put(debugKeyPrefix + "FromUniqueKeys", gcTableSyncTableDataFrom.allPrimaryKeys().size());
+    debugMap.put(debugKeyPrefix + "FromKeys", describePrimaryKeys(gcTableSyncTableDataFrom.allPrimaryKeys()));
+    debugMap.put(debugKeyPrefix + "DbKeys", describePrimaryKeys(gcTableSyncTableDataSql.allPrimaryKeys()));
+
+    // compare and sync
+    GcTableSyncConfiguration gcTableSyncConfiguration = new GcTableSyncConfiguration();
+    gcTableSync.setGcTableSyncConfiguration(gcTableSyncConfiguration);
+    gcTableSync.setGcTableSyncOutput(new GcTableSyncOutput());
+
+    Map<String, Object> debugMapLocal = new LinkedHashMap<String, Object>();
+    GcTableSyncSubtype.fullSyncFull.syncData(debugMapLocal, gcTableSync, phase);
+
+    // merge the debug maps
+    for (String key : debugMapLocal.keySet()) {
+      Object newValue = debugMapLocal.get(key);
+      // convert micros to millis
+      if (key.endsWith("Millis")) {
+        if (newValue instanceof Number) {
+          newValue = ((Number)newValue).longValue()/1000;
+        }
+      }
+      String newKey = debugKeyPrefix + StringUtils.capitalize(key);
+      debugMap.put(newKey, newValue);
+    }
+  }
+  
+  /**
+   * Render primary keys for the sync debug map as {@code value(SimpleClassName)} so a
+   * FROM-vs-TO comparison shows both the value and the runtime type.  Two keys that print
+   * the same value but different types do not compare equal, which is what turns a
+   * DELETES_ONLY pass into a delete of rows that are actually still present in the source.
+   * Capped so a large sync cannot bloat the debug map / loader log.
+   * @param primaryKeys keys to render, may be null
+   * @return printable description
+   */
+  private static String describePrimaryKeys(Set<MultiKey> primaryKeys) {
+    if (primaryKeys == null) {
+      return "null";
+    }
+    final int maxKeysToPrint = 20;
+    StringBuilder result = new StringBuilder();
+    int printed = 0;
+    for (MultiKey primaryKey : primaryKeys) {
+      if (printed >= maxKeysToPrint) {
+        result.append(", ...(").append(primaryKeys.size() - maxKeysToPrint).append(" more)");
+        break;
+      }
+      if (printed > 0) {
+        result.append(", ");
+      }
+      result.append("[");
+      Object[] keys = primaryKey == null ? null : primaryKey.getKeys();
+      for (int i = 0; i < GrouperUtil.length(keys); i++) {
+        if (i > 0) {
+          result.append("|");
+        }
+        Object key = keys[i];
+        result.append(key).append("(").append(key == null ? "null" : key.getClass().getSimpleName()).append(")");
+      }
+      result.append("]");
+      printed++;
+    }
+    return result.toString();
+  }
+
+  /**
+   * build rows for the per-provisioner attribute-name catalog
+   * (grouper_prov_user_attr / grouper_prov_group_attr).
+   * Columns: internal_id, grouper_sync_internal_id, attribute_name, attribute_type, last_updated.
+   */
+  private List<Object[]> buildProvisioningAttrCatalogRowData(
+      Map<String, GenericProvisioningAttrCatalog> attributeNameToCatalog,
+      long grouperSyncInternalId, long nowMicros) {
+    List<Object[]> result = new ArrayList<Object[]>();
+    for (GenericProvisioningAttrCatalog catalog : attributeNameToCatalog.values()) {
+      result.add(new Object[] {catalog.internalId, grouperSyncInternalId, catalog.attributeName,
+          catalog.attributeType, nowMicros});
+    }
+    return result;
+  }
+  
+  private List<Object[]> buildProvisioningAttributeValueRowData(List<GenericProvisioningAttributeRecord> attributeRecords,
+      TableIndexType tableIndexType, Map<String, Long> valueStringToDictionaryInternalId, long nowMicros) {
+    return this.buildProvisioningAttributeValueRowData(attributeRecords, tableIndexType,
+        valueStringToDictionaryInternalId, nowMicros, null);
+  }
+
+  /**
+   * build value rows for grouper_prov_user_attr_value / grouper_prov_group_attr_value
+   * (internal_id, attr catalog id, object id, value_integer, value_dictionary_internal_id, last_updated).
+   * GRP-7474: when existing value rows are passed, a value that is already stored for the same object,
+   * attribute, and value keeps that row's internal_id and last_updated, so the table sync sees an identical
+   * row and does nothing.  Only values that are not stored yet get a new internal_id.
+   * @param existingValueRows object internal_id to its existing value rows, or null to always reserve new ids
+   */
+  private List<Object[]> buildProvisioningAttributeValueRowData(List<GenericProvisioningAttributeRecord> attributeRecords,
+      TableIndexType tableIndexType, Map<String, Long> valueStringToDictionaryInternalId, long nowMicros,
+      Map<Long, List<ExistingGenericProvisioningValueRow>> existingValueRows) {
+
+    List<Object[]> result = new ArrayList<Object[]>();
+    if (GrouperUtil.length(attributeRecords) == 0) {
+      return result;
+    }
+
+    // rows that need a new internal_id, filled in after one reserveIds call
+    List<Object[]> newRows = new ArrayList<Object[]>();
+
+    for (GenericProvisioningAttributeRecord attributeRecord : attributeRecords) {
+      List<ExistingGenericProvisioningValueRow> existingRowsForObject = existingValueRows == null ? null
+          : existingValueRows.get(attributeRecord.objectInternalId);
+      for (GenericProvisioningTypedValue typedValue : attributeRecord.values) {
+        Long valueInteger = typedValue.valueInteger;
+        Long valueDictionaryInternalId = null;
+        if (StringUtils.equals("string", typedValue.attributeType)) {
+          valueInteger = null;
+          if (typedValue.stringValue != null) {
+            valueDictionaryInternalId = valueStringToDictionaryInternalId.get(typedValue.stringValue);
+            if (valueDictionaryInternalId == null) {
+              continue;
+            }
+          }
+          // else: empty string value → emit row with both value columns NULL
+        }
+
+        // reuse an unused existing row with the same attribute and value (multi-valued attributes can
+        // have several rows for one attribute, each existing row is reused at most once)
+        ExistingGenericProvisioningValueRow match = null;
+        for (ExistingGenericProvisioningValueRow existingRow : GrouperUtil.nonNull(existingRowsForObject)) {
+          if (!existingRow.used && existingRow.attrInternalId == attributeRecord.internalId
+              && Objects.equals(existingRow.valueInteger, valueInteger)
+              && Objects.equals(existingRow.valueDictionaryInternalId, valueDictionaryInternalId)) {
+            match = existingRow;
+            break;
+          }
+        }
+        if (match != null) {
+          match.used = true;
+          result.add(new Object[] {match.internalId, attributeRecord.internalId,
+              attributeRecord.objectInternalId, valueInteger, valueDictionaryInternalId, match.lastUpdated});
+        } else {
+          Object[] row = new Object[] {null, attributeRecord.internalId,
+              attributeRecord.objectInternalId, valueInteger, valueDictionaryInternalId, nowMicros};
+          result.add(row);
+          newRows.add(row);
+        }
+      }
+    }
+
+    if (newRows.size() > 0) {
+      List<Long> internalIds = TableIndex.reserveIds(tableIndexType, newRows.size());
+      for (int i = 0; i < newRows.size(); i++) {
+        newRows.get(i)[0] = internalIds.get(i);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * GRP-7474: an existing row of grouper_prov_user / grouper_prov_group / grouper_prov_mship_role, keyed by
+   * its natural key (target id, or role name), so a full sync can reuse the internal_id
+   */
+  private static class ExistingGenericProvisioningObjectRow {
+    private long internalId;
+    /** member_internal_id / group_internal_id, null if none (or not applicable) */
+    private Long linkInternalId;
+    private long lastUpdated;
+  }
+
+  /**
+   * GRP-7474: an existing grouper_prov_*_attr_value row, so a full sync can reuse it for the same value
+   */
+  private static class ExistingGenericProvisioningValueRow {
+    private long internalId;
+    private long attrInternalId;
+    private Long valueInteger;
+    private Long valueDictionaryInternalId;
+    private long lastUpdated;
+    /** set once this row has been matched to a value in this run */
+    private boolean used;
+  }
+
+  /**
+   * GRP-7474: load the existing rows of a sync-back object table for this provisioner, keyed by natural key
+   * @param tableName grouper_prov_user, grouper_prov_group, or grouper_prov_mship_role
+   * @param naturalKeyColumn target_user_id, target_group_id, or role_name
+   * @param linkColumn member_internal_id, group_internal_id, or null
+   * @param grouperSyncInternalId provisioner sync id
+   * @return natural key to existing row, never null
+   */
+  private Map<String, ExistingGenericProvisioningObjectRow> fetchExistingGenericProvisioningObjectRows(
+      String tableName, String naturalKeyColumn, String linkColumn, long grouperSyncInternalId) {
+    Map<String, ExistingGenericProvisioningObjectRow> result = new HashMap<String, ExistingGenericProvisioningObjectRow>();
+    List<Object[]> rows = new GcDbAccess().connectionName("grouper")
+        .sql("select internal_id, " + naturalKeyColumn + ", " + (linkColumn == null ? "null" : linkColumn) + ", last_updated from "
+            + tableName + " where grouper_sync_internal_id = ?")
+        .addBindVar(grouperSyncInternalId).selectList(Object[].class);
+    for (Object[] row : GrouperUtil.nonNull(rows)) {
+      if (row == null || row[0] == null || row[1] == null) {
+        continue;
+      }
+      // match how the new rows' natural keys are normalized (target ids are trimmed)
+      String naturalKey = StringUtils.equals(naturalKeyColumn, "role_name") ? row[1].toString() : this.normalizeTargetId(row[1].toString());
+      if (StringUtils.isBlank(naturalKey)) {
+        continue;
+      }
+      ExistingGenericProvisioningObjectRow existingRow = new ExistingGenericProvisioningObjectRow();
+      existingRow.internalId = ((Number) row[0]).longValue();
+      existingRow.linkInternalId = row[2] == null ? null : ((Number) row[2]).longValue();
+      existingRow.lastUpdated = row[3] == null ? 0L : ((Number) row[3]).longValue();
+      result.put(naturalKey, existingRow);
+    }
+    return result;
+  }
+
+  /**
+   * GRP-7474: load the existing value rows of a sync-back value table for this provisioner, grouped by object
+   * @param sql selects internal_id, attr internal_id, object internal_id, value_integer, value_dictionary_internal_id,
+   * last_updated, with one bind var for the grouper_sync internal_id
+   * @param grouperSyncInternalId provisioner sync id
+   * @return object internal_id to its value rows, never null
+   */
+  private Map<Long, List<ExistingGenericProvisioningValueRow>> fetchExistingGenericProvisioningValueRows(
+      String sql, long grouperSyncInternalId) {
+    Map<Long, List<ExistingGenericProvisioningValueRow>> result = new HashMap<Long, List<ExistingGenericProvisioningValueRow>>();
+    List<Object[]> rows = new GcDbAccess().connectionName("grouper").sql(sql)
+        .addBindVar(grouperSyncInternalId).selectList(Object[].class);
+    for (Object[] row : GrouperUtil.nonNull(rows)) {
+      if (row == null || row[0] == null || row[1] == null || row[2] == null) {
+        continue;
+      }
+      ExistingGenericProvisioningValueRow existingRow = new ExistingGenericProvisioningValueRow();
+      existingRow.internalId = ((Number) row[0]).longValue();
+      existingRow.attrInternalId = ((Number) row[1]).longValue();
+      existingRow.valueInteger = row[3] == null ? null : ((Number) row[3]).longValue();
+      existingRow.valueDictionaryInternalId = row[4] == null ? null : ((Number) row[4]).longValue();
+      existingRow.lastUpdated = row[5] == null ? 0L : ((Number) row[5]).longValue();
+      Long objectInternalId = ((Number) row[2]).longValue();
+      List<ExistingGenericProvisioningValueRow> rowsForObject = result.get(objectInternalId);
+      if (rowsForObject == null) {
+        rowsForObject = new ArrayList<ExistingGenericProvisioningValueRow>(16);
+        result.put(objectInternalId, rowsForObject);
+      }
+      rowsForObject.add(existingRow);
+    }
+    return result;
+  }
+
+  /**
+   * GRP-7474: load the existing grouper_prov_mship rows for this provisioner
+   * @param grouperSyncInternalId provisioner sync id
+   * @return MultiKey(prov_user_internal_id, prov_group_internal_id, prov_mship_role_internal_id) to
+   * {internal_id, last_updated}, never null
+   */
+  private Map<MultiKey, long[]> fetchExistingGenericProvisioningMembershipRows(long grouperSyncInternalId) {
+    Map<MultiKey, long[]> result = new HashMap<MultiKey, long[]>();
+    List<Object[]> rows = new GcDbAccess().connectionName("grouper")
+        .sql("select internal_id, prov_user_internal_id, prov_group_internal_id, prov_mship_role_internal_id, last_updated "
+            + "from grouper_prov_mship where grouper_sync_internal_id = ?")
+        .addBindVar(grouperSyncInternalId).selectList(Object[].class);
+    for (Object[] row : GrouperUtil.nonNull(rows)) {
+      if (row == null || row[0] == null || row[1] == null || row[2] == null) {
+        continue;
+      }
+      // Long keys, to match the in-memory ids the new rows are looked up with
+      MultiKey key = new MultiKey(((Number) row[1]).longValue(), ((Number) row[2]).longValue(),
+          row[3] == null ? null : ((Number) row[3]).longValue());
+      result.put(key, new long[] {((Number) row[0]).longValue(), row[4] == null ? 0L : ((Number) row[4]).longValue()});
+    }
+    return result;
+  }
+  
+  private void addProvisioningStringValues(List<GenericProvisioningAttributeRecord> attributeRecords, Set<String> stringValues) {
+    for (GenericProvisioningAttributeRecord attributeRecord : attributeRecords) {
+      if (!StringUtils.equals("string", attributeRecord.attributeType)) {
+        continue;
+      }
+      for (GenericProvisioningTypedValue typedValue : attributeRecord.values) {
+        if (!StringUtils.isBlank(typedValue.stringValue)) {
+          stringValues.add(typedValue.stringValue);
+        }
+      }
+    }
+  }
+  
+  /**
+   * Build per-(object, attribute_name) records AND populate the catalog map keyed by attribute_name.
+   * The catalog has one entry per distinct attribute_name; if the same name appears with different
+   * types across objects in the run, the catalog entry's type is coerced to "string" and all of that
+   * name's value rows are re-coerced to string.
+   *
+   * @param targetIdToObjectRecord     in: object records from this run
+   * @param attributeNameToCatalog     out: filled with one entry per distinct attribute_name
+   * @param catalogTableIndexType      table-index type used to reserve catalog internal_ids
+   * @return per-(object, attribute_name) records, with internalId set to the catalog row's internal_id
+   *         (i.e. the FK that goes into grouper_prov_*_attr_value.prov_*_attr_internal_id)
+   */
+  /**
+   * Pre-fetch existing catalog rows for a sync so we can reuse their internal_ids on
+   * subsequent runs (the table has a unique constraint on (grouper_sync_internal_id,
+   * attribute_name); allocating a fresh internal_id every run would collide).
+   *
+   * @return map of attribute_name -> existing internal_id; empty when no rows exist yet
+   */
+  private Map<String, Long> fetchExistingAttrCatalogIds(String tableName, long grouperSyncInternalId) {
+    Map<String, Long> attributeNameToInternalId = new LinkedHashMap<String, Long>();
+    List<Object[]> existingCatalogRows = new GcDbAccess().connectionName("grouper")
+        .sql("select internal_id, attribute_name from " + tableName + " where grouper_sync_internal_id = ?")
+        .addBindVar(grouperSyncInternalId).selectList(Object[].class);
+    for (Object[] row : GrouperUtil.nonNull(existingCatalogRows)) {
+      if (row == null || row.length < 2 || row[0] == null || row[1] == null) {
+        continue;
+      }
+      Long internalId = ((Number) row[0]).longValue();
+      String attributeName = row[1].toString();
+      attributeNameToInternalId.put(attributeName, internalId);
+    }
+    return attributeNameToInternalId;
+  }
+
+  /**
+   * Populate {@code member_internal_id} on each user record by reading the in-memory
+   * {@link ProvisioningEntityWrapper}s the daemon already loaded for this run.
+   *
+   * <p>The Grouper-side internal id is taken from
+   * {@code wrapper.getGrouperProvisioningEntity().getInternalId()} (always populated by
+   * {@code GrouperProvisioningGrouperDao} when Grouper data is loaded). The target id is
+   * taken from the retrieved-from-target ProvisioningEntity first
+   * ({@code wrapper.getTargetProvisioningEntity().getId()} — the actual target id once the
+   * daemon matched Grouper ↔ target), falling back to the translated-Grouper view if the
+   * match hasn't happened yet.
+   *
+   * <p>Records whose {@code target_user_id} doesn't appear in any wrapper are target-side
+   * orphans and stay null. No DB query — the wrappers already have everything we need.
+   */
+  private void resolveGrouperMemberInternalIdsForUsers(
+      Map<String, GenericProvisioningUserRecord> targetUserIdToRecord) {
+    if (targetUserIdToRecord == null || targetUserIdToRecord.isEmpty()) {
+      return;
+    }
+    Map<String, Long> targetUserIdToMemberInternalId = new LinkedHashMap<String, Long>();
+    List<String> targetSourcedEntityCacheFieldNames = this.targetSourcedCacheFieldNames(
+        this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().getEntityAttributeDbCaches(), "entityAttributeValueCache");
+    for (ProvisioningEntityWrapper provisioningEntityWrapper :
+        GrouperUtil.nonNull(this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningEntityWrappers())) {
+      if (provisioningEntityWrapper == null) {
+        continue;
+      }
+      // grab the Grouper-side internal id from the Grouper data (always populated)
+      ProvisioningEntity grouperProvisioningEntity = provisioningEntityWrapper.getGrouperProvisioningEntity();
+      if (grouperProvisioningEntity == null) {
+        continue;
+      }
+      Long memberInternalId = grouperProvisioningEntity.getInternalId();
+      if (memberInternalId == null) {
+        continue;
+      }
+      // target id: prefer the actual retrieved-from-target id (post-match), fall back to
+      // the translated-Grouper-as-target id if no target match yet
+      String targetUserId = null;
+      ProvisioningEntity targetProvisioningEntity = provisioningEntityWrapper.getTargetProvisioningEntity();
+      if (targetProvisioningEntity != null) {
+        targetUserId = this.normalizeTargetId(targetProvisioningEntity.getId());
+      }
+      if (StringUtils.isBlank(targetUserId)) {
+        ProvisioningEntity grouperTargetEntity = provisioningEntityWrapper.getGrouperTargetEntity();
+        if (grouperTargetEntity != null) {
+          targetUserId = this.normalizeTargetId(grouperTargetEntity.getId());
+        }
+      }
+      // last write wins on duplicates (shouldn't happen — wrappers are per-Grouper-member)
+      if (!StringUtils.isBlank(targetUserId) && !targetUserIdToMemberInternalId.containsKey(targetUserId)) {
+        targetUserIdToMemberInternalId.put(targetUserId, memberInternalId);
+      }
+      // fallback for provisioners whose target id is not the standard id field but a named attribute
+      // (e.g. Remedy's personId). the link phase caches that target id into the target-sourced entity
+      // attribute value caches on the GcGrouperSyncMember (which survive the select/insert/update
+      // attribute filtering that drops a non-configured id), and the generic reporting keys the user
+      // record by that same target id, so map each target-sourced cache value to the member internal id.
+      GcGrouperSyncMember gcGrouperSyncMember = provisioningEntityWrapper.getGcGrouperSyncMember();
+      if (gcGrouperSyncMember != null) {
+        for (String cacheField : targetSourcedEntityCacheFieldNames) {
+          String cacheValue = this.normalizeTargetId(gcGrouperSyncMember.retrieveField(cacheField));
+          if (!StringUtils.isBlank(cacheValue) && !targetUserIdToMemberInternalId.containsKey(cacheValue)) {
+            targetUserIdToMemberInternalId.put(cacheValue, memberInternalId);
+          }
+        }
+      }
+    }
+    for (GenericProvisioningUserRecord userRecord : targetUserIdToRecord.values()) {
+      if (userRecord.getMemberInternalId() != null) {
+        continue;
+      }
+      Long resolved = targetUserIdToMemberInternalId.get(userRecord.getTargetId());
+      if (resolved != null) {
+        userRecord.setMemberInternalId(resolved);
+      }
+    }
+  }
+
+  /**
+   * Populate {@code group_internal_id} on each group record by reading the in-memory
+   * {@link ProvisioningGroupWrapper}s. Mirror of
+   * {@link #resolveGrouperMemberInternalIdsForUsers}.
+   */
+  private void resolveGrouperGroupInternalIdsForGroups(
+      Map<String, GenericProvisioningGroupRecord> targetGroupIdToRecord) {
+    if (targetGroupIdToRecord == null || targetGroupIdToRecord.isEmpty()) {
+      return;
+    }
+    Map<String, Long> targetGroupIdToGroupInternalId = new LinkedHashMap<String, Long>();
+    List<String> targetSourcedGroupCacheFieldNames = this.targetSourcedCacheFieldNames(
+        this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().getGroupAttributeDbCaches(), "groupAttributeValueCache");
+    for (ProvisioningGroupWrapper provisioningGroupWrapper :
+        GrouperUtil.nonNull(this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningGroupWrappers())) {
+      if (provisioningGroupWrapper == null) {
+        continue;
+      }
+      ProvisioningGroup grouperProvisioningGroup = provisioningGroupWrapper.getGrouperProvisioningGroup();
+      if (grouperProvisioningGroup == null) {
+        continue;
+      }
+      Long groupInternalId = grouperProvisioningGroup.getGroupInternalId();
+      if (groupInternalId == null) {
+        continue;
+      }
+      String targetGroupId = null;
+      ProvisioningGroup targetProvisioningGroup = provisioningGroupWrapper.getTargetProvisioningGroup();
+      if (targetProvisioningGroup != null) {
+        targetGroupId = this.normalizeTargetId(targetProvisioningGroup.getId());
+      }
+      if (StringUtils.isBlank(targetGroupId)) {
+        ProvisioningGroup grouperTargetGroup = provisioningGroupWrapper.getGrouperTargetGroup();
+        if (grouperTargetGroup != null) {
+          targetGroupId = this.normalizeTargetId(grouperTargetGroup.getId());
+        }
+      }
+      if (!StringUtils.isBlank(targetGroupId) && !targetGroupIdToGroupInternalId.containsKey(targetGroupId)) {
+        targetGroupIdToGroupInternalId.put(targetGroupId, groupInternalId);
+      }
+      // fallback for provisioners whose target id is not the standard id field but a named attribute
+      // (e.g. Remedy's permissionGroupId). the link phase caches that target id into the target-sourced
+      // group attribute value caches on the GcGrouperSyncGroup (which survive the select/insert/update
+      // attribute filtering that drops a non-configured id), and the generic reporting keys the group
+      // record by that same target id, so map each target-sourced cache value to the group internal id.
+      GcGrouperSyncGroup gcGrouperSyncGroup = provisioningGroupWrapper.getGcGrouperSyncGroup();
+      if (gcGrouperSyncGroup != null) {
+        for (String cacheField : targetSourcedGroupCacheFieldNames) {
+          String cacheValue = this.normalizeTargetId(gcGrouperSyncGroup.retrieveField(cacheField));
+          if (!StringUtils.isBlank(cacheValue) && !targetGroupIdToGroupInternalId.containsKey(cacheValue)) {
+            targetGroupIdToGroupInternalId.put(cacheValue, groupInternalId);
+          }
+        }
+      }
+    }
+    for (GenericProvisioningGroupRecord groupRecord : targetGroupIdToRecord.values()) {
+      if (groupRecord.getGroupInternalId() != null) {
+        continue;
+      }
+      Long resolved = targetGroupIdToGroupInternalId.get(groupRecord.getTargetId());
+      if (resolved != null) {
+        groupRecord.setGroupInternalId(resolved);
+      }
+    }
+  }
+
+  /**
+   * Field names (e.g. {@code groupAttributeValueCache0}) of the attribute value caches whose source is
+   * the target system. These hold the target object's id for provisioners whose target id is a named
+   * attribute (e.g. Remedy permissionGroupId / personId) rather than the standard id field, and unlike
+   * that non-configured id they survive the select/insert/update attribute filtering, so they let the
+   * generic reporting link a Grouper-managed object back to its Grouper internal id.
+   */
+  private List<String> targetSourcedCacheFieldNames(GrouperProvisioningConfigurationAttributeDbCache[] dbCaches, String cacheFieldPrefix) {
+    List<String> result = new ArrayList<String>();
+    for (int i = 0; i < GrouperUtil.length(dbCaches); i++) {
+      GrouperProvisioningConfigurationAttributeDbCache dbCache = dbCaches[i];
+      if (dbCache != null && dbCache.getSource() == GrouperProvisioningConfigurationAttributeDbCacheSource.target) {
+        result.add(cacheFieldPrefix + i);
+      }
+    }
+    return result;
+  }
+
+  private List<GenericProvisioningAttributeRecord> buildProvisioningAttributeRecords(
+      Map<String, ? extends GenericProvisioningRecord> targetIdToObjectRecord,
+      Map<String, GenericProvisioningAttrCatalog> attributeNameToCatalog,
+      TableIndexType catalogTableIndexType) {
+    return this.buildProvisioningAttributeRecords(targetIdToObjectRecord, attributeNameToCatalog,
+        catalogTableIndexType, Collections.<String, Long>emptyMap());
+  }
+
+  private List<GenericProvisioningAttributeRecord> buildProvisioningAttributeRecords(
+      Map<String, ? extends GenericProvisioningRecord> targetIdToObjectRecord,
+      Map<String, GenericProvisioningAttrCatalog> attributeNameToCatalog,
+      TableIndexType catalogTableIndexType,
+      Map<String, Long> existingAttributeNameToInternalId) {
+
+    List<GenericProvisioningAttributeRecord> result = new ArrayList<GenericProvisioningAttributeRecord>();
+
+    for (GenericProvisioningRecord objectRecord : targetIdToObjectRecord.values()) {
+      for (String attributeName : objectRecord.getAttributeNameToValues().keySet()) {
+        String normalizedAttributeName = StringUtils.trimToNull(attributeName);
+        if (StringUtils.isBlank(normalizedAttributeName)) {
+          continue;
+        }
+
+        List<Object> rawValues = objectRecord.getAttributeNameToValues().get(attributeName);
+        if (GrouperUtil.length(rawValues) == 0) {
+          continue;
+        }
+
+        List<GenericProvisioningTypedValue> typedValues = new ArrayList<GenericProvisioningTypedValue>();
+        for (Object rawValue : rawValues) {
+          GenericProvisioningTypedValue typedValue = this.convertProvisioningValue(rawValue);
+          if (typedValue == null) {
+            continue;
+          }
+          typedValues.add(typedValue);
+        }
+
+        if (GrouperUtil.length(typedValues) == 0) {
+          continue;
+        }
+
+        String attributeType = typedValues.get(0).attributeType;
+        boolean allSameType = true;
+        for (GenericProvisioningTypedValue typedValue : typedValues) {
+          if (!StringUtils.equals(attributeType, typedValue.attributeType)) {
+            allSameType = false;
+            break;
+          }
+        }
+
+        if (!allSameType) {
+          attributeType = "string";
+          typedValues = coerceTypedValuesToString(typedValues);
+        }
+
+        GenericProvisioningAttributeRecord attributeRecord = new GenericProvisioningAttributeRecord();
+        attributeRecord.objectInternalId = objectRecord.getInternalId();
+        attributeRecord.attributeName = normalizedAttributeName;
+        attributeRecord.attributeType = attributeType;
+        attributeRecord.values.addAll(typedValues);
+        result.add(attributeRecord);
+
+        // does this record contribute any non-empty value? all-empty records don't influence catalog typing.
+        boolean recordHasNonEmptyValue = false;
+        for (GenericProvisioningTypedValue tv : typedValues) {
+          if (tv.stringValue != null || tv.valueInteger != null) {
+            recordHasNonEmptyValue = true;
+            break;
+          }
+        }
+
+        // catalog dedup: same name with different non-empty types across objects → coerce catalog to string
+        GenericProvisioningAttrCatalog catalog = attributeNameToCatalog.get(normalizedAttributeName);
+        if (catalog == null) {
+          catalog = new GenericProvisioningAttrCatalog();
+          catalog.attributeName = normalizedAttributeName;
+          catalog.attributeType = attributeType;
+          catalog.hasNonEmptyValue = recordHasNonEmptyValue;
+          attributeNameToCatalog.put(normalizedAttributeName, catalog);
+        } else if (recordHasNonEmptyValue) {
+          if (!catalog.hasNonEmptyValue) {
+            // first non-empty observation overrides the placeholder type from earlier all-empty records
+            catalog.attributeType = attributeType;
+            catalog.hasNonEmptyValue = true;
+          } else if (!StringUtils.equals(catalog.attributeType, attributeType)) {
+            catalog.attributeType = "string";
+          }
+        }
+        // else: empty-only record never changes catalog type
+      }
+    }
+
+    if (GrouperUtil.length(result) == 0) {
+      return result;
+    }
+
+    // re-coerce non-empty values for records whose catalog type ended up as "string" due to cross-object mismatch
+    for (GenericProvisioningAttributeRecord attributeRecord : result) {
+      GenericProvisioningAttrCatalog catalog = attributeNameToCatalog.get(attributeRecord.attributeName);
+      if (StringUtils.equals("string", catalog.attributeType) && !StringUtils.equals("string", attributeRecord.attributeType)) {
+        attributeRecord.attributeType = "string";
+        List<GenericProvisioningTypedValue> coerced = coerceTypedValuesToString(attributeRecord.values);
+        attributeRecord.values.clear();
+        attributeRecord.values.addAll(coerced);
+      }
+    }
+
+    // assign catalog internal_ids (one per distinct attribute_name). Reuse existing ids
+    // where the (sync, attribute_name) row is already in the DB; reserve fresh ids only
+    // for genuinely new attribute names. Without this, the unique constraint on
+    // (grouper_sync_internal_id, attribute_name) blocks re-runs.
+    if (GrouperUtil.length(attributeNameToCatalog) > 0) {
+      List<GenericProvisioningAttrCatalog> catalogsNeedingNewIds = new ArrayList<GenericProvisioningAttrCatalog>();
+      for (GenericProvisioningAttrCatalog catalog : attributeNameToCatalog.values()) {
+        Long existingInternalId = existingAttributeNameToInternalId == null ? null
+            : existingAttributeNameToInternalId.get(catalog.attributeName);
+        if (existingInternalId != null) {
+          catalog.internalId = existingInternalId;
+        } else {
+          catalogsNeedingNewIds.add(catalog);
+        }
+      }
+      if (!catalogsNeedingNewIds.isEmpty()) {
+        List<Long> freshInternalIds = TableIndex.reserveIds(catalogTableIndexType, catalogsNeedingNewIds.size());
+        for (int i = 0; i < catalogsNeedingNewIds.size(); i++) {
+          catalogsNeedingNewIds.get(i).internalId = freshInternalIds.get(i);
+        }
+      }
+    }
+
+    // link each per-(object, attribute) record to its catalog row's internal_id
+    for (GenericProvisioningAttributeRecord attributeRecord : result) {
+      attributeRecord.internalId = attributeNameToCatalog.get(attributeRecord.attributeName).internalId;
+    }
+
+    return result;
+  }
+
+  private static List<GenericProvisioningTypedValue> coerceTypedValuesToString(List<GenericProvisioningTypedValue> typedValues) {
+    List<GenericProvisioningTypedValue> normalizedTypedValues = new ArrayList<GenericProvisioningTypedValue>();
+    for (GenericProvisioningTypedValue typedValue : typedValues) {
+      GenericProvisioningTypedValue normalizedTypedValue = new GenericProvisioningTypedValue();
+      normalizedTypedValue.attributeType = "string";
+      if (!StringUtils.isBlank(typedValue.stringValue)) {
+        normalizedTypedValue.stringValue = typedValue.stringValue;
+      } else if (typedValue.valueInteger != null) {
+        normalizedTypedValue.stringValue = GrouperUtil.stringValue(typedValue.valueInteger);
+      }
+      // else: empty value preserved (both stringValue and valueInteger null)
+      normalizedTypedValues.add(normalizedTypedValue);
+    }
+    return normalizedTypedValues;
+  }
+  
+  private GenericProvisioningTypedValue convertProvisioningValue(Object rawValue) {
+    if (rawValue == null) {
+      return null;
+    }
+
+    GenericProvisioningTypedValue result = new GenericProvisioningTypedValue();
+
+    if (rawValue instanceof Boolean) {
+      result.attributeType = "boolean";
+      result.valueInteger = ((Boolean)rawValue) ? 1L : 0L;
+      return result;
+    }
+
+    if (rawValue instanceof Timestamp) {
+      result.attributeType = "timestamp";
+      result.valueInteger = ((Timestamp)rawValue).getTime() * 1000L;
+      return result;
+    }
+
+    if (rawValue instanceof Date) {
+      result.attributeType = "timestamp";
+      result.valueInteger = ((Date)rawValue).getTime() * 1000L;
+      return result;
+    }
+
+    if (rawValue instanceof Byte || rawValue instanceof Short || rawValue instanceof Integer || rawValue instanceof Long) {
+      result.attributeType = "int";
+      result.valueInteger = ((Number)rawValue).longValue();
+      return result;
+    }
+
+    // string fallback: blanks become "empty value" rows (both value columns NULL) rather than dropped,
+    // so reporting can distinguish "user has attribute X with empty value" from "user has no attribute X"
+    String stringValue = StringUtils.trimToNull(GrouperUtil.stringValue(rawValue));
+    result.attributeType = "string";
+    if (stringValue != null) {
+      // grouper_dictionary.the_text is varchar(4000); leave headroom for multi-byte chars
+      result.stringValue = GrouperUtil.abbreviate(stringValue, 3800);
+    }
+    return result;
+  }
+  
+  /**
+   * GRP-7474: give each object the internal_id it already has in the sync-back table (by target id), and
+   * reserve new internal_ids only for objects that are not there yet
+   * @param targetIdToObjectRecord objects from this run, keyed by normalized target id
+   * @param tableIndexType provUser or provGroup, to reserve new ids
+   * @param existingRows target id to existing row, from fetchExistingGenericProvisioningObjectRows
+   */
+  private void reuseOrAssignProvisioningObjectInternalIds(Map<String, ? extends GenericProvisioningRecord> targetIdToObjectRecord,
+      TableIndexType tableIndexType, Map<String, ExistingGenericProvisioningObjectRow> existingRows) {
+    if (GrouperUtil.length(targetIdToObjectRecord) == 0) {
+      return;
+    }
+    List<GenericProvisioningRecord> newObjectRecords = new ArrayList<GenericProvisioningRecord>();
+    for (Map.Entry<String, ? extends GenericProvisioningRecord> entry : targetIdToObjectRecord.entrySet()) {
+      ExistingGenericProvisioningObjectRow existingRow = existingRows.get(entry.getKey());
+      if (existingRow != null) {
+        entry.getValue().setInternalId(existingRow.internalId);
+      } else {
+        newObjectRecords.add(entry.getValue());
+      }
+    }
+    if (newObjectRecords.size() > 0) {
+      List<Long> internalIds = TableIndex.reserveIds(tableIndexType, newObjectRecords.size());
+      for (int i = 0; i < newObjectRecords.size(); i++) {
+        newObjectRecords.get(i).setInternalId(internalIds.get(i));
+      }
+    }
+  }
+  
+  private void addProvisioningAttributeValue(GenericProvisioningRecord objectRecord, String attributeName, Object attributeValue) {
+    String normalizedAttributeName = StringUtils.trimToNull(attributeName);
+    if (StringUtils.isBlank(normalizedAttributeName) || this.isSystemProvisioningColumnName(normalizedAttributeName)) {
+      return;
+    }
+
+    // skip if upstream didn't provide the attribute at all (null);
+    // empty/blank values ARE preserved so reporting can show "attribute present, value empty"
+    if (attributeValue == null) {
+      return;
+    }
+
+    List<Object> values = objectRecord.getAttributeNameToValues().get(normalizedAttributeName);
+    if (values == null) {
+      values = new ArrayList<Object>();
+      objectRecord.getAttributeNameToValues().put(normalizedAttributeName, values);
+    }
+
+    if (attributeValue instanceof Collection) {
+      for (Object eachValue : GrouperUtil.nonNull((Collection<?>)attributeValue)) {
+        if (eachValue != null) {
+          values.add(eachValue);
+        }
+      }
+      return;
+    }
+
+    if (attributeValue.getClass().isArray()) {
+      int length = java.lang.reflect.Array.getLength(attributeValue);
+      for (int i = 0; i < length; i++) {
+        Object eachValue = java.lang.reflect.Array.get(attributeValue, i);
+        if (eachValue != null) {
+          values.add(eachValue);
+        }
+      }
+      return;
+    }
+    
+    values.add(attributeValue);
+  }
+  
+  private String normalizeTargetId(Object value) {
+    String targetId = StringUtils.trimToNull(GrouperUtil.stringValue(value));
+    return targetId;
+  }
+  
+  private boolean isSystemProvisioningColumnName(String columnName) {
+    return StringUtils.equalsIgnoreCase("config_id", columnName);
+  }
+  
+  private String resolveMembershipGroupId(ProvisioningMembership provisioningMembership) {
+    if (provisioningMembership.getProvisioningGroup() != null) {
+      String groupId = this.normalizeTargetId(provisioningMembership.getProvisioningGroup().getId());
+      if (!StringUtils.isBlank(groupId)) {
+        return groupId;
+      }
+    }
+    
+    String groupId = this.normalizeTargetId(provisioningMembership.getProvisioningGroupId());
+    if (!StringUtils.isBlank(groupId)) {
+      return groupId;
+    }
+    
+//    for (String candidate : GrouperUtil.toList("groupId", "group_id", "group", "groupIdentifier")) {
+//      groupId = this.normalizeTargetId(provisioningMembership.retrieveAttributeValue(candidate));
+//      if (!StringUtils.isBlank(groupId)) {
+//        return groupId;
+//      }
+//    }
+//    
+//    for (ProvisioningAttribute provisioningAttribute : provisioningMembership.retrieveAttributes().values()) {
+//      if (StringUtils.containsIgnoreCase(provisioningAttribute.getName(), "group")) {
+//        groupId = this.normalizeTargetId(provisioningAttribute.getValue());
+//        if (!StringUtils.isBlank(groupId)) {
+//          return groupId;
+//        }
+//      }
+//    }
+    return null;
+  }
+  
+  private String resolveMembershipUserId(ProvisioningMembership provisioningMembership) {
+    if (provisioningMembership.getProvisioningEntity() != null) {
+      String userId = this.normalizeTargetId(provisioningMembership.getProvisioningEntity().getId());
+      if (!StringUtils.isBlank(userId)) {
+        return userId;
+      }
+    }
+    
+    String userId = this.normalizeTargetId(provisioningMembership.getProvisioningEntityId());
+    if (!StringUtils.isBlank(userId)) {
+      return userId;
+    }
+    
+//    for (String candidate : GrouperUtil.toList("entityId", "entity_id", "userId", "user_id", "memberId", "member_id")) {
+//      userId = this.normalizeTargetId(provisioningMembership.retrieveAttributeValue(candidate));
+//      if (!StringUtils.isBlank(userId)) {
+//        return userId;
+//      }
+//    }
+    
+//    for (ProvisioningAttribute provisioningAttribute : provisioningMembership.retrieveAttributes().values()) {
+//      String attributeName = provisioningAttribute.getName();
+//      if (StringUtils.containsIgnoreCase(attributeName, "entity")
+//          || StringUtils.containsIgnoreCase(attributeName, "user")
+//          || StringUtils.containsIgnoreCase(attributeName, "member")) {
+//        userId = this.normalizeTargetId(provisioningAttribute.getValue());
+//        if (!StringUtils.isBlank(userId)) {
+//          return userId;
+//        }
+//      }
+//    }
+    return null;
+  }
+  
+  private String resolveMembershipRoleName(ProvisioningMembership provisioningMembership) {
+    for (String candidate : GrouperUtil.toList("role", "membershipRole", "fieldName", "listName", "type")) {
+      Object value = provisioningMembership.retrieveAttributeValue(candidate);
+      if (!GrouperUtil.isBlank(value)) {
+        return this.normalizeMembershipRoleName(value);
+      }
+    }
+    
+    for (ProvisioningAttribute provisioningAttribute : provisioningMembership.retrieveAttributes().values()) {
+      String attributeName = provisioningAttribute.getName();
+      if (StringUtils.containsIgnoreCase(attributeName, "role")
+          || StringUtils.containsIgnoreCase(attributeName, "field")
+          || StringUtils.containsIgnoreCase(attributeName, "list")) {
+        return this.normalizeMembershipRoleName(provisioningAttribute.getValue());
+      }
+    }
+    
+    return null;
+  }
+
+  /**
+   * when data was retrieved (i.e. when the group syncs start)
+   */
+  private long retrieveDataStartMillisSince1970 = -1;
+  
+  /**
+   * when data was retrieved (i.e. when the group syncs start)
+   * @return when data retrieved
+   */
+  public long getRetrieveDataStartMillisSince1970() {
+    return retrieveDataStartMillisSince1970;
+  }
+  
+  /**
+   * 
+   */
+  public List<ProvisioningEntity> retrieveIndividualTargetEntitiesIfNeeded() {
+    
+    if (this.grouperProvisioner.retrieveGrouperProvisioningBehavior().isSelectAllData() 
+        || this.grouperProvisioner.retrieveGrouperProvisioningBehavior().isSelectEntitiesAll() 
+        || !this.grouperProvisioner.retrieveGrouperProvisioningBehavior().isSelectEntities()) {
+      return null;
+    }
+    
+    // Step 1 - Get all the grouper target entities and select them from the target (Call the batch method that gets all at once)
+    
+    List<ProvisioningEntity> grouperTargetEntities = this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperTargetEntities();
+    
+    TargetDaoRetrieveEntitiesRequest targetDaoRetrieveEntitiesRequest = new TargetDaoRetrieveEntitiesRequest(grouperTargetEntities, true);
+    
+    TargetDaoRetrieveEntitiesResponse targetEntitiesResponse = this.getGrouperProvisioner().retrieveGrouperProvisioningTargetDaoAdapter().retrieveEntities(targetDaoRetrieveEntitiesRequest);
+
+    return targetEntitiesResponse.getTargetEntities();
+    
+
+  }
+
+  /**
+   * 
+   */
+  public List<ProvisioningGroup> retrieveIndividualTargetGroupsIfNeeded() {
+    
+    if (this.grouperProvisioner.retrieveGrouperProvisioningBehavior().isSelectAllData() 
+        || this.grouperProvisioner.retrieveGrouperProvisioningBehavior().isSelectGroupsAll() 
+        || !this.grouperProvisioner.retrieveGrouperProvisioningBehavior().isSelectGroups()) {
+      return null;
+    }
+    
+    // Step 1 - Get all the grouper target entities and select them from the target (Call the batch method that gets all at once)
+    
+    List<ProvisioningGroup> grouperTargetGroups = this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperTargetGroups();
+    
+    TargetDaoRetrieveGroupsRequest targetDaoRetrieveGroupsRequest = new TargetDaoRetrieveGroupsRequest(grouperTargetGroups, true);
+    
+    TargetDaoRetrieveGroupsResponse targetGroupsResponse = this.getGrouperProvisioner().retrieveGrouperProvisioningTargetDaoAdapter().retrieveGroups(targetDaoRetrieveGroupsRequest);
+
+    return targetGroupsResponse.getTargetGroups();
+    
+  }
+  
+  public void clearInvalidErrors() {
+    
+    Set<ProvisioningMembershipWrapper> membershipWrappers = this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningMembershipWrappers();
+    Set<ProvisioningGroupWrapper> groupWrappers = this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningGroupWrappers();
+    Set<ProvisioningEntityWrapper> entityWrappers = this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningEntityWrappers();
+    
+    int membershipsErrorsClearedCount = 0;
+    int groupsErrorsClearedCount = 0;
+    int entitiesErrorsClearedCount = 0;
+    
+    for (ProvisioningMembershipWrapper provisioningMembershipWrapper: membershipWrappers) {
+      GcGrouperSyncMembership gcGrouperSyncMembership = provisioningMembershipWrapper.getGcGrouperSyncMembership();
+      if (gcGrouperSyncMembership != null && !gcGrouperSyncMembership.isInTarget()) {
+        
+        ProvisioningGroupWrapper provisioningGroupWrapper = provisioningMembershipWrapper.getProvisioningGroupWrapper();
+        if (provisioningGroupWrapper != null) {
+          GcGrouperSyncGroup gcGrouperSyncGroup = provisioningMembershipWrapper.getProvisioningGroupWrapper().getGcGrouperSyncGroup();
+          if (gcGrouperSyncGroup != null && !gcGrouperSyncGroup.isProvisionable()) {
+            gcGrouperSyncMembership.setErrorCode(null);
+            gcGrouperSyncMembership.setErrorCodeDb(null);
+            gcGrouperSyncMembership.setErrorMessage(null);
+            gcGrouperSyncMembership.setErrorTimestamp(null);
+            membershipsErrorsClearedCount++;
+            continue;
+          }
+        }
+        
+        ProvisioningEntityWrapper provisioningEntityWrapper = provisioningMembershipWrapper.getProvisioningEntityWrapper();
+        if (provisioningEntityWrapper != null) {
+          GcGrouperSyncMember gcGrouperSyncMember = provisioningMembershipWrapper.getProvisioningEntityWrapper().getGcGrouperSyncMember();
+          if (gcGrouperSyncMember != null && !gcGrouperSyncMember.isProvisionable()) {
+            gcGrouperSyncMembership.setErrorCode(null);
+            gcGrouperSyncMembership.setErrorCodeDb(null);
+            gcGrouperSyncMembership.setErrorMessage(null);
+            gcGrouperSyncMembership.setErrorTimestamp(null);
+            membershipsErrorsClearedCount++;
+          }
+        }
+      }
+    }
+    
+    for (ProvisioningGroupWrapper provisioningGroupWrapper : groupWrappers) {
+      
+      GcGrouperSyncGroup gcGrouperSyncGroup = provisioningGroupWrapper.getGcGrouperSyncGroup();
+      if (gcGrouperSyncGroup != null && !gcGrouperSyncGroup.isProvisionable() && gcGrouperSyncGroup.getErrorCode() != null) {
+        gcGrouperSyncGroup.setErrorCode(null);
+        gcGrouperSyncGroup.setErrorCodeDb(null);
+        gcGrouperSyncGroup.setErrorMessage(null);
+        gcGrouperSyncGroup.setErrorTimestamp(null);
+        groupsErrorsClearedCount++;
+      }
+    }
+    
+    for (ProvisioningEntityWrapper provisioningEntityWrapper : entityWrappers) {
+      GcGrouperSyncMember gcGrouperSyncMember = provisioningEntityWrapper.getGcGrouperSyncMember();
+      if (gcGrouperSyncMember != null && !gcGrouperSyncMember.isProvisionable() && gcGrouperSyncMember.getErrorCode() != null) {
+        gcGrouperSyncMember.setErrorCode(null);
+        gcGrouperSyncMember.setErrorCodeDb(null);
+        gcGrouperSyncMember.setErrorMessage(null);
+        gcGrouperSyncMember.setErrorTimestamp(null);
+        entitiesErrorsClearedCount++;
+      }
+    }
+    
+    this.getGrouperProvisioner().getDebugMap().put("membershipsErrorsClearedCount", membershipsErrorsClearedCount);
+    this.getGrouperProvisioner().getDebugMap().put("groupsErrorsClearedCount", groupsErrorsClearedCount);
+    this.getGrouperProvisioner().getDebugMap().put("entitiesErrorsClearedCount", entitiesErrorsClearedCount);
+    
+  }
+
+  /**
+   * 
+   */
+  public void provisionIncremental() {
+
+    Map<String, Object> debugMap = this.getGrouperProvisioner().getDebugMap();
+
+    if (!this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().isRunLogicInIncrementalDaemon()) {
+      throw new RuntimeException("Provisioner or global default is set to not run logic in incremental daemon! runLogicInIncrementalDaemon");
+    }
+
+    GrouperProvisioningLogicIncremental grouperProvisioningLogicIncremental = this.getGrouperProvisioner().retrieveGrouperProvisioningLogicIncremental();
+
+    this.getGrouperProvisioner().getGcGrouperSyncJob().setErrorMessage(null);
+    this.getGrouperProvisioner().getGcGrouperSyncJob().setErrorTimestamp(null);
+
+    this.getGrouperProvisioner().retrieveGrouperProvisioningFailsafe().processFailsafesAtStart();
+
+    try {
+      // ######### STEP 1: propagate provisioning data to group sync table
+      debugMap.put("state", "propagateProvisioningAttributes");
+      grouperProvisioningLogicIncremental.propagateProvisioningAttributes();
+      
+      // validate the perhaps throw exception
+      this.validateAndThrowExceptionIfInvalid();
+
+      // ######### STEP 2: check messages
+      debugMap.put("state", "incrementalCheckMessages");
+      grouperProvisioningLogicIncremental.incrementalCheckMessages();
+      GrouperDaemonUtils.stopProcessingIfJobPaused();
+
+      if (this.getGrouperProvisioner().getConfigId().startsWith("junitProvisioningAttributePropagationTest")) {
+        // just testing attribute propagation
+        return;
+      }
+      
+      // ######### STEP 3: check for esb events
+      debugMap.put("state", "incrementalCheckChangeLog");
+      grouperProvisioningLogicIncremental.incrementalCheckChangeLog();
+      GrouperDaemonUtils.stopProcessingIfJobPaused();
+    } finally {      
+      this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.logIncomingDataUnprocessed);
+    }
+    
+    // ######### STEP 3.5: bring groups from sql attributes
+    grouperProvisioningLogicIncremental.addGroupsFromSqlAttributes();
+    GrouperDaemonUtils.stopProcessingIfJobPaused();
+
+    if (this.getGrouperProvisioner().retrieveGrouperProvisioningDataIncrementalInput().isHasIncrementalDataToProcess()) {
+    
+      // ######### STEP 4: see if any actions happened before the last full sync
+      debugMap.put("state", "filterByProvisioningFullSync");
+      grouperProvisioningLogicIncremental.filterByProvisioningFullSync();
+    }
+    
+    if (this.getGrouperProvisioner().retrieveGrouperProvisioningDataIncrementalInput().isFullSync()) {
+
+      debugMap.put("runFullSync", "true");
+
+      runFullSyncFromIncremental(); 
+      
+    } else {
+    
+      if (this.getGrouperProvisioner().retrieveGrouperProvisioningDataIncrementalInput().isHasIncrementalDataToProcess()) {
+        // ######### STEP 5: events without recalc that occurred during full sync (after start before finish), should be recalc'ed
+        debugMap.put("state", "recalcActionsDuringFullSync");
+        grouperProvisioningLogicIncremental.recalcEventsDuringFullSync();
+      }
+      
+      //STEP 5.5
+      debugMap.put("state", "clearInvalidErrors");
+      clearInvalidErrors();
+      
+      // ######### STEP 6: look for errors based on algorithm and retry those actions
+      debugMap.put("state", "addErrorsToQueue");
+      grouperProvisioningLogicIncremental.addErrorsToQueue();
+      
+      if (this.getGrouperProvisioner().retrieveGrouperProvisioningDataIncrementalInput().isHasIncrementalDataToProcess()) {
+        // ######### STEP 7: filter out non recalc actions captures in recalc
+        debugMap.put("state", "filterNonRecalcActionsCapturedByRecalc");
+        grouperProvisioningLogicIncremental.filterNonRecalcActionsCapturedByRecalc();
+      }
+  
+      if (this.getGrouperProvisioner().retrieveGrouperProvisioningDataIncrementalInput().isHasIncrementalDataToProcess()) {
+        // ######### STEP 8: retrieve all group sync objects for 
+        debugMap.put("state", "retrieveIncrementalSyncGroups");
+        {
+          this.getGrouperProvisioner().retrieveGrouperProvisioningSyncDao().retrieveIncrementalSyncGroups("Pass1");
+        }
+        
+        
+        // ######### STEP 9: filter if not provisionable
+        debugMap.put("state", "filterByNotProvisionable");
+        grouperProvisioningLogicIncremental.filterByGroupNotProvisionable();
+        
+        // ######### STEP 10: retrieve all member sync objects for 
+        debugMap.put("state", "retrieveIncrementalSyncMembers");
+        {
+          this.getGrouperProvisioner().retrieveGrouperProvisioningSyncDao().retrieveIncrementalSyncMembers("Pass1");
+        }
+        
+      }
+      
+      if (this.getGrouperProvisioner().retrieveGrouperProvisioningDataIncrementalInput().isHasIncrementalDataToProcess()) {
+        // ######### STEP 11: filter by group sync
+        debugMap.put("state", "filterByGroupSync");
+        grouperProvisioningLogicIncremental.filterByGroupSync();
+      }
+      
+      if (this.getGrouperProvisioner().retrieveGrouperProvisioningDataIncrementalInput().isHasIncrementalDataToProcess()) {
+        // ######### STEP 11: filter by entity sync
+        debugMap.put("state", "filterByEntitySync");
+        grouperProvisioningLogicIncremental.filterByEntitySync();
+      }
+      
+      if (this.getGrouperProvisioner().retrieveGrouperProvisioningDataIncrementalInput().isHasIncrementalDataToProcess()) {
+        // ######### STEP 12: convert to group sync
+        debugMap.put("state", "convertToGroupSync");
+        grouperProvisioningLogicIncremental.convertToGroupSync();
+      }
+      
+      if (this.getGrouperProvisioner().retrieveGrouperProvisioningDataIncrementalInput().isHasIncrementalDataToProcess()) {
+        // ######### STEP 13: convert to full sync
+        debugMap.put("state", "convertToFullSync");
+        grouperProvisioningLogicIncremental.convertToFullSync();
+      }
+      
+      if (this.getGrouperProvisioner().retrieveGrouperProvisioningDataIncrementalInput().isFullSync()) {
+
+        debugMap.put("runFullSync", "true");
+
+        runFullSyncFromIncremental(); 
+        
+      } else {
+        
+        if (this.getGrouperProvisioner().retrieveGrouperProvisioningDataIncrementalInput().isHasIncrementalDataToProcess()) {
+          // ######### STEP 14: events without recalc that occurred during group sync (after start before finish), should be recalc'ed
+          debugMap.put("state", "recalcActionsDuringGroupSync");
+          grouperProvisioningLogicIncremental.recalcEventsDuringGroupSync();
+          debugMap.put("state", "recalcActionsDuringEntitySync");
+          grouperProvisioningLogicIncremental.recalcEventsDuringEntitySync();
+        }
+        
+        this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.logIncomingDataToProcess);
+
+        
+        if (this.getGrouperProvisioner().retrieveGrouperProvisioningDataIncrementalInput().isHasIncrementalDataToProcess()) {
+          // ######### STEP 15: retrieve grouper groups entities
+          {
+            debugMap.put("state", "retrieveIncrementalGrouperGroupsEntities");
+            long start = System.currentTimeMillis();
+            this.retrieveDataStartMillisSince1970 = start;
+            // keep track of when this started so we can update when group syncs occurred
+            debugMap.put("retrieveDataStartMillisSince1970", start);
+            this.grouperProvisioner.retrieveGrouperProvisioningLogic().retrieveGrouperDataIncrementalGroupsEntities("Pass1");
+            long retrieveGrouperDataMillis = System.currentTimeMillis()-start;
+            debugMap.put("retrieveGrouperGroupsEntitiesMillis", retrieveGrouperDataMillis);
+          }
+          
+          // ######### STEP 16: convert groups and entities to recalc when needed
+          // e.g. a new group should be recalc to be sure
+          debugMap.put("state", "convertGroupsToRecalc");
+          grouperProvisioningLogicIncremental.convertGroupsToRecalc(true);
+          debugMap.put("state", "convertEntitiesToRecalc");
+          grouperProvisioningLogicIncremental.convertEntitiesToRecalc(true);
+
+          // ######### STEP 17: retrieve all membership sync objects
+          debugMap.put("state", "retrieveIncrementalSyncMemberships");
+          {
+            
+            this.getGrouperProvisioner().retrieveGrouperProvisioningSyncDao().retrieveIncrementalSyncMemberships();
+            GrouperDaemonUtils.stopProcessingIfJobPaused();
+
+            //for any groups or entities that  are pulled back in membership recalcs, we need to retrieve grouper data
+            this.grouperProvisioner.retrieveGrouperProvisioningLogic().retrieveGrouperDataIncrementalGroupsEntities("Pass2");
+            
+            this.getGrouperProvisioner().retrieveGrouperProvisioningSyncDao().retrieveIncrementalSyncGroups("Pass2");
+            GrouperDaemonUtils.stopProcessingIfJobPaused();
+
+            this.getGrouperProvisioner().retrieveGrouperProvisioningSyncDao().retrieveIncrementalSyncMembers("Pass2");
+            GrouperDaemonUtils.stopProcessingIfJobPaused();
+  
+          }
+
+          // ######### STEP 19: retrieve grouper data memberships
+          try {
+            debugMap.put("state", "retrieveIncrementalMembershipsFromGrouper");
+            long start = System.currentTimeMillis();
+            this.retrieveDataStartMillisSince1970 = start;
+            // keep track of when this started so we can update when group syncs occurred
+            debugMap.put("retrieveDataStartMillisSince1970", start);
+            this.grouperProvisioner.retrieveGrouperProvisioningLogic().retrieveGrouperDataIncrementalMemberships();
+            
+            // for things that dont have sync memberships, but do have memberships, get those
+            //for any groups or entities that  are pulled back in membership recalcs, we need to retrieve grouper data
+            this.grouperProvisioner.retrieveGrouperProvisioningLogic().retrieveGrouperDataIncrementalGroupsEntities("Pass3");
+            
+            enhanceEntityAttributesWithDataFields();
+            GrouperDaemonUtils.stopProcessingIfJobPaused();
+            
+            enhanceEntityAttributesWithSqlResolver(false);
+            GrouperDaemonUtils.stopProcessingIfJobPaused();
+
+            enhanceEntityAttributesWithLdapResolver(false);
+            GrouperDaemonUtils.stopProcessingIfJobPaused();
+
+            enhanceGroupAttributesWithSqlResolver(false);
+            GrouperDaemonUtils.stopProcessingIfJobPaused();
+
+
+            this.getGrouperProvisioner().retrieveGrouperProvisioningSyncDao().retrieveIncrementalSyncGroups("Pass3");
+            GrouperDaemonUtils.stopProcessingIfJobPaused();
+
+            this.getGrouperProvisioner().retrieveGrouperProvisioningSyncDao().retrieveIncrementalSyncMembers("Pass3");
+            GrouperDaemonUtils.stopProcessingIfJobPaused();
+
+            long retrieveGrouperDataMillis = System.currentTimeMillis()-start;
+            debugMap.put("retrieveGrouperMembershipsMillis", retrieveGrouperDataMillis);
+          } finally {
+            this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.retrieveDataFromGrouper);
+          }
+
+          // ######### STEP 20: filter unneeded actions
+          // e.g action is no-op for example user is already in target and also in grouper so it's a no-op, don't send it to target 
+          debugMap.put("state", "filterUnneededActions");
+          grouperProvisioningLogicIncremental.filterUnneededActions();
+          
+          // ######### STEP 20.1: convert inconsistent events to recalc
+          // e.g. change log action is delete and membership does exist in grouper so we don't know who is right so in that case
+          // we just recalc to be on the safe side
+          debugMap.put("state", "convertInconsistentMembershipEventActions");
+          grouperProvisioningLogicIncremental.convertInconsistentMembershipEventActions();
+          
+          // ######### STEP 20.15: convert memberships to recalc when needed
+          // e.g. inconsistent membership should be recalc
+          debugMap.put("state", "convertMembershipsToRecalc");
+          grouperProvisioningLogicIncremental.convertMembershipsToRecalc();
+
+          // ######### STEP 20.3: convert groups and entities to recalc when needed
+          // e.g. new groups/entities from extra memberships
+          debugMap.put("state", "convertGroupsToRecalc");
+          grouperProvisioningLogicIncremental.convertGroupsToRecalc(false);
+          debugMap.put("state", "convertEntitiesToRecalc");
+          grouperProvisioningLogicIncremental.convertEntitiesToRecalc(false);
+
+
+          // ######### STEP 21: resolve subjects for subject link if recalc or for subjects missing data
+          debugMap.put("state", "retrieveSubjectLink");
+          this.grouperProvisioner.retrieveGrouperProvisioningLinkLogic().retrieveSubjectLink();
+        }
+        
+        if (this.getGrouperProvisioner().retrieveGrouperProvisioningDataIncrementalInput().isHasIncrementalDataToProcess()) {
+          // ######### STEP 22: translate grouper groups/entities to target format
+          {
+            debugMap.put("state", "translateGrouperGroupsEntitiesToTarget");
+            List<ProvisioningGroup> grouperProvisioningGroups = this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperProvisioningGroups();
+            List<ProvisioningGroup> grouperTargetGroups = this.grouperProvisioner.retrieveGrouperProvisioningTranslator().translateGrouperToTargetGroups(grouperProvisioningGroups, false, false);
+          }
+          
+          {
+            List<ProvisioningEntity> grouperProvisioningEntities = this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperProvisioningEntities();
+            
+            List<ProvisioningEntity> grouperTargetEntities = this.grouperProvisioner.retrieveGrouperProvisioningTranslator().translateGrouperToTargetEntities(
+                grouperProvisioningEntities, false, false);
+          }    
+  
+          // ######### STEP 23: based on configs manipulate the defaults, types, etc for grouper target groups/entities translated attributes and fields
+          {
+            
+            debugMap.put("state", "manipulateGrouperTargetGroups");
+            List<ProvisioningGroup> grouperTargetGroups = this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperTargetGroups();
+            Set<ProvisioningGroup> affectedGroups = this.grouperProvisioner.retrieveGrouperProvisioningAttributeManipulation().manipulateDefaultsFilterAttributesGroups(
+                grouperTargetGroups, true, true, false, false);
+            if (GrouperUtil.length(affectedGroups) > 0) {
+              this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.manipulateGrouperTargetGroups, affectedGroups);
+            }              
+          }
+          {
+            List<ProvisioningEntity> grouperTargetEntities = this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperTargetEntities();
+            Set<ProvisioningEntity> affectedEntities = this.grouperProvisioner.retrieveGrouperProvisioningAttributeManipulation().manipulateDefaultsFilterAttributesEntities(
+                grouperTargetEntities, true, true, false, false);
+            if (GrouperUtil.length(affectedEntities) > 0) {
+              this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.manipulateGrouperTargetEntities, affectedEntities);
+            }
+
+          }
+          
+          // ######### STEP 24: calculate the matching id of grouper translated groups/entities
+          try {
+            debugMap.put("state", "matchingIdGrouperGroupsEntities");
+            this.grouperProvisioner.retrieveGrouperProvisioningTranslator().idTargetGroups(
+                this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperTargetGroups());
+            this.grouperProvisioner.retrieveGrouperProvisioningTranslator().idTargetEntities(
+                this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperTargetEntities());
+          } finally {
+            this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.matchingIdGrouperGroupsEntities);
+          }
+  
+          // ######### STEP 25: take all the matching ids of grouper groups/entities and index those for quick lookups
+          {
+            debugMap.put("state", "indexMatchingIdGroups");
+            // index the groups and entity matching ids
+            this.grouperProvisioner.retrieveGrouperProvisioningMatchingIdIndex().indexMatchingIdGroups(null);
+            
+            debugMap.put("state", "indexMatchingIdEntities");
+            
+            this.grouperProvisioner.retrieveGrouperProvisioningMatchingIdIndex().indexMatchingIdEntities(null);
+            
+          }
+
+          skipPreExistingTargetGroups();
+          
+          // ######### STEP 26: validate groups
+          // validate
+          debugMap.put("state", "validate");
+          this.getGrouperProvisioner().retrieveGrouperProvisioningValidation().validateEntities(this.grouperProvisioner.retrieveGrouperProvisioningData().retrieveGrouperTargetEntities(), false, false, true);
+          this.getGrouperProvisioner().retrieveGrouperProvisioningValidation().validateGroupsHaveMembers(this.grouperProvisioner.retrieveGrouperProvisioningData().retrieveGrouperTargetGroups(), false);
+          this.getGrouperProvisioner().retrieveGrouperProvisioningValidation().validateGroups(this.grouperProvisioner.retrieveGrouperProvisioningData().retrieveGrouperTargetGroups(), false, false, true);
+
+          // ######### STEP 27: retrieve recalc groups and entities from target
+          try {
+            
+            grouperProvisioningLogicIncremental.determineGroupsToSelect();
+            grouperProvisioningLogicIncremental.determineEntitiesToSelect();
+            
+            debugMap.put("state", "retrieveIncrementalTargetGroupsAndEntities");
+            
+            long start = System.currentTimeMillis();
+            GrouperProvisioningLists targetProvisioningLists = grouperProvisioningLogicIncremental.retrieveIncrementalTargetGroupsAndEntities();
+            if (targetProvisioningLists != null) {
+              processTargetDataEntities(targetProvisioningLists.getProvisioningEntities(), false);
+              processTargetDataGroups(targetProvisioningLists.getProvisioningGroups(), false);
+            }
+            long retrieveTargetDataMillis = System.currentTimeMillis()-start;
+            debugMap.put("retrieveIncrementalTargetGroupsAndEntitiesMillis", retrieveTargetDataMillis);
+          } finally {
+            this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.retrieveTargetDataGroupsAndEntities);
+          }
+
+          grouperProvisioningLogicIncremental.calculateGroupAction();
+          
+          // GRP-7436: groups / entities are matched; pull the ignoreIfMatchesValue ones before inserts
+          debugMap.put("state", "removeIgnoredGroupsAndEntities");
+          this.removeIgnoredGroupsAndEntities();
+
+          // ######### STEP 30: create groups / entities
+          debugMap.put("state", "insertGroups");
+          createMissingGroupsFull();
+  
+          debugMap.put("state", "insertEntities");
+          createMissingEntitiesFull();
+  
+          // ######### STEP 31: retrieve target group and entity link
+          // GRP-7052: capture which entities/groups are already flagged for membership recalc BEFORE the
+          // link phase.  The link phase can flag additional objects for membership recalc when it detects
+          // a target id change (target object recreated with a new id); those flags are set after the
+          // initial grouper membership load, so we detect and reload them below.
+          Set<String> memberIdsRecalcMembershipsBeforeLink = grouperProvisioningLogicIncremental.membersFlaggedForMembershipRecalc();
+          Set<String> groupIdsRecalcMembershipsBeforeLink = grouperProvisioningLogicIncremental.groupsFlaggedForMembershipRecalc();
+
+          debugMap.put("state", "updateGroupLinkFull");
+          this.grouperProvisioner.retrieveGrouperProvisioningLinkLogic().updateGroupLinkFull();
+          
+          debugMap.put("state", "updateEntityLinkFull");
+          this.grouperProvisioner.retrieveGrouperProvisioningLinkLogic().updateEntityLinkFull();
+
+          // ######### STEP 31.5 (GRP-7052): if the link phase flagged an entity/group for membership
+          // recalc due to a detected target id change, its memberships were not loaded in the initial
+          // grouper membership retrieval (which keys off these same flags but ran earlier).  Reload the
+          // grouper memberships for those newly-flagged objects so ALL of the object's memberships are
+          // re-sent to the recreated target object rather than waiting for a full sync.  This is a no-op
+          // (no retrieval) unless the link phase flagged a NEW object.
+          debugMap.put("state", "retrieveGrouperMembershipsForLinkDetectedIdChanges");
+          grouperProvisioningLogicIncremental.retrieveGrouperMembershipsForLinkDetectedIdChanges(
+              memberIdsRecalcMembershipsBeforeLink, groupIdsRecalcMembershipsBeforeLink);
+
+
+          // ######### STEP 35: index matching ID of grouper and target objects
+          debugMap.put("state", "indexMatchingIdOfGrouperObjects");
+          this.grouperProvisioner.retrieveGrouperProvisioningMatchingIdIndex().indexMatchingIdGroups(null);
+          this.grouperProvisioner.retrieveGrouperProvisioningMatchingIdIndex().indexMatchingIdEntities(null);
+
+
+          // ######### STEP 32: translate grouper memberships to target format
+          {
+            debugMap.put("state", "translateGrouperMembershipsToTarget");
+  
+            List<ProvisioningMembership> grouperProvisioningMemberships = this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperProvisioningMemberships(false);
+            List<ProvisioningMembership> grouperTargetMemberships = this.grouperProvisioner.retrieveGrouperProvisioningTranslator().translateGrouperToTargetMemberships(
+                grouperProvisioningMemberships, true);
+  
+          }
+
+          // ######### STEP 33: based on configs manipulate the defaults, types, etc for grouper target memberships translated attributes and fields
+          {
+            debugMap.put("state", "manipulateGrouperTargetMembershipAttributes");
+
+            List<ProvisioningMembership> grouperTargetMemberships = this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperTargetMemberships(false);
+            
+            Set<ProvisioningMembership> affectedMemberships = this.grouperProvisioner.retrieveGrouperProvisioningAttributeManipulation().manipulateDefaultsFilterAttributesMemberships(
+                grouperTargetMemberships, true, true, false, false);
+            if (GrouperUtil.length(affectedMemberships) > 0) {
+              this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.manipulateGrouperTargetMemberships, affectedMemberships);
+            }
+          }
+          
+          // ######### STEP 34: calculate the matching id of grouper translated membership data
+          try {
+            debugMap.put("state", "matchingIdGrouperMemberships");
+            this.grouperProvisioner.retrieveGrouperProvisioningTranslator().idTargetMemberships(
+                this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperTargetMemberships(false));
+            
+          } finally {
+            if (GrouperProvisioningLogic.this.grouperProvisioner.retrieveGrouperProvisioningBehavior().getGrouperProvisioningBehaviorMembershipType() 
+                == GrouperProvisioningBehaviorMembershipType.membershipObjects) {
+              this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.matchingIdGrouperMemberships);
+            }
+          }
+          
+          this.getGrouperProvisioner().retrieveGrouperProvisioningValidation().validateMemberships(this.grouperProvisioner.retrieveGrouperProvisioningData().retrieveGrouperTargetMemberships(false), true);
+
+          grouperProvisioningLogicIncremental.determineMembershipsToSelect();
+          
+          // ######## Retrieve memberships from target that are recalc where the group is not recalc
+          {
+            debugMap.put("state", "retrieveIncrementalTargetMemberships");
+            long start = System.currentTimeMillis();
+            GrouperProvisioningLists targetProvisioningLists = grouperProvisioningLogicIncremental.retrieveIncrementalTargetMemberships();
+            
+            if (targetProvisioningLists != null) {
+              processTargetDataGroups(targetProvisioningLists.getProvisioningGroups(), false);
+              processTargetDataEntities(targetProvisioningLists.getProvisioningEntities(), false);
+              processTargetDataMemberships(targetProvisioningLists.getProvisioningMemberships(), false);
+            }
+            
+//            grouperProvisioningLogicIncremental.retrieveTargetIncrementalMembershipsWithRecalcWhereContainerIsNotRecalc();
+            long retrieveTargetDataMillis = System.currentTimeMillis()-start;
+            debugMap.put("retrieveIncrementalTargetMemberships", retrieveTargetDataMillis);
+            this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.retrieveTargetDataMemberships, targetProvisioningLists);
+          }
+          {
+            // index the memberships
+            this.grouperProvisioner.retrieveGrouperProvisioningMatchingIdIndex().indexMatchingIdMemberships(null);
+
+//            if (this.grouperProvisioner.retrieveGrouperProvisioningBehavior().isSelectGroups()) {
+            this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().processResultsSelectGroupsFull(this.grouperProvisioner.retrieveGrouperProvisioningData().getProvisioningGroupWrappers());
+//            }
+            
+//            if (this.grouperProvisioner.retrieveGrouperProvisioningBehavior().isSelectEntities()) {
+            this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().processResultsSelectEntitiesFull(this.grouperProvisioner.retrieveGrouperProvisioningData().getProvisioningEntityWrappers());
+//            }
+            
+//            if (this.grouperProvisioner.retrieveGrouperProvisioningBehavior().isSelectMemberships()) {
+            this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().processResultsSelectMembershipsFull(
+                this.grouperProvisioner.retrieveGrouperProvisioningData().getProvisioningGroupWrappers(),
+                this.grouperProvisioner.retrieveGrouperProvisioningData().getProvisioningEntityWrappers(),
+                this.grouperProvisioner.retrieveGrouperProvisioningData().getProvisioningMembershipWrappers());
+//            }
+            
+//            this.getGrouperProvisioner().retrieveGrouperProvisioningValidation().validateGroups(this.grouperProvisioner.retrieveGrouperProvisioningData().retrieveGrouperTargetGroups(), false, true, false);
+//            this.getGrouperProvisioner().retrieveGrouperProvisioningValidation().validateEntities(this.grouperProvisioner.retrieveGrouperProvisioningData().retrieveGrouperTargetEntities(), false, true, false);
+          }
+          
+          // ######### Mark memberships retrieved by group or entity as recalc
+          for (ProvisioningMembershipWrapper provisioningMembershipWrapper : this.grouperProvisioner.retrieveGrouperProvisioningData().getProvisioningMembershipWrappers()) {
+            if (provisioningMembershipWrapper.getTargetProvisioningMembership() != null) {
+              provisioningMembershipWrapper.getProvisioningStateMembership().setRecalcObject(this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isSelectMembershipsForRecalc());
+            }
+          }
+          
+          // GRP-7436: memberships are matched; pull the ignored ones before compare
+          debugMap.put("state", "removeIgnoredMemberships");
+          this.removeIgnoredMemberships();
+
+          // ######### STEP 36: compare target objects
+          try {
+            this.logCompareCalculationsPreCompare();
+            debugMap.put("state", "compareTargetObjectsIncremental");
+            this.grouperProvisioner.retrieveGrouperProvisioningCompare().compareTargetObjects();
+          } finally {
+            this.logCompareCalculationsPostCompare();
+
+            this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.compareTargetObjects);
+            
+          }
+                
+          this.getGrouperProvisioner().retrieveGrouperProvisioningFailsafe().processFailsafes();
+
+          // ######### STEP 37: send changes to target
+          RuntimeException runtimeException = null;
+          try {
+            debugMap.put("state", "sendChangesToTarget");
+            TargetDaoSendChangesToTargetRequest targetDaoSendChangesToTargetRequest = new TargetDaoSendChangesToTargetRequest();
+            targetDaoSendChangesToTargetRequest.setTargetObjectInserts(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectInserts());
+            targetDaoSendChangesToTargetRequest.setTargetObjectUpdates(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectUpdates());
+            targetDaoSendChangesToTargetRequest.setTargetObjectReplaces(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectReplaces());
+            targetDaoSendChangesToTargetRequest.setTargetObjectDeletes(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectDeletes());
+            this.getGrouperProvisioner().retrieveGrouperProvisioningTargetDaoAdapter().sendChangesToTarget(targetDaoSendChangesToTargetRequest);
+          } catch (RuntimeException e) {
+            runtimeException = e;
+          } finally {
+            try {
+              this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().processResultsInserts(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectInserts());
+              this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().processResultsUpdatesFull(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectUpdates());
+              this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().processResultsReplaces(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectReplaces());
+              this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().processResultsDeletes(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectDeletes());
+            } catch (RuntimeException e) {
+              GrouperUtil.exceptionFinallyInjectOrThrow(runtimeException, e);
+            }
+            //TODO this.getGrouperProvisioner().getGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.sendChangesToTarget);
+  
+          }
+          
+          this.countInsertsUpdatesDeletes();
+
+          this.errorHandling();
+          
+          // ######### STEP 38: sync-back drain, then insert/update/delete from grouper_prov* tables
+          syncBackDrainGroups();
+          syncBackDrainUsers();
+          // recover entities whose update collided with a pre-existing target account (re-link +
+          // dispose orphan per settings); before the store below so the re-link persists this run
+          drainEntityRelinks();
+          loadDataToGenericProvisionerTablesIncremental();
+
+        }
+        
+        {
+          Timestamp nowTimestamp = new Timestamp(System.currentTimeMillis());
+
+          GcGrouperSync gcGrouperSync = this.grouperProvisioner.getGcGrouperSync();
+          
+          List<EsbEventContainer> esbEventContainers = this.grouperProvisioner.retrieveGrouperProvisioningDataIncrementalInput().getEsbEventContainers();
+          if (GrouperUtil.length(esbEventContainers) > 0) {
+            EsbEventContainer lastEvent = esbEventContainers.get(esbEventContainers.size()-1);
+            Long createdOnMicros = lastEvent.getEsbEvent().getCreatedOnMicros();
+            if (createdOnMicros != null) {
+              Timestamp incrementalTimeStamp = new Timestamp(createdOnMicros/1000);
+              gcGrouperSync.setIncrementalTimestamp(incrementalTimeStamp);
+            }
+          }
+          
+          gcGrouperSync.setLastIncrementalSyncRun(nowTimestamp);
+          
+          GcGrouperSyncJob gcGrouperSyncJob = this.grouperProvisioner.getGcGrouperSyncJob();
+
+          gcGrouperSyncJob.setLastSyncTimestamp(nowTimestamp);
+          if (this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().wasWorkDone()) {
+            gcGrouperSyncJob.setLastTimeWorkWasDone(nowTimestamp);
+          }
+          gcGrouperSyncJob.setPercentComplete(100);
+
+          // create per-group logs for the group provisioning logs screen (incremental only)
+          createPerGroupSyncLogsIncremental();
+
+          // do this in the right spot, after assigning correct sync info about sync
+          int objectStoreCount = this.getGrouperProvisioner().getGcGrouperSync().getGcGrouperSyncDao().storeAllObjects();
+          this.grouperProvisioner.getProvisioningSyncResult().setSyncObjectStoreCount(objectStoreCount);
+      
+          this.grouperProvisioner.getDebugMap().put("syncObjectStoreCount", objectStoreCount);
+          
+        }
+
+        // TODO flesh this out, resolve subjects, linked cached data, etc, try individually again
+//        this.getGrouperProvisioner().retrieveTargetDao().resolveErrors();
+//        this.getGrouperProvisioner().retrieveTargetDao().sendErrorFixesToTarget();
+
+//        this.getGrouperProvisioner().getGrouperProvisioningLogicAlgorithm().syncGrouperTranslatedGroupsToTarget();
+//        this.getGrouperProvisioner().getGrouperProvisioningLogicAlgorithm().syncGrouperTranslatedMembershipsToTarget();
+
+        // make sure the sync objects are correct
+//        new ProvisioningSyncIntegration().assignTarget(this.getGrouperProvisioner().getConfigId()).fullSync();
+
+//        // step 1
+//        debugMap.put("state", "retrieveData");
+//        this.gcTableSyncConfiguration.getGcTableSyncSubtype().retrieveData(debugMap, this);
+//        
+//        this.gcGrouperSyncLog.setRecordsProcessed(Math.max(this.gcTableSyncOutput.getRowsSelectedFrom(), this.gcTableSyncOutput.getRowsSelectedTo()));
+    //
+//        if (this.gcGrouperSyncHeartbeat.isInterrupted()) {
+//          debugMap.put("interrupted", true);
+//          debugMap.put("state", "done");
+//          gcGrouperSyncLog.setStatus(GcGrouperSyncLogState.INTERRUPTED);
+//          return;
+//        }
+        if (GrouperClientUtils.isBlank(this.getGrouperProvisioner().getGcGrouperSyncLog().getStatus())) {
+          this.getGrouperProvisioner().getGcGrouperSyncLog().setStatus(GcGrouperSyncLogState.SUCCESS);
+        }
+
+      }
+  
+    }
+    
+    // ######### STEP 36: acknowledge messages
+    this.getGrouperProvisioner().retrieveGrouperProvisioningLogicIncremental().acknowledgeMessagesProcessed();
+
+  }
+
+  public void logCompareCalculationsHelper(String label, ProvisioningUpdatable provisioningUpdatable, List<ProvisioningMembership> membershipsForReplace) {
+    String prefix = label + ": " + provisioningUpdatable.toString(false);
+    boolean logResult = true;
+    StringBuilder logMessage = new StringBuilder(prefix);
+    int actionCount = 0;
+    if (GrouperUtil.length(provisioningUpdatable.getInternal_objectChanges()) > 0) {
+      for (String attributeName : provisioningUpdatable.retrieveAttributes().keySet()) {
+        
+        for (ProvisioningObjectChange provisioningObjectChange : provisioningUpdatable.getInternal_objectChanges()) {
+          
+          if (!StringUtils.equals(attributeName, provisioningObjectChange.getAttributeName())) {
+            continue;
+          }
+          logMessage.append("\n - (action ").append(actionCount+1).append("/").append(GrouperUtil.length(provisioningUpdatable.getInternal_objectChanges())).append("): ")
+            .append(provisioningObjectChange.getProvisioningObjectChangeAction().name().substring(0, 3)).append(" ").append(provisioningObjectChange.getAttributeName()).append(" ");
+          switch(provisioningObjectChange.getProvisioningObjectChangeAction()) {
+            case insert:
+              logMessage.append(ProvisioningUpdatable.stringValueWithType(provisioningObjectChange.getNewValue()));
+              break;
+            case delete:
+              logMessage.append(ProvisioningUpdatable.stringValueWithType(provisioningObjectChange.getOldValue()));
+              break;
+            case update:
+              logMessage.append(ProvisioningUpdatable.stringValueWithType(provisioningObjectChange.getOldValue()));
+              logMessage.append(" -> ");
+              logMessage.append(ProvisioningUpdatable.stringValueWithType(provisioningObjectChange.getNewValue()));
+              break;
+          }
+          actionCount++;
+          if ((actionCount + 1) % 1001 == 0) {
+            logResult = false;
+            this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().info(logMessage.toString());
+            logMessage = new StringBuilder(prefix);
+          } else {
+            logResult = true;
+          }
+
+        }
+      }      
+    }
+    if (GrouperUtil.length(membershipsForReplace) > 0) {
+      for (ProvisioningMembership provisioningMembership : membershipsForReplace) {
+        
+        StringBuilder result = new StringBuilder();
+        
+        result.append("\n - (action ").append(actionCount+1).append("/").append(GrouperUtil.length(provisioningUpdatable.getInternal_objectChanges())).append("): ")
+          .append("replace").append(" ").append(" ");
+        result.append(provisioningMembership.toString(true));
+        actionCount++;
+        if ((actionCount + 1) % 1001 == 0) {
+          logResult = false;
+          this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().info(logMessage.toString());
+          logMessage = new StringBuilder(prefix);
+        } else {
+          logResult = true;
+        }
+      }      
+    }
+    if (logResult) {
+      this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().info(logMessage.toString());
+    }
+  }
+  
+  public void logCompareCalculationsPreCompare() {
+    
+    // log after compare if necessary
+    if (grouperProvisioner.retrieveGrouperProvisioningConfiguration().isLogCompareCalculations()) {
+      
+      GrouperProvisioningLists grouperTargetObjectsMissing = grouperProvisioner.retrieveGrouperProvisioningDataChanges().getGrouperTargetObjectsMissing();
+
+      if (GrouperUtil.length(grouperTargetObjectsMissing.getProvisioningEntities()) > 0) {
+        this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().info("### Insert entities " + grouperTargetObjectsMissing.getProvisioningEntities().size());
+        for (ProvisioningEntity provisioningEntity : grouperTargetObjectsMissing.getProvisioningEntities()) {
+          logCompareCalculationsHelper("Insert entity", provisioningEntity, null);
+        }
+
+      }
+      
+      if (GrouperUtil.length(grouperTargetObjectsMissing.getProvisioningGroups()) > 0) {
+        this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().info("### Insert groups " + grouperTargetObjectsMissing.getProvisioningGroups().size());
+        for (ProvisioningGroup provisioningGroup : grouperTargetObjectsMissing.getProvisioningGroups()) {
+          logCompareCalculationsHelper("Insert group", provisioningGroup, null);
+        }
+        
+      }
+      
+    }
+    
+  }
+
+
+  public void logCompareCalculationsPostCompare() {
+    
+    
+    // log after compare if necessary
+    if (grouperProvisioner.retrieveGrouperProvisioningConfiguration().isLogCompareCalculations()) {
+
+
+      if (GrouperUtil.length(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectInserts().getProvisioningGroups()) > 0) {
+        this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().info("### Insert groups " 
+            + this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectInserts().getProvisioningGroups().size());
+        for (ProvisioningGroup provisioningGroup : this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectInserts().getProvisioningGroups()) {
+          logCompareCalculationsHelper("Insert group", provisioningGroup, null);
+        }
+        
+      }
+      
+      if (GrouperUtil.length(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectInserts().getProvisioningEntities()) > 0) {
+        this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().info("### Insert entities " + this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectInserts().getProvisioningEntities().size());
+        for (ProvisioningEntity provisioningEntity : this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectInserts().getProvisioningEntities()) {
+          logCompareCalculationsHelper("Insert entity", provisioningEntity, null);
+        }
+
+      }
+      
+      if (GrouperUtil.length(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectInserts().getProvisioningMemberships()) > 0) {
+        this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().info("### Insert memberships " 
+            + GrouperUtil.length(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectInserts().getProvisioningMemberships()));
+        for (ProvisioningMembership provisioningMembership 
+            : GrouperUtil.nonNull(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectInserts().getProvisioningMemberships())) {
+          logCompareCalculationsHelper("Insert membership", provisioningMembership, null);
+        }
+      }
+      
+
+      if (GrouperUtil.length(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectUpdates().getProvisioningGroups()) > 0) {
+        this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().info("### Update groups " 
+            + GrouperUtil.length(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectUpdates().getProvisioningGroups()));
+        for (ProvisioningGroup provisioningGroup 
+            : GrouperUtil.nonNull(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectUpdates().getProvisioningGroups())) {
+          logCompareCalculationsHelper("Update group", provisioningGroup, null);
+        }
+      }
+      
+
+      if (GrouperUtil.length(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectUpdates().getProvisioningEntities()) > 0) {
+        this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().info("### Update entities " 
+            + GrouperUtil.length(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectUpdates().getProvisioningEntities()));
+        for (ProvisioningEntity provisioningEntity
+            : GrouperUtil.nonNull(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectUpdates().getProvisioningEntities())) {
+          logCompareCalculationsHelper("Update entity", provisioningEntity, null);
+        }
+      }
+      
+
+      if (GrouperUtil.length(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectUpdates().getProvisioningMemberships()) > 0) {
+        this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().info("### Update memberships " 
+            + GrouperUtil.length(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectUpdates().getProvisioningMemberships()));
+        for (ProvisioningMembership provisioningMembership
+            : GrouperUtil.nonNull(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectUpdates().getProvisioningMemberships())) {
+          logCompareCalculationsHelper("Update memberhip", provisioningMembership, null);
+        }
+      }
+      
+      
+      if (GrouperUtil.length(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectDeletes().getProvisioningGroups()) > 0) {
+        this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().info("### Delete groups " 
+            + GrouperUtil.length(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectDeletes().getProvisioningGroups()));
+        for (ProvisioningGroup provisioningGroup 
+            : GrouperUtil.nonNull(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectDeletes().getProvisioningGroups())) {
+          logCompareCalculationsHelper("Delete group", provisioningGroup, null);
+        }
+      }
+      
+
+      if (GrouperUtil.length(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectDeletes().getProvisioningEntities()) > 0) {
+        this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().info("### Delete entities " 
+            + GrouperUtil.length(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectDeletes().getProvisioningEntities()));
+        for (ProvisioningEntity provisioningEntity
+            : GrouperUtil.nonNull(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectDeletes().getProvisioningEntities())) {
+          logCompareCalculationsHelper("Delete entity", provisioningEntity, null);
+        }
+      }
+      
+
+      if (GrouperUtil.length(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectUpdates().getProvisioningMemberships()) > 0) {
+        this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().info("### Delete memberships " 
+            + GrouperUtil.length(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectUpdates().getProvisioningMemberships()));
+        for (ProvisioningMembership provisioningMembership
+            : GrouperUtil.nonNull(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectUpdates().getProvisioningMemberships())) {
+          logCompareCalculationsHelper("Delete memberhip", provisioningMembership, null);
+        }
+      }
+      
+
+      if (GrouperUtil.length(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectReplaces().getProvisioningMemberships()) > 0) {
+        this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().info("### Replace group memberships " 
+            + GrouperUtil.length(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectReplaces().getProvisioningMemberships()));
+        for (ProvisioningGroup provisioningGroup 
+            : GrouperUtil.nonNull(this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectReplaces().getProvisioningMemberships()).keySet()) {
+          logCompareCalculationsHelper("Replace group", provisioningGroup, 
+              this.grouperProvisioner.retrieveGrouperProvisioningDataChanges().getTargetObjectReplaces().getProvisioningMemberships().get(provisioningGroup));
+        }
+      }
+      
+    }
+    
+    
+    
+  }
+
+  /**
+   * 
+   * @param objectTypeErrorCodeToCount
+   * @param gcGrouperSyncErrorCode
+   * @return true if error
+   */
+  public boolean errorHandlingHandleError(Map<MultiKey, Integer> objectTypeErrorCodeToCount, ProvisioningUpdatableWrapper provisioningUpdatableWrapper, GcGrouperSyncErrorCode gcGrouperSyncErrorCode, String errorMessage, Exception exception) {
+    
+    boolean logErrors = this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().isErrorHandlingLogErrors();
+    boolean daemonShouldFail = this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().isErrorHandlingProvisionerDaemonShouldFailOnObjectError();
+
+    // we arent doing anything so ignore
+    if (!logErrors && !daemonShouldFail) {
+      return false;
+    }
+    
+    // is this an error?
+    boolean errorCodeIsError = true;
+    boolean errorCodeIsLoggable = true;
+    switch(gcGrouperSyncErrorCode) {
+      case DNE:
+        if (!this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().isErrorHandlingTargetObjectDoesNotExistIsAnError()) {
+          errorCodeIsError = false;
+        }
+        break;
+      case INV:
+        if (!this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().isErrorHandlingInvalidDataIsAnError()) {
+          errorCodeIsError = false;
+        }
+        break;
+      case LEN:
+        if (!this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().isErrorHandlingLengthValidationIsAnError()) {
+          errorCodeIsError = false;
+        }
+        break;
+      case MEM:
+        errorCodeIsError = false;
+        errorCodeIsLoggable = false;
+        break;
+      case REQ:
+        if (!this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().isErrorHandlingRequiredValidationIsAnError()) {
+          errorCodeIsError = false;
+        }
+        break;
+      case MAT:
+        if (!this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().isErrorHandlingMatchingValidationIsAnError()) {
+          errorCodeIsError = false;
+        }
+        break;
+      case SKP:
+        if (!this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().isErrorHandlingSkipIfTargetGroupExistsIsAnError()) {
+          errorCodeIsError = false;
+        }
+        break;
+      case ERR:
+        break;
+      default:
+        throw new RuntimeException("Not expecting error code! " + gcGrouperSyncErrorCode);
+    }
+    
+    if (!errorCodeIsError) {
+      return false;
+    }
+    if (daemonShouldFail) {
+      this.getGrouperProvisioner().retrieveGrouperProvisioningOutput().getHib3GrouperLoaderLog().setStatus(GrouperLoaderStatus.ERROR.name());
+      this.getGrouperProvisioner().getGcGrouperSyncLog().setStatus(GcGrouperSyncLogState.ERROR);
+    }
+
+    MultiKey objectTypeErrorCode = new MultiKey(provisioningUpdatableWrapper.objectTypeName(), gcGrouperSyncErrorCode);
+    int count = GrouperUtil.mapAddValueObjectKey((Map<Object, Object>)(Object)objectTypeErrorCodeToCount, objectTypeErrorCode, 1);
+    int maxCount = this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().getErrorHandlingLogCountPerType();
+
+    // is this an update?  maybe?
+    this.grouperProvisioner.retrieveGrouperProvisioningOutput().addRecordsWithUpdateErrors(1);
+    
+    if (errorCodeIsLoggable && count <= maxCount) {
+      this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().error("Error with " + provisioningUpdatableWrapper.objectTypeName() + ", " + provisioningUpdatableWrapper.toStringForError() + ", " + gcGrouperSyncErrorCode + ", " + errorMessage, exception);
+    }
+    return true;
+  }
+  
+  public void errorHandling() {
+
+    Map<MultiKey, Integer> objectTypeErrorCodeToCount = new HashMap<MultiKey, Integer>();
+
+    boolean hasError = false;
+    
+    // look at errors
+    for (ProvisioningGroupWrapper provisioningGroupWrapper : GrouperUtil.nonNull(this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningGroupWrappers())) {
+      ProvisioningGroup grouperTargetGroup = provisioningGroupWrapper.getGrouperTargetGroup();
+      Exception exception = grouperTargetGroup == null ? null : grouperTargetGroup.getException();
+      GcGrouperSyncGroup gcGrouperSyncGroup = provisioningGroupWrapper.getGcGrouperSyncGroup();
+      if (gcGrouperSyncGroup == null) {
+        continue;
+      }
+      
+      if (exception != null && gcGrouperSyncGroup.getErrorCode() == null) {
+        gcGrouperSyncGroup.setErrorCode(GcGrouperSyncErrorCode.ERR);
+        gcGrouperSyncGroup.setErrorMessage(GrouperUtil.getFullStackTrace(exception));
+        Timestamp groupErrorTimestamp = this.getGrouperProvisioner().retrieveGrouperProvisioningSyncDao().groupErrorTimestamp(gcGrouperSyncGroup);
+        gcGrouperSyncGroup.setErrorTimestamp(groupErrorTimestamp);
+      }
+      
+      if (gcGrouperSyncGroup.getErrorCode() == null && provisioningGroupWrapper.getErrorCode() != null) {
+        gcGrouperSyncGroup.setErrorCode(provisioningGroupWrapper.getErrorCode());
+        Timestamp groupErrorTimestamp = this.getGrouperProvisioner().retrieveGrouperProvisioningSyncDao().groupErrorTimestamp(gcGrouperSyncGroup);
+        gcGrouperSyncGroup.setErrorTimestamp(groupErrorTimestamp);
+      }
+      
+      if (gcGrouperSyncGroup.getErrorCode() == null) {
+        continue;
+      }
+      hasError = errorHandlingHandleError(objectTypeErrorCodeToCount,  provisioningGroupWrapper, gcGrouperSyncGroup.getErrorCode(), gcGrouperSyncGroup.getErrorMessage(), exception) || hasError;
+    }
+
+    for (ProvisioningEntityWrapper provisioningEntityWrapper : GrouperUtil.nonNull(this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningEntityWrappers())) {
+      ProvisioningEntity grouperTargetEntity = provisioningEntityWrapper.getGrouperTargetEntity();
+      Exception exception = grouperTargetEntity == null ? null : grouperTargetEntity.getException();
+      GcGrouperSyncMember gcGrouperSyncMember = provisioningEntityWrapper.getGcGrouperSyncMember();
+      if (gcGrouperSyncMember == null) {
+        continue;
+      }
+      if (exception != null && gcGrouperSyncMember.getErrorCode() == null) {
+        gcGrouperSyncMember.setErrorCode(GcGrouperSyncErrorCode.ERR);
+        gcGrouperSyncMember.setErrorMessage(GrouperUtil.getFullStackTrace(exception));
+        Timestamp entityErrorTimestamp = this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().entityErrorTimestamp(gcGrouperSyncMember);
+        gcGrouperSyncMember.setErrorTimestamp(entityErrorTimestamp);
+      }
+      
+      if (gcGrouperSyncMember.getErrorCode() == null && provisioningEntityWrapper.getErrorCode() != null) {
+        gcGrouperSyncMember.setErrorCode(provisioningEntityWrapper.getErrorCode());
+        Timestamp entityErrorTimestamp = this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().entityErrorTimestamp(gcGrouperSyncMember);
+        gcGrouperSyncMember.setErrorTimestamp(entityErrorTimestamp);
+      }
+      if (gcGrouperSyncMember.getErrorCode() == null) {
+        continue;
+      }
+      hasError = errorHandlingHandleError(objectTypeErrorCodeToCount,  provisioningEntityWrapper, gcGrouperSyncMember.getErrorCode(), gcGrouperSyncMember.getErrorMessage(), exception) || hasError;
+    }
+
+    for (ProvisioningMembershipWrapper provisioningMembershipWrapper : GrouperUtil.nonNull(this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningMembershipWrappers())) {
+      ProvisioningMembership grouperTargetMembership = provisioningMembershipWrapper.getGrouperTargetMembership();
+      Exception exception = grouperTargetMembership == null ? null : grouperTargetMembership.getException();
+      GcGrouperSyncMembership gcGrouperSyncMembership = provisioningMembershipWrapper.getGcGrouperSyncMembership();
+      if (gcGrouperSyncMembership == null) {
+        continue;
+      }
+      if (exception != null && gcGrouperSyncMembership.getErrorCode() == null) {
+        gcGrouperSyncMembership.setErrorCode(GcGrouperSyncErrorCode.ERR);
+        gcGrouperSyncMembership.setErrorMessage(GrouperUtil.getFullStackTrace(exception));
+        Timestamp membershipErrorTimestamp = this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().membershipErrorTimestamp(gcGrouperSyncMembership);
+        gcGrouperSyncMembership.setErrorTimestamp(membershipErrorTimestamp);
+      }
+      
+      if (gcGrouperSyncMembership.getErrorCode() == null && provisioningMembershipWrapper.getErrorCode() != null) {
+        gcGrouperSyncMembership.setErrorCode(provisioningMembershipWrapper.getErrorCode());
+        Timestamp membershipErrorTimestamp = this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().membershipErrorTimestamp(gcGrouperSyncMembership);
+        gcGrouperSyncMembership.setErrorTimestamp(membershipErrorTimestamp);
+      }
+      if (gcGrouperSyncMembership.getErrorCode() == null) {
+        continue;
+      }
+      hasError = errorHandlingHandleError(objectTypeErrorCodeToCount,  provisioningMembershipWrapper, gcGrouperSyncMembership.getErrorCode(), gcGrouperSyncMembership.getErrorMessage(), exception) || hasError;
+    }
+
+    if (!hasError) {
+      return;
+    }
+    StringBuilder errorSummary = new StringBuilder();
+    
+    for (MultiKey objectTypeErrorCode : objectTypeErrorCodeToCount.keySet()) {
+      if (errorSummary.length() != 0) {
+        errorSummary.append(", ");
+      }
+      errorSummary.append(objectTypeErrorCode.getKey(0) + " error " + objectTypeErrorCode.getKey(1) + " count " + objectTypeErrorCodeToCount.get(objectTypeErrorCode));
+    }
+
+    String errorSummaryString = errorSummary.toString();
+    this.getGrouperProvisioner().getDebugMap().put("objectErrors", errorSummaryString);
+    
+    if (hasError && this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().isErrorHandlingProvisionerDaemonShouldFailOnObjectError()) {
+      this.grouperProvisioner.retrieveGrouperProvisioningOutput().getHib3GrouperLoaderLog().setStatus(GrouperLoaderStatus.ERROR.name());
+    }
+    // maybe not mess with job status?
+//    if (GcGrouperSyncLogState.ERROR.equals(this.getGrouperProvisioner().getGcGrouperSyncLog().getStatus())) {
+//      if (StringUtils.isBlank(this.getGrouperProvisioner().getGcGrouperSyncJob().getErrorMessage())) {
+//        this.getGrouperProvisioner().getGcGrouperSyncJob().setErrorMessage(errorSummaryString);
+//      }
+//      if (this.getGrouperProvisioner().getGcGrouperSyncJob().getErrorTimestamp() == null) {
+//        this.grouperProvisioner.getGcGrouperSyncJob().setErrorTimestamp(new Timestamp(System.currentTimeMillis()));
+//      }
+//    }
+  }
+
+  public void storeAllSyncObjects() {
+    {
+      // do this in the right spot, after assigning correct sync info about sync
+      int objectStoreCount = this.getGrouperProvisioner().getGcGrouperSync().getGcGrouperSyncDao().storeAllObjects();
+      this.grouperProvisioner.getProvisioningSyncResult().setSyncObjectStoreCount(objectStoreCount);
+  
+      this.grouperProvisioner.getDebugMap().put("syncObjectStoreCount", objectStoreCount);
+    }
+  }
+
+  public void runFullSyncFromIncremental() {
+    
+    // end out this provisioner
+    storeAllSyncObjects();
+    this.getGrouperProvisioner().provisionFinallyBlock();
+    
+    // run a full sync
+    GrouperProvisioner grouperProvisionerFullSync = GrouperProvisioner.retrieveProvisioner(this.getGrouperProvisioner().getConfigId());
+    grouperProvisionerFullSync.setGcGrouperSyncHeartbeat(this.getGrouperProvisioner().getGcGrouperSyncHeartbeat());
+    Map<String, Object> newDebugMap = Collections.synchronizedMap(new LinkedHashMap<String, Object>());
+    newDebugMap.put("incrementalDebugMap", GrouperUtil.mapToString(this.getGrouperProvisioner().getDebugMap()) + "\n\n");
+    
+    grouperProvisionerFullSync.setDebugMap(newDebugMap);
+    grouperProvisionerFullSync.setGrouperProvisioningOutput(this.getGrouperProvisioner().retrieveGrouperProvisioningOutput());
+    grouperProvisionerFullSync.provision(GrouperProvisioningType.fullProvisionFull);
+  }
+
+  public void createMissingGroupsFull() {
+      
+    //do we have missing groups?
+    List<ProvisioningGroup> missingGroups = new ArrayList<ProvisioningGroup>();
+    List<ProvisioningGroupWrapper> missingGroupWrappers = new ArrayList<ProvisioningGroupWrapper>();
+    
+    for (ProvisioningGroupWrapper provisioningGroupWrapper : GrouperUtil.nonNull(this.grouperProvisioner.retrieveGrouperProvisioningData().getProvisioningGroupWrappers())) {
+      GrouperDaemonUtils.stopProcessingIfJobPaused();
+
+      ProvisioningGroup provisioningGroup = provisioningGroupWrapper.getGrouperProvisioningGroup();
+
+      boolean shouldSkip = provisioningGroup == null || !provisioningGroupWrapper.getProvisioningStateGroup().isRecalcObject();
+
+      // shouldnt be null at this point
+      GcGrouperSyncGroup gcGrouperSyncGroup = provisioningGroupWrapper.getGcGrouperSyncGroup();
+
+      if (!this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isSelectGroups() 
+          && !this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isSelectGroupsAll()
+          // && provisioningGroupWrapper.getProvisioningStateGroup().isCreate()
+          && gcGrouperSyncGroup != null
+          && (gcGrouperSyncGroup.getInTarget() == null || !gcGrouperSyncGroup.getInTarget())) {
+        shouldSkip = false;
+      }
+      
+      if (provisioningGroupWrapper.getProvisioningStateGroup().isDelete()) {
+        shouldSkip = true;
+      }
+
+      if (shouldSkip) {
+        continue;
+      }
+      
+      if (!gcGrouperSyncGroup.isProvisionable()) {
+        continue;
+      }
+
+      ProvisioningGroup targetGroup = provisioningGroupWrapper.getTargetProvisioningGroup();
+      
+      if (targetGroup != null) {
+        continue;
+      }
+      
+      if (provisioningGroupWrapper.getErrorCode() == GcGrouperSyncErrorCode.MAT) {
+        GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "provisioningGroupsToInsertWithMatchError", 1);
+
+        continue;
+      }
+      
+      missingGroups.add(provisioningGroup);
+      missingGroupWrappers.add(provisioningGroupWrapper);
+    }
+
+    if (GrouperUtil.length(missingGroups) == 0) {
+      if (this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().isReadOnly()) {
+        this.grouperProvisioner.getDebugMap().put("missingGroupsForCreate", 0);
+      }
+      return;
+    }
+
+    // first lets see if we should even be doing this
+    if (!GrouperUtil.booleanValue(this.grouperProvisioner.retrieveGrouperProvisioningBehavior().isInsertGroups(), false)) {
+
+      // TODO maybe this should be moved somewhere else, where things are validated, if we are not inserting, then why mark as errors?
+      if (this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().isSelectGroups()) {
+        // entity not there
+        for (ProvisioningGroup missingGroup : missingGroups) {
+          if (missingGroup.getProvisioningGroupWrapper() != null) {
+            this.getGrouperProvisioner().retrieveGrouperProvisioningValidation().assignGroupError(
+                missingGroup.getProvisioningGroupWrapper(), GcGrouperSyncErrorCode.DNE, 
+                "Group does not exist in target or cannot be found, and not creating groups");
+          }
+        }
+      }
+      return;
+    }
+
+    // how many do we have 
+    this.grouperProvisioner.getDebugMap().put("missingGroupsForCreate", GrouperUtil.length(missingGroups));
+    
+    // log this
+    this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.missingGroupsForCreate, missingGroups);
+    
+    this.getGrouperProvisioner().retrieveGrouperProvisioningLinkLogic().deleteGroupLink(missingGroupWrappers);
+
+    List<ProvisioningGroup> grouperTargetGroupsToInsert = this.grouperProvisioner.retrieveGrouperProvisioningTranslator().translateGrouperToTargetGroups(missingGroups, false, true);
+
+    if (GrouperUtil.length(grouperTargetGroupsToInsert) == 0) {
+      this.grouperProvisioner.getDebugMap().put("groupTranslationEndedInNoGroupsOnInsert", true);
+      return;
+    }
+    
+    translateAndManipulateMembershipsForGroupsEntitiesCreate();
+    
+    this.grouperProvisioner.retrieveGrouperProvisioningAttributeManipulation().manipulateDefaultsFilterAttributesGroups(grouperTargetGroupsToInsert, true, false, false, false);
+
+    this.grouperProvisioner.retrieveGrouperProvisioningTranslator().idTargetGroups(grouperTargetGroupsToInsert);
+    this.grouperProvisioner.retrieveGrouperProvisioningMatchingIdIndex().indexMatchingIdGroups(null);
+
+    this.getGrouperProvisioner().retrieveGrouperProvisioningDataChanges().getGrouperTargetObjectsMissing().setProvisioningGroups(grouperTargetGroupsToInsert);
+    
+    // validate that groups have members
+    this.getGrouperProvisioner().retrieveGrouperProvisioningValidation().validateGroupsHaveMembers(grouperTargetGroupsToInsert, true);
+    
+    // validate
+    this.getGrouperProvisioner().retrieveGrouperProvisioningValidation().validateGroups(grouperTargetGroupsToInsert, true, false, true);
+    
+    if (GrouperUtil.length(grouperTargetGroupsToInsert) == 0) {
+      this.grouperProvisioner.getDebugMap().put("groupTranslationEndedInNoGroupsOnInsert", true);
+      return;
+    }
+
+    // add object change entries
+    this.grouperProvisioner.retrieveGrouperProvisioningCompare().addInternalObjectChangeForGroupsToInsert(grouperTargetGroupsToInsert);
+    
+    this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.missingGrouperTargetGroupsForCreate, grouperTargetGroupsToInsert);
+
+    //lets create these
+    RuntimeException runtimeException = null;
+    try {
+      this.grouperProvisioner.retrieveGrouperProvisioningTargetDaoAdapter().insertGroups(new TargetDaoInsertGroupsRequest(grouperTargetGroupsToInsert));
+    } catch (RuntimeException re) {
+      runtimeException = re;
+    } finally {
+      try {
+        this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().processResultsInsertGroups(grouperTargetGroupsToInsert, false);
+        
+      } catch (RuntimeException e) {
+        GrouperUtil.exceptionFinallyInjectOrThrow(runtimeException, e);
+      }
+    }
+    
+    // remove errors
+    Iterator<ProvisioningGroup> iterator = grouperTargetGroupsToInsert.iterator();
+    while (iterator.hasNext()) {
+      ProvisioningGroup grouperTargetGroupToInsert = iterator.next();
+      if (grouperTargetGroupToInsert.getProvisioned() == null || !grouperTargetGroupToInsert.getProvisioned()) {
+        iterator.remove();
+      }
+    }
+    
+    List<ProvisioningGroup> targetGroups = null;
+    if (this.grouperProvisioner.retrieveGrouperProvisioningBehavior().isSelectGroups()) {
+      
+      int sleepMillis = this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().getDaoSleepBeforeSelectAfterInsertMillis();
+      GrouperUtil.sleep(sleepMillis);
+      
+      //retrieve so we have a copy
+      TargetDaoRetrieveGroupsResponse targetDaoRetrieveGroupsResponse = 
+          this.grouperProvisioner.retrieveGrouperProvisioningTargetDaoAdapter().retrieveGroups(new TargetDaoRetrieveGroupsRequest(grouperTargetGroupsToInsert, true));
+      
+      targetGroups = GrouperUtil.nonNull(targetDaoRetrieveGroupsResponse == null ? null : targetDaoRetrieveGroupsResponse.getTargetGroups());
+      
+      boolean throwException = false;
+      if (GrouperUtil.length(grouperTargetGroupsToInsert) != GrouperUtil.length(targetGroups)) {
+        throwException = true;
+      }
+      registerRetrievedGroups(grouperTargetGroupsToInsert, targetGroups);
+
+      // log which groups had issues
+      if (throwException) {
+
+        GrouperProvisioningConfigurationAttribute searchAttribute = null;
+
+        // TODO handle multiple search attributes
+        if (GrouperUtil.length(this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().getGroupSearchAttributes()) > 0) {
+          searchAttribute = this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().getGroupSearchAttributes().get(0);
+        }
+
+        StringBuilder searchAttributeValuesAndObjects = new StringBuilder();
+        int errorCount = 0;
+
+        for (ProvisioningGroup grouperTargetGroupToInsert : GrouperUtil.nonNull(grouperTargetGroupsToInsert)) {
+
+          if (errorCount > 5) {
+            break;
+          }
+
+          ProvisioningGroupWrapper provisioningGroupWrapper = grouperTargetGroupToInsert.getProvisioningGroupWrapper();
+
+          if (provisioningGroupWrapper != null && provisioningGroupWrapper.getTargetProvisioningGroup() == null) {
+            Object searchAttributeValue = null;
+            if (searchAttribute != null) {
+              searchAttributeValue = grouperTargetGroupToInsert.retrieveAttributeValue(searchAttribute);  
+            }
+
+            if (searchAttributeValue != null) {
+              searchAttributeValuesAndObjects.append("searchAttribute: " + searchAttributeValue + ", provisioningGroupWrapper: " + provisioningGroupWrapper.toStringForError() + "\n");
+            }
+            errorCount++;
+          }
+        }
+
+        throw new RuntimeException("Searched for " + GrouperUtil.length(grouperTargetGroupsToInsert) + " groups after creating them, but retrieved " + GrouperUtil.length(targetGroups)
+        + " maybe the server is caching results and is not returning the created group or a matching/searching config needs to be adjusted?  Here are examples that could not be found: \n" + searchAttributeValuesAndObjects.toString());
+
+      }
+      
+      this.grouperProvisioner.retrieveGrouperProvisioningAttributeManipulation().manipulateDefaultsFilterAttributesGroups(targetGroups, false, true, false, false);
+
+      // index
+      this.grouperProvisioner.retrieveGrouperProvisioningTranslator().idTargetGroups(targetGroups);
+      this.grouperProvisioner.retrieveGrouperProvisioningMatchingIdIndex().indexMatchingIdGroups(targetGroups);
+            
+      this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.missingTargetGroupsCreated, targetGroups);
+
+    }
+
+    for (ProvisioningGroup provisioningGroup : GrouperUtil.nonNull(grouperTargetGroupsToInsert)) {
+      ProvisioningGroupWrapper provisioningGroupWrapper = provisioningGroup.getProvisioningGroupWrapper();
+      if (provisioningGroupWrapper != null) {
+        // this is already created!  :)
+        provisioningGroupWrapper.getProvisioningStateGroup().setCreate(true);
+      }
+    }
+
+  }
+
+  //TODO duplicate method in the translator. Try to merge to have only one copy.
+  public void translateAndManipulateMembershipsForGroupsEntitiesCreate() {
+    if (!this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isCreateGroupsAndEntitiesBeforeTranslatingMemberships()) {
+      
+      Map<String, Object> debugMap = this.getGrouperProvisioner().getDebugMap();
+      
+      {
+        debugMap.put("state", "translateGrouperMembershipsToTarget");
+        {
+          List<ProvisioningMembership> grouperProvisioningMemberships = new ArrayList<ProvisioningMembership>(this.getGrouperProvisioner().
+              retrieveGrouperProvisioningData().retrieveGrouperProvisioningMemberships(true));
+          
+          List<ProvisioningMembership> grouperTargetMemberships = this.grouperProvisioner.retrieveGrouperProvisioningTranslator().translateGrouperToTargetMemberships(
+              grouperProvisioningMemberships, false);
+        }    
+
+      }
+
+      {
+        debugMap.put("state", "manipulateGrouperMembershipTargetAttributes");
+        List<ProvisioningMembership> grouperTargetMemberships = this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperTargetMemberships(true);
+        Set<ProvisioningMembership> affectedMemberships = this.grouperProvisioner.retrieveGrouperProvisioningAttributeManipulation().manipulateDefaultsFilterAttributesMemberships(
+            grouperTargetMemberships, true, true, false, false);
+        if (GrouperUtil.length(affectedMemberships) > 0) {
+          this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.manipulateGrouperTargetMemberships, affectedMemberships);
+        }
+
+      }
+
+      try {
+        debugMap.put("state", "matchingIdGrouperMemberships");
+        this.grouperProvisioner.retrieveGrouperProvisioningTranslator().idTargetMemberships(this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperTargetMemberships(true));
+      } finally {
+        this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.matchingIdGrouperMemberships);
+      }
+
+      // index the memberships
+      this.grouperProvisioner.retrieveGrouperProvisioningMatchingIdIndex().indexMatchingIdMemberships(null);
+
+    }
+  }
+
+  /**
+   * if the provisioner is configured with skipIfTargetGroupExists, find any wrappers where a Grouper group
+   * has just been matched to a pre-existing target group (i.e. Grouper has not previously claimed it) and
+   * make the wrapper invisible to the rest of the framework for this run so no insert, update, or membership
+   * sync happens. The pre-existing target group is left untouched and the grouper_sync_group row is not
+   * modified to claim it.
+   */
+  public void skipPreExistingTargetGroups() {
+
+    if (!this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().isSkipIfTargetGroupExists()) {
+      return;
+    }
+
+    int skipPreExistingTargetGroupsCount = 0;
+
+    for (ProvisioningGroupWrapper provisioningGroupWrapper : GrouperUtil.nonNull(
+        this.grouperProvisioner.retrieveGrouperProvisioningData().getProvisioningGroupWrappers())) {
+
+      // must be a Grouper group freshly matched to a target group
+      if (provisioningGroupWrapper.getGrouperProvisioningGroup() == null) {
+        continue;
+      }
+      if (provisioningGroupWrapper.getTargetProvisioningGroup() == null) {
+        continue;
+      }
+
+      // if Grouper has already claimed this target group on a previous run, leave it alone
+      GcGrouperSyncGroup gcGrouperSyncGroup = provisioningGroupWrapper.getGcGrouperSyncGroup();
+      if (gcGrouperSyncGroup != null && Boolean.TRUE.equals(gcGrouperSyncGroup.getInTarget())) {
+        continue;
+      }
+
+      // mark the wrapper with the SKP error code so the error handling framework records it
+      provisioningGroupWrapper.setErrorCode(GcGrouperSyncErrorCode.SKP);
+
+      // null out both sides so the rest of the framework treats this wrapper as a no-op
+      // (no insert because grouperProvisioningGroup is null; no update because target side is null;
+      //  no membership sync because the group has no resolvable target)
+      provisioningGroupWrapper.setGrouperProvisioningGroup(null);
+      provisioningGroupWrapper.setGrouperTargetGroup(null);
+      provisioningGroupWrapper.setTargetProvisioningGroup(null);
+
+      skipPreExistingTargetGroupsCount++;
+    }
+
+    if (skipPreExistingTargetGroupsCount > 0) {
+      GrouperUtil.mapAddValue(this.grouperProvisioner.getDebugMap(),
+          "skipPreExistingTargetGroups", skipPreExistingTargetGroupsCount);
+    }
+  }
+
+  /**
+   * 
+   * @param grouperTargetGroups
+   * @param targetProvisioningGroups
+   */
+  public void registerRetrievedGroups(
+      List<ProvisioningGroup> grouperTargetGroups,
+      List<ProvisioningGroup> targetProvisioningGroups) {
+    
+    GrouperProvisioningConfigurationAttribute searchAttribute = null;
+
+    // TODO handle multiple search attributes
+    if (GrouperUtil.length(this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().getGroupSearchAttributes()) > 0) {
+      searchAttribute = this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().getGroupSearchAttributes().get(0);
+    }
+    
+    if (searchAttribute == null) {
+      throw new RuntimeException("Identify a group search attribute!");
+    }
+
+    Map<Object, ProvisioningGroup> searchAttributeValueToGrouperTargetGroup = new HashMap<Object, ProvisioningGroup>();
+
+    // index by search attribute
+    for (ProvisioningGroup grouperTargetGroup : GrouperUtil.nonNull(grouperTargetGroups)) {
+      Object searchAttributeValue = grouperTargetGroup.retrieveAttributeValue(searchAttribute);
+      if (searchAttributeValue != null) {
+        searchAttributeValueToGrouperTargetGroup.put(searchAttributeValue, grouperTargetGroup);
+      }
+      if (grouperTargetGroup.getProvisioningGroupWrapper() != null) {
+        grouperTargetGroup.getProvisioningGroupWrapper().getProvisioningStateGroup().setSelectResultProcessed(true);
+      }
+    }
+
+    for (ProvisioningGroup targetProvisioningGroup : GrouperUtil.nonNull(targetProvisioningGroups)) {
+      Object searchAttributeValue = targetProvisioningGroup.retrieveAttributeValue(searchAttribute);
+      if (searchAttributeValue != null) {
+        ProvisioningGroup grouperTargetGroup = searchAttributeValueToGrouperTargetGroup.get(searchAttributeValue);
+        if (grouperTargetGroup != null) {
+          ProvisioningGroupWrapper provisioningGroupWrapper = grouperTargetGroup.getProvisioningGroupWrapper();
+          if (provisioningGroupWrapper != null) {
+            targetProvisioningGroup.setProvisioningGroupWrapper(provisioningGroupWrapper);
+            provisioningGroupWrapper.setTargetProvisioningGroup(targetProvisioningGroup);
+          }
+        }
+      }
+    }    
+  }
+
+  /**
+   * 
+   * @param grouperTargetEntitiesToInsert
+   * @param targetProvisioningEntities
+   */
+  public void registerRetrievedEntities(
+      List<ProvisioningEntity> grouperTargetEntities,
+      List<ProvisioningEntity> targetProvisioningEntities) {
+    
+    GrouperProvisioningConfigurationAttribute searchAttribute = null;
+    
+    // TODO handle multiple search attributes
+    if (GrouperUtil.length(this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().getEntitySearchAttributes()) > 0) {
+      searchAttribute = this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().getEntitySearchAttributes().get(0);
+    }
+    
+    if (searchAttribute == null) {
+      throw new RuntimeException("Identify an entity search attribute!");
+    }
+
+    Map<Object, ProvisioningEntity> searchAttributeValueToGrouperTargetEntity = new HashMap<Object, ProvisioningEntity>();
+
+    // index by search attribute
+    for (ProvisioningEntity grouperTargetEntity : GrouperUtil.nonNull(grouperTargetEntities)) {
+      Object searchAttributeValue = grouperTargetEntity.retrieveAttributeValue(searchAttribute);
+      if (searchAttributeValue != null) {
+        searchAttributeValueToGrouperTargetEntity.put(searchAttributeValue, grouperTargetEntity);
+      }
+      if (grouperTargetEntity.getProvisioningEntityWrapper() != null) {
+        grouperTargetEntity.getProvisioningEntityWrapper().getProvisioningStateEntity().setSelectResultProcessed(true);
+      }
+    }
+
+    for (ProvisioningEntity targetProvisioningEntity : GrouperUtil.nonNull(targetProvisioningEntities)) {
+      Object searchAttributeValue = targetProvisioningEntity.retrieveAttributeValue(searchAttribute);
+      if (searchAttributeValue != null) {
+        ProvisioningEntity grouperTargetEntity = searchAttributeValueToGrouperTargetEntity.get(searchAttributeValue);
+        if (grouperTargetEntity != null) {
+          ProvisioningEntityWrapper provisioningEntityWrapper = grouperTargetEntity.getProvisioningEntityWrapper();
+          if (provisioningEntityWrapper != null) {
+            targetProvisioningEntity.setProvisioningEntityWrapper(provisioningEntityWrapper);
+            provisioningEntityWrapper.setTargetProvisioningEntity(targetProvisioningEntity);
+          }
+        }
+      }
+    }    
+  }
+
+  
+  public void createMissingEntitiesFull() {
+    
+    //do we have missing entities?
+    List<ProvisioningEntity> missingEntities = new ArrayList<ProvisioningEntity>();
+    List<ProvisioningEntityWrapper> missingEntityWrappers = new ArrayList<ProvisioningEntityWrapper>();
+    for (ProvisioningEntityWrapper provisioningEntityWrapper : GrouperUtil.nonNull(this.grouperProvisioner.retrieveGrouperProvisioningData().getProvisioningEntityWrappers())) {
+      GrouperDaemonUtils.stopProcessingIfJobPaused();
+
+      ProvisioningEntity provisioningEntity = provisioningEntityWrapper.getGrouperProvisioningEntity();
+      
+      boolean shouldSkip = provisioningEntity == null || !provisioningEntityWrapper.getProvisioningStateEntity().isRecalcObject();
+
+      // shouldnt be null at this point
+      GcGrouperSyncMember gcGrouperSyncMember = provisioningEntityWrapper.getGcGrouperSyncMember();
+
+      if (!this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isSelectEntities() 
+          && !this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isSelectEntitiesAll()
+          // && provisioningEntityWrapper.isCreate()
+          && gcGrouperSyncMember != null
+          && (gcGrouperSyncMember.getInTarget() == null || !gcGrouperSyncMember.getInTarget())) {
+        shouldSkip = false;
+      }
+      
+      if (provisioningEntityWrapper.getProvisioningStateEntity().isDelete()) {
+        shouldSkip = true;
+      }
+      
+      boolean isUnresolvableSubject = provisioningEntityWrapper.getGrouperProvisioningEntity() != null && provisioningEntityWrapper.getGrouperProvisioningEntity().getSubjectResolutionResolvable() == Boolean.FALSE;
+            
+      // check if we're inserting unresolvable subjects
+      if (isUnresolvableSubject && !this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().isUnresolvableSubjectsInsert()) {
+        shouldSkip = true;
+      }
+      
+      if (shouldSkip) {
+        continue;
+      }
+
+      if (!gcGrouperSyncMember.isProvisionable()) {
+        continue;
+      }
+      ProvisioningEntity targetEntity = provisioningEntityWrapper.getTargetProvisioningEntity();
+      
+      if (targetEntity != null) {
+        continue;
+      }
+      
+      if (provisioningEntityWrapper.getErrorCode() == GcGrouperSyncErrorCode.MAT) {
+        GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "provisioningEntitiesToInsertWithMatchError", 1);
+        continue;
+      }
+
+      missingEntities.add(provisioningEntity);
+      missingEntityWrappers.add(provisioningEntityWrapper);    
+    }
+    if (GrouperUtil.length(missingEntities) == 0) {
+      if (this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().isReadOnly()) {
+        this.grouperProvisioner.getDebugMap().put("missingEntitiesForCreate", 0);
+      }
+      return;
+    }
+    // first lets see if we should even be doing this
+    if (!GrouperUtil.booleanValue(this.grouperProvisioner.retrieveGrouperProvisioningBehavior().isInsertEntities(), false)) {
+
+      // TODO maybe this should be moved somewhere else, where things are validated, if we are not inserting, then why mark as errors?
+      if (this.grouperProvisioner.retrieveGrouperProvisioningBehavior().isSelectEntities()) {
+        // entity not there
+        for (ProvisioningEntity missingEntity : missingEntities) {
+          if (missingEntity.getProvisioningEntityWrapper() != null) {
+            this.getGrouperProvisioner().retrieveGrouperProvisioningValidation().assignEntityError(
+                missingEntity.getProvisioningEntityWrapper(), GcGrouperSyncErrorCode.DNE, 
+                "Entity does not exist in target or cannot be found, and not creating entities");
+          }
+        }
+      }
+      return;
+    }
+    
+    // how many do we have 
+    this.grouperProvisioner.getDebugMap().put("missingEntitiesForCreate", GrouperUtil.length(missingEntities));
+    
+    // log this
+    this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.missingEntitiesForCreate, missingEntities);
+    
+    this.getGrouperProvisioner().retrieveGrouperProvisioningLinkLogic().deleteEntityLink(missingEntityWrappers);
+    
+    // translate
+    List<ProvisioningEntity> grouperTargetEntitiesToInsert = this.grouperProvisioner.retrieveGrouperProvisioningTranslator().translateGrouperToTargetEntities(missingEntities, false, true);
+    
+    if (GrouperUtil.length(grouperTargetEntitiesToInsert) == 0) {
+      this.grouperProvisioner.getDebugMap().put("groupTranslationEndedInNoEntitiesOnInsert", true);
+      return;
+    }
+    
+    
+    translateAndManipulateMembershipsForGroupsEntitiesCreate();
+    
+    this.grouperProvisioner.retrieveGrouperProvisioningAttributeManipulation().manipulateDefaultsFilterAttributesEntities(grouperTargetEntitiesToInsert, true, false, false, false);
+
+    this.grouperProvisioner.retrieveGrouperProvisioningTranslator().idTargetEntities(grouperTargetEntitiesToInsert);
+    this.grouperProvisioner.retrieveGrouperProvisioningMatchingIdIndex().indexMatchingIdEntities(null);
+    this.getGrouperProvisioner().retrieveGrouperProvisioningDataChanges().getGrouperTargetObjectsMissing().setProvisioningEntities(grouperTargetEntitiesToInsert);
+    // validate
+    this.getGrouperProvisioner().retrieveGrouperProvisioningValidation().validateEntities(grouperTargetEntitiesToInsert, true, null, true);
+    // add object change entries
+    this.grouperProvisioner.retrieveGrouperProvisioningCompare().addInternalObjectChangeForEntitiesToInsert(grouperTargetEntitiesToInsert);
+        
+    this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.missingGrouperTargetEntitiesForCreate, grouperTargetEntitiesToInsert);
+    //lets create these
+    RuntimeException runtimeException = null;
+    try {
+      this.grouperProvisioner.retrieveGrouperProvisioningTargetDaoAdapter().insertEntities(new TargetDaoInsertEntitiesRequest(grouperTargetEntitiesToInsert));
+    } catch (RuntimeException re) {
+      runtimeException = re;
+    } finally {
+      try {
+        this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().processResultsInsertEntities(grouperTargetEntitiesToInsert, false);
+        
+      } catch (RuntimeException e) {
+        GrouperUtil.exceptionFinallyInjectOrThrow(runtimeException, e);
+      }
+    }
+    
+    // remove errors
+    Iterator<ProvisioningEntity> iterator = grouperTargetEntitiesToInsert.iterator();
+    while (iterator.hasNext()) {
+      ProvisioningEntity grouperTargetEntityToInsert = iterator.next();
+      if (grouperTargetEntityToInsert.getProvisioned() == null || !grouperTargetEntityToInsert.getProvisioned()) {
+        iterator.remove();
+      }
+    }
+
+    List<ProvisioningEntity> targetEntities = null;
+    if (this.grouperProvisioner.retrieveGrouperProvisioningBehavior().isSelectEntities()) {
+      
+      int sleepMillis = this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().getDaoSleepBeforeSelectAfterInsertMillis();
+      GrouperUtil.sleep(sleepMillis);
+      
+     //retrieve so we have a copy
+      TargetDaoRetrieveEntitiesResponse targetDaoRetrieveEntitiesResponse = 
+          this.grouperProvisioner.retrieveGrouperProvisioningTargetDaoAdapter().retrieveEntities(new TargetDaoRetrieveEntitiesRequest(grouperTargetEntitiesToInsert, false));
+      
+      targetEntities = GrouperUtil.nonNull(targetDaoRetrieveEntitiesResponse == null ? null : targetDaoRetrieveEntitiesResponse.getTargetEntities());
+      
+      boolean someEntitiesNotRetrieved = false;
+      if (GrouperUtil.length(grouperTargetEntitiesToInsert) != GrouperUtil.length(targetEntities)) {
+        someEntitiesNotRetrieved = true;
+      }
+
+      registerRetrievedEntities(grouperTargetEntitiesToInsert, targetEntities);
+
+      // Some entities were inserted but could not be read back.  Record that per entity and keep
+      // going - do NOT throw.  Throwing here unwinds out of provisionFull before errorHandling()
+      // and storeAllSyncObjects() run, which discards the whole run: no sync state is stored for
+      // the entities that did succeed, no error codes are stored for entities that failed for
+      // other reasons, and the insert/update/delete counts are never even tallied (they are
+      // derived later in countInsertsUpdatesDeletes).  The result is a loader log claiming zero
+      // inserts for a run that really did create objects in the target.  Marking the objects and
+      // letting the run finish keeps the signal - errorHandlingProvisionerDaemonShouldFailOnObjectError
+      // still decides whether the job ends up ERROR - without destroying the evidence.
+      if (someEntitiesNotRetrieved) {
+
+        GrouperProvisioningConfigurationAttribute searchAttribute = null;
+
+        // TODO handle multiple search attributes
+        if (GrouperUtil.length(this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().getEntitySearchAttributes()) > 0) {
+          searchAttribute = this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().getEntitySearchAttributes().get(0);
+        }
+
+        StringBuilder searchAttributeValuesAndObjects = new StringBuilder();
+        int exampleCount = 0;
+        int notRetrievedCount = 0;
+
+        for (ProvisioningEntity grouperTargetEntityToInsert : GrouperUtil.nonNull(grouperTargetEntitiesToInsert)) {
+
+          ProvisioningEntityWrapper provisioningEntityWrapper = grouperTargetEntityToInsert.getProvisioningEntityWrapper();
+
+          if (provisioningEntityWrapper == null || provisioningEntityWrapper.getTargetProvisioningEntity() != null) {
+            continue;
+          }
+
+          notRetrievedCount++;
+
+          Object searchAttributeValue = null;
+          if (searchAttribute != null) {
+            searchAttributeValue = grouperTargetEntityToInsert.retrieveAttributeValue(searchAttribute);
+          }
+
+          // ERR, not DNE: DNE means the object is missing in the target and not able to be
+          // inserted, and neither half is true here - the insert succeeded, and the object may
+          // well exist but be unfindable (matched under different case, or the search attribute
+          // is not selective enough).  DNE is also gated by
+          // errorHandlingTargetObjectDoesNotExistIsAnError, commonly false, which would quietly
+          // turn these runs green.  A dao that knows the retrieve was ambiguous rather than empty
+          // can set MAT itself; only stamp ERR when nothing else has claimed the error.
+          if (provisioningEntityWrapper.getErrorCode() == null) {
+            provisioningEntityWrapper.setErrorCode(GcGrouperSyncErrorCode.ERR);
+          }
+
+          GcGrouperSyncMember gcGrouperSyncMember = provisioningEntityWrapper.getGcGrouperSyncMember();
+          if (gcGrouperSyncMember != null && gcGrouperSyncMember.getErrorCode() == null) {
+            gcGrouperSyncMember.setErrorCode(GcGrouperSyncErrorCode.ERR);
+            gcGrouperSyncMember.setErrorMessage("Entity was inserted in the target but could not be retrieved back"
+                + (searchAttributeValue == null ? "" : " searching on '" + searchAttributeValue + "'")
+                + ".  The target may not be returning the newly created object yet, or the matching/searching config may need to be adjusted.");
+            gcGrouperSyncMember.setErrorTimestamp(
+                this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().entityErrorTimestamp(gcGrouperSyncMember));
+          }
+
+          // keep a handful of examples for the summary log line
+          if (exampleCount < 5 && searchAttributeValue != null) {
+            searchAttributeValuesAndObjects.append("searchAttribute: " + searchAttributeValue + ", provisioningEntityWrapper: " + provisioningEntityWrapper.toStringForError() + "\n");
+            exampleCount++;
+          }
+        }
+
+        this.grouperProvisioner.getDebugMap().put("entitiesInsertedButNotRetrieved", notRetrievedCount);
+
+        this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().error("Searched for "
+            + GrouperUtil.length(grouperTargetEntitiesToInsert) + " entities after creating them, but retrieved " + GrouperUtil.length(targetEntities)
+            + " maybe the server is caching results and is not returning the created entity or a matching/searching config needs to be adjusted?  Here are examples that could not be found: \n"
+            + searchAttributeValuesAndObjects.toString(), null);
+
+      }
+      
+      this.grouperProvisioner.retrieveGrouperProvisioningAttributeManipulation().manipulateDefaultsFilterAttributesEntities(targetEntities, false, true, false, false);
+
+      // index
+      this.grouperProvisioner.retrieveGrouperProvisioningTranslator().idTargetEntities(targetEntities);
+      this.grouperProvisioner.retrieveGrouperProvisioningMatchingIdIndex().indexMatchingIdEntities(targetEntities);
+      
+      this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.missingTargetEntitiesCreated, targetEntities);
+
+    }
+    for (ProvisioningEntity provisioningEntity : GrouperUtil.nonNull(grouperTargetEntitiesToInsert)) {
+      ProvisioningEntityWrapper provisioningEntityWrapper = provisioningEntity.getProvisioningEntityWrapper();
+      if (provisioningEntityWrapper != null) {
+        // this is already created!  :)
+        provisioningEntityWrapper.getProvisioningStateEntity().setCreate(true);
+      }
+    }
+    
+  }
+
+  /**
+   * retrieve all data from both sides, grouper and target, do this in a thread
+   */
+  public void retrieveAllData() {
+    
+    final RuntimeException[] RUNTIME_EXCEPTION = new RuntimeException[1];
+    
+    long start = System.currentTimeMillis();
+
+    
+    Thread targetQueryThread = new Thread(new Runnable() {
+      
+      @Override
+      public void run() {
+        
+        try {
+          // live progress: this target read can take many minutes with no other signal; a DAO that
+          // pages can overwrite this with a finer "page X of Y" label as it goes
+          GrouperProvisioningLogic.this.getGrouperProvisioner().assignProgressLabelTarget("retrieving all data from target");
+          TargetDaoRetrieveAllDataRequest targetDaoRetrieveAllDataRequest = new TargetDaoRetrieveAllDataRequest();
+          // GRP-7048: when resolving users from the sync-back cache this run, tell the DAO to skip
+          // its (large) user pull; the framework seeds the target users from the cache below. This is
+          // cache-first: a cold/empty cache leaves retrieveEntities=true so the DAO does its normal
+          // full user pull (repopulating the cache). Gated on the DAO capability so we never
+          // skip-and-seed on a DAO that would ignore the flag and return all users (duplicating them).
+          if (GrouperProvisioningLogic.this.isEntitiesFromSyncBackCacheThisRun()) {
+            targetDaoRetrieveAllDataRequest.setRetrieveEntities(false);
+          }
+          // GRP-7048: likewise skip the DAO's membership retrieval (e.g. Okta's per-group member
+          // iteration) when serving memberships from the cache this run
+          if (GrouperProvisioningLogic.this.isMembershipsFromSyncBackCacheThisRun()) {
+            targetDaoRetrieveAllDataRequest.setRetrieveMemberships(false);
+          }
+          // GRP-7048: and skip the group pull when serving groups from the cache (only happens when
+          // memberships are also from cache -- see isGroupsFromSyncBackCacheThisRun)
+          if (GrouperProvisioningLogic.this.isGroupsFromSyncBackCacheThisRun()) {
+            targetDaoRetrieveAllDataRequest.setRetrieveGroups(false);
+          }
+          TargetDaoRetrieveAllDataResponse targetDaoRetrieveAllDataResponse
+            = GrouperProvisioningLogic.this.getGrouperProvisioner().retrieveGrouperProvisioningTargetDaoAdapter()
+              .retrieveAllData(targetDaoRetrieveAllDataRequest);
+          
+          if (GrouperProvisioningLogic.this.getGrouperProvisioner().getProvisioningStateGlobal().isSelectResultProcessedEntities() 
+              || GrouperProvisioningLogic.this.getGrouperProvisioner().getProvisioningStateGlobal().isSelectResultProcessedGroups()
+              || GrouperProvisioningLogic.this.getGrouperProvisioner().getProvisioningStateGlobal().isSelectResultProcessedMemberships()) {
+            
+            GrouperProvisioningLogic.this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.retrieveTargetData);
+          }
+          
+        } catch (RuntimeException re) {
+          String logMessage = "error querying target: " + GrouperProvisioningLogic.this.getGrouperProvisioner().getConfigId();
+          LOG.error(logMessage, re);
+          GrouperProvisioningLogic.this.grouperProvisioner.retrieveGrouperProvisioningObjectLog().getObjectLog().append(new Timestamp(System.currentTimeMillis())).append(": ERROR: ").append(logMessage).append("\n\n");
+          RUNTIME_EXCEPTION[0] = re;
+        } finally {
+          // done with the target read; clear the label so it does not linger while grouper data loads
+          GrouperProvisioningLogic.this.getGrouperProvisioner().assignProgressLabelTarget(null);
+        }
+
+      }
+    });
+
+    targetQueryThread.run();
+    
+    // adjusting so that we no longer run target and grouper queries together.
+    // maybe a config option later?
+    //targetQueryThread.start();
+    //GrouperClientUtils.join(targetQueryThread);
+    
+    if (RUNTIME_EXCEPTION[0] != null) {
+      throw RUNTIME_EXCEPTION[0];
+    }
+
+    // get all grouper data for the provisioner
+    // and put in GrouperProvisioningDataSyncGrouper
+    this.grouperProvisioner.assignProgressLabelGrouper("retrieving all data from grouper");
+    GrouperProvisioningLists grouperProvisioningLists = this.grouperProvisioner.retrieveGrouperDao().retrieveGrouperDataFull();
+    this.grouperProvisioner.assignProgressLabelGrouper(null);
+
+    GrouperDaemonUtils.stopProcessingIfJobPaused();
+    
+    // put wrappers on the grouper objects and put in the grouper uuid maps in data object
+    // put these wrapper in the GrouperProvisioningData and GrouperProvisioningDataIndex
+    this.grouperProvisioner.retrieveGrouperDao().processWrappers(grouperProvisioningLists);
+    GrouperDaemonUtils.stopProcessingIfJobPaused();
+
+    // point the membership pointers to groups and entities to what they should point to
+    // and fix data problems (for instance race conditions as data was retrieved)
+    this.grouperProvisioner.retrieveGrouperDao().fixGrouperProvisioningMembershipReferences();
+    GrouperDaemonUtils.stopProcessingIfJobPaused();
+
+    // add / update / delete sync objects based on grouper data
+    this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().fixSyncObjects();
+    GrouperDaemonUtils.stopProcessingIfJobPaused();
+
+    // incrementals need to consult sync objects to know what to delete
+    calculateProvisioningDataToDelete(); 
+    
+    this.grouperProvisioner.retrieveGrouperDao().fixGrouperProvisioningMembershipReferences();
+    GrouperDaemonUtils.stopProcessingIfJobPaused();
+
+    GcGrouperSync gcGrouperSync = this.grouperProvisioner.getGcGrouperSync();
+    gcGrouperSync.setGroupCount(GrouperUtil.length(grouperProvisioningLists.getProvisioningGroups()));
+    gcGrouperSync.setUserCount(GrouperUtil.length(grouperProvisioningLists.getProvisioningEntities()));
+    gcGrouperSync.setRecordsCount(GrouperUtil.length(grouperProvisioningLists.getProvisioningMemberships()));
+    
+    enhanceEntityAttributesWithDataFields();
+    GrouperDaemonUtils.stopProcessingIfJobPaused();
+    
+    enhanceEntityAttributesWithSqlResolver(true);
+    GrouperDaemonUtils.stopProcessingIfJobPaused();
+
+    enhanceEntityAttributesWithLdapResolver(true);
+    GrouperDaemonUtils.stopProcessingIfJobPaused();
+
+    enhanceGroupAttributesWithSqlResolver(true);
+    GrouperDaemonUtils.stopProcessingIfJobPaused();
+
+    GrouperProvisioningLists extraTargetData = retrieveExtraTargetData(grouperProvisioningLists);
+    GrouperDaemonUtils.stopProcessingIfJobPaused();
+
+    if (extraTargetData != null) {
+      processTargetDataEntities(extraTargetData.getProvisioningEntities(), true);
+      processTargetDataGroups(extraTargetData.getProvisioningGroups(), true);
+      processTargetDataMemberships(extraTargetData.getProvisioningMemberships(), true);
+    }
+
+    // GRP-7048: if configured, seed the target users / memberships from the sync-back cache instead
+    // of having pulled them from the target. Runs here (after Grouper data + sync objects are
+    // loaded). No-op unless the respective fullSync*FromSyncBack option is on and the cache is warm.
+    seedTargetEntitiesFromSyncBack();
+    seedTargetGroupsFromSyncBack();
+    seedTargetMembershipsFromSyncBack();
+
+    this.getGrouperProvisioner().retrieveGrouperProvisioningTranslator().retrieveAllDependenciesForFullSync();
+    
+    long retrieveDataPass1 = System.currentTimeMillis()-start;
+    this.getGrouperProvisioner().getDebugMap().put("retrieveDataPass1_millis", retrieveDataPass1);
+
+    this.getGrouperProvisioner().getDebugMap().put("grouperGroupsRetrieved", GrouperUtil.length(grouperProvisioningLists.getProvisioningGroups()));
+    this.getGrouperProvisioner().getDebugMap().put("grouperEntitiesRetrieved", GrouperUtil.length(grouperProvisioningLists.getProvisioningEntities()));
+    this.getGrouperProvisioner().getDebugMap().put("grouperMembershipsRetrieved", GrouperUtil.length(grouperProvisioningLists.getProvisioningMemberships()));
+    this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.retrieveDataFromGrouper);
+    
+  }
+  
+  public void enhanceGroupAttributesWithSqlResolver(boolean isFullSync) {
+    
+    GrouperProvisioningConfiguration provisioningConfiguration = this.grouperProvisioner.retrieveGrouperProvisioningConfiguration();
+    
+    if (!provisioningConfiguration.isResolveGroupAttributesWithSql()) {
+      return;
+    }
+    
+    String dbConnectionName = provisioningConfiguration.getGroupAttributesSqlExternalSystem();
+    
+    String tableOrViewName = provisioningConfiguration.getGroupAttributesTableViewName();
+    
+    String tableStucture = provisioningConfiguration.getGroupAttributesTableStructure();
+    
+    String groupMatchingColumn = provisioningConfiguration.getGroupAttributesGroupMatchingColumn();
+    
+    String lastUpdatedColumn = provisioningConfiguration.getGroupAttributesLastUpdatedColumn();
+
+    List<ProvisioningGroup> provisioningGroups =
+        this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperProvisioningGroups();
+        
+    
+    if (StringUtils.equals(tableStucture, "columnsAreAttributes")) {
+      
+      String commaSeparatedColumns = provisioningConfiguration.getGroupAttributesColumnNames();
+      
+      Set<String> columnsWhichAreAttributes = GrouperUtil.splitTrimToSet(commaSeparatedColumns, ",");
+      
+      Set<String> columnNamesToFetch = GrouperUtil.splitTrimToSet(commaSeparatedColumns, ",");
+      
+      if (StringUtils.isNotBlank(lastUpdatedColumn) && !columnNamesToFetch.contains(lastUpdatedColumn.trim())) {
+        columnNamesToFetch.add(lastUpdatedColumn.trim());
+      }
+      
+      if (!columnNamesToFetch.contains(groupMatchingColumn.trim())) {
+        columnNamesToFetch.add(groupMatchingColumn.trim());
+      }
+      
+      String commaSeparatedColNames = GrouperUtil.setToString(columnNamesToFetch);
+      
+      StringBuilder sqlInitial = new StringBuilder("select ");
+      sqlInitial.append(commaSeparatedColNames);
+      sqlInitial.append(" from ");
+      sqlInitial.append(tableOrViewName);
+     
+      List<Object[]> attributesFromTable = new ArrayList<Object[]>();
+      
+      boolean selectAllSqlOnFull = provisioningConfiguration.isGroupAttributesSelectAllSqlOnFull();
+      
+      if ((isFullSync && !selectAllSqlOnFull) || !isFullSync) {
+        if (provisioningGroups.size() == 0) {
+          return;
+        }
+        
+        int numberOfBatches = GrouperUtil.batchNumberOfBatches(provisioningGroups.size(), 900);
+        
+        for (int i = 0; i < numberOfBatches; i++) {
+          
+          List<ProvisioningGroup> currentBatchProvisioningGroups = GrouperUtil.batchList(provisioningGroups, 900, i);
+          StringBuilder sql = new StringBuilder(sqlInitial);
+          
+          sql.append(" where "+ groupMatchingColumn + " in ( ");
+          
+          GcDbAccess gcDbAccess = new GcDbAccess().connectionName(dbConnectionName);
+          
+          for (int j=0; j<currentBatchProvisioningGroups.size();j++) {
+            ProvisioningGroup provisioningGroup = currentBatchProvisioningGroups.get(j);
+            
+            String groupMatchingIdentifier =  provisioningGroup.getName();
+            
+            gcDbAccess.addBindVar(groupMatchingIdentifier);
+            if (j>0) {
+              sql.append(",");
+            }
+            sql.append("?");
+          }
+          sql.append(" ) ");
+          attributesFromTable.addAll(gcDbAccess.sql(sql.toString()).selectList(Object[].class));
+        }
+      } else {
+        attributesFromTable.addAll(new GcDbAccess().connectionName(dbConnectionName).sql(sqlInitial.toString()).selectList(Object[].class));
+      }
+      
+      String[] colNamesFromAttributesTable = GrouperUtil.splitTrim(commaSeparatedColNames, ",");
+      
+      // group name to group attributes
+      Map<String, Object[]> groupSearchMatchingColumnToAttributes = new HashMap<String, Object[]>();
+      
+      int indexOfGroupSearchMatchingColumn = GrouperUtil.indexOf(colNamesFromAttributesTable, groupMatchingColumn);
+      
+      for (Object[] oneRowOfAttributes: attributesFromTable) {
+        Object groupSearchMatchingValue = oneRowOfAttributes[indexOfGroupSearchMatchingColumn];
+        if (groupSearchMatchingValue != null) {
+          
+          String groupSearchMatchingValueString = GrouperUtil.stringValue(groupSearchMatchingValue);
+          groupSearchMatchingColumnToAttributes.put(groupSearchMatchingValueString, oneRowOfAttributes);
+        }
+      }
+      
+      /**
+       * groupSearchMatchingColumnToAttributes looks like
+       * test:testGroup -> [attributeValue1, attributeValue2,....]
+       */
+      
+      for (ProvisioningGroup provisioningGroup: provisioningGroups) {
+        Object[] attributeValues = groupSearchMatchingColumnToAttributes.get(provisioningGroup.getName());
+        if (attributeValues != null) {
+          int i = 0;
+          for (String attributeName: colNamesFromAttributesTable) {
+            
+            if (columnsWhichAreAttributes.contains(attributeName)) {
+              
+              provisioningGroup.assignAttributeValue("groupAttributeResolverSql__"+attributeName.toLowerCase(), attributeValues[i]);
+            }
+            i++;
+          }
+        }
+        
+      }
+      
+      
+    } else if (StringUtils.equals(tableStucture, "attributeNameInColumnValue")) {
+      
+      String attributeNameColumnName = provisioningConfiguration.getGroupAttributesAttributeNameColumnName();
+      String attributeValueColumnName = provisioningConfiguration.getGroupAttributesAttributeValueColumnName();
+      
+      Set<String> columnNamesToFetch = new HashSet<>(); 
+      columnNamesToFetch.add(attributeNameColumnName);
+      columnNamesToFetch.add(attributeValueColumnName);
+          
+      if (StringUtils.isNotBlank(lastUpdatedColumn) && !columnNamesToFetch.contains(lastUpdatedColumn.trim())) {
+        columnNamesToFetch.add(lastUpdatedColumn.trim());
+      }
+      
+      if (!columnNamesToFetch.contains(groupMatchingColumn.trim())) {
+        columnNamesToFetch.add(groupMatchingColumn.trim());
+      }
+      
+      String commaSeparatedColNames = GrouperUtil.setToString(columnNamesToFetch);
+      
+      StringBuilder sqlInitial = new StringBuilder("select ");
+      sqlInitial.append(commaSeparatedColNames);
+      sqlInitial.append(" from ");
+      sqlInitial.append(tableOrViewName);
+      
+      List<Object[]> attributesFromTable = new ArrayList<Object[]>();
+      
+      boolean selectAllSqlOnFull = provisioningConfiguration.isGroupAttributesSelectAllSqlOnFull();
+      
+      if ((isFullSync && !selectAllSqlOnFull) || !isFullSync) {
+        if (provisioningGroups.size() == 0) {
+          return;
+        }
+        
+        int numberOfBatches = GrouperUtil.batchNumberOfBatches(provisioningGroups.size(), 900);
+        
+        for (int i = 0; i < numberOfBatches; i++) {
+          
+          List<ProvisioningGroup> currentBatchProvisioningGroups = GrouperUtil.batchList(provisioningGroups, 900, i);
+          StringBuilder sql = new StringBuilder(sqlInitial);
+          
+          sql.append(" where "+ groupMatchingColumn + " in ( ");
+          
+          GcDbAccess gcDbAccess = new GcDbAccess().connectionName(dbConnectionName);
+          
+          for (int j=0; j<currentBatchProvisioningGroups.size();j++) {
+            ProvisioningGroup provisioningGroup = currentBatchProvisioningGroups.get(j);
+            
+            String groupMatchingIdentifier =  provisioningGroup.getName();
+            
+            gcDbAccess.addBindVar(groupMatchingIdentifier);
+            if (j>0) {
+              sql.append(",");
+            }
+            sql.append("?");
+          }
+          sql.append(" ) ");
+          attributesFromTable.addAll(gcDbAccess.sql(sql.toString()).selectList(Object[].class));
+        }
+      } else {
+        attributesFromTable.addAll(new GcDbAccess().connectionName(dbConnectionName).sql(sqlInitial.toString()).selectList(Object[].class));
+      }
+      
+      String[] colNamesFromAttributesTable = GrouperUtil.splitTrim(commaSeparatedColNames, ",");
+      
+      // group name to group attributes
+      // e.g test:testGroup -> [ description -> testDescription, suffix -> groupSuffix ]
+      Map<String, Map<String, String>> groupSearchMatchingColumnToAttributes = new HashMap<String, Map<String, String>>();
+      
+      int indexOfGroupSearchMatchingColumn = GrouperUtil.indexOf(colNamesFromAttributesTable, groupMatchingColumn);
+      int indexOfAttributeNameMatchingColumn = GrouperUtil.indexOf(colNamesFromAttributesTable, attributeNameColumnName);
+      int indexOfAttributeValueMatchingColumn = GrouperUtil.indexOf(colNamesFromAttributesTable, attributeValueColumnName);
+      
+      for (Object[] oneRowOfAttributes: attributesFromTable) {
+        Object groupSearchMatchingValue = oneRowOfAttributes[indexOfGroupSearchMatchingColumn];
+        Object attributeName = oneRowOfAttributes[indexOfAttributeNameMatchingColumn];
+        Object attributeValue = oneRowOfAttributes[indexOfAttributeValueMatchingColumn];
+        if (groupSearchMatchingValue != null && attributeName != null) {
+          String groupSearchMatchingValueString = GrouperUtil.stringValue(groupSearchMatchingValue);
+          String attributeNameString = GrouperUtil.stringValue(attributeName);
+          String attributeValueString = GrouperUtil.stringValue(attributeValue);
+          
+          if (groupSearchMatchingColumnToAttributes.containsKey(groupSearchMatchingValueString)) {
+            Map<String, String> attributeNameToValue = groupSearchMatchingColumnToAttributes.get(groupSearchMatchingValueString);
+            attributeNameToValue.put(attributeNameString, attributeValueString);
+            groupSearchMatchingColumnToAttributes.put(groupSearchMatchingValueString, attributeNameToValue);
+          } else {
+            Map<String, String> attributeNameToValue = new HashMap<>();
+            attributeNameToValue.put(attributeNameString, attributeValueString);
+            groupSearchMatchingColumnToAttributes.put(groupSearchMatchingValueString, attributeNameToValue);
+          }
+          
+        }
+      }
+      
+      //e.g test:testGroup -> [ description -> testDescription, suffix -> groupSuffix ]
+      for (ProvisioningGroup provisioningGroup: provisioningGroups) {
+        Map<String, String> attributeNameToValue = GrouperUtil.nonNull(groupSearchMatchingColumnToAttributes.get(provisioningGroup.getName()));
+        
+        for (String attributeName: attributeNameToValue.keySet()) {
+          provisioningGroup.assignAttributeValue("groupAttributeResolverSql__"+attributeName.toLowerCase(), attributeNameToValue.get(attributeName));
+        }
+        
+      }
+      
+    } else {
+      throw new RuntimeException("Invalid group attributes table structure value");
+    }
+    
+  }
+  
+  public void enhanceEntityAttributesWithDataFields() {
+    GrouperProvisioningConfiguration provisioningConfiguration = this.grouperProvisioner.retrieveGrouperProvisioningConfiguration();
+    if (GrouperUtil.length(provisioningConfiguration.getProvisioningDataFieldConfigIds()) == 0) {
+      return;
+    }
+    
+    List<ProvisioningEntity> provisioningEntities = this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperProvisioningEntities();
+    
+    if (provisioningEntities.size() == 0) {
+      return;
+    }
+    
+    GrouperDataEngine grouperDataEngine = new GrouperDataEngine();
+    grouperDataEngine.loadConfigFields(null);
+    grouperDataEngine.loadConfigRows(null);
+    Map<String, GrouperDataFieldConfig> configIdToGrouperDataFieldConfig = grouperDataEngine.getFieldConfigByConfigId();
+    Map<String, GrouperDataRowConfig> configIdToGrouperDataRowConfig = grouperDataEngine.getRowConfigByConfigId();
+    
+    Map<Long, ProvisioningEntity> memberInternalIdToProvisioningEntity = new LinkedHashMap<>();
+    for (ProvisioningEntity provisioningEntity : provisioningEntities) {
+      memberInternalIdToProvisioningEntity.put(provisioningEntity.getInternalId(), provisioningEntity);
+    }
+    
+    Set<GrouperDataField> grouperDataFields = GrouperDataFieldDao.selectByTexts(provisioningConfiguration.getProvisioningDataFieldConfigIds());
+    Map<Long, GrouperDataField> dataFieldInternalIdToDataField = new LinkedHashMap<>();
+    for (GrouperDataField grouperDataField : grouperDataFields) {
+      dataFieldInternalIdToDataField.put(grouperDataField.getInternalId(), grouperDataField);
+    }
+       
+    // first handle the direct field assigns
+    {
+      Set<Long> dataFieldInternalIds = new LinkedHashSet<>();
+      for (GrouperDataField grouperDataField : grouperDataFields) {
+        GrouperDataFieldConfig grouperDataFieldConfig = configIdToGrouperDataFieldConfig.get(grouperDataField.getConfigId());
+        if (grouperDataFieldConfig != null && grouperDataFieldConfig.getFieldDataStructure() == GrouperDataFieldStructure.attribute) {
+          dataFieldInternalIds.add(grouperDataField.getInternalId());
+        }
+      }
+      
+      List<Object[]> dataFieldAssignDataList = GrouperDataFieldAssignDao.selectDataFieldAssignValuesByDataFieldInternalIdsAndMemberInternalIds(dataFieldInternalIds, memberInternalIdToProvisioningEntity.keySet());
+      for (Object[] dataFieldAssignData : dataFieldAssignDataList) {
+        Long dataFieldInternalId = GrouperUtil.longValue(dataFieldAssignData[0]);
+        Long memberInternalId = GrouperUtil.longValue(dataFieldAssignData[1]);
+        String valueString = (String)dataFieldAssignData[2];
+        Long valueInteger = dataFieldAssignData[3] == null ? null : GrouperUtil.longValue(dataFieldAssignData[3]);
+        
+        GrouperDataField grouperDataField = dataFieldInternalIdToDataField.get(dataFieldInternalId);
+        if (grouperDataField == null) {
+          continue;
+        }
+        
+        GrouperDataFieldConfig grouperDataFieldConfig = configIdToGrouperDataFieldConfig.get(grouperDataField.getConfigId());
+        if (grouperDataFieldConfig == null) {
+          continue;
+        }
+        
+        ProvisioningEntity provisioningEntity = memberInternalIdToProvisioningEntity.get(memberInternalId);
+        if (provisioningEntity == null) {
+          continue;
+        }
+        
+        Object value = grouperDataFieldConfig.getFieldDataType().convertValue(valueInteger, valueString);
+        if (grouperDataFieldConfig.isFieldMultiValued()) {
+          for (String alias : grouperDataFieldConfig.getFieldAliases()) {
+            provisioningEntity.addAttributeValue("dataField__" + alias, value);
+          }
+        } else {
+          for (String alias : grouperDataFieldConfig.getFieldAliases()) {
+            provisioningEntity.assignAttributeValue("dataField__" + alias, value);
+          }
+        }
+      }
+    }
+    
+    // second handle the row field assigns
+    {
+      Set<Long> dataFieldInternalIds = new LinkedHashSet<>();
+      for (GrouperDataField grouperDataField : grouperDataFields) {
+        GrouperDataFieldConfig grouperDataFieldConfig = configIdToGrouperDataFieldConfig.get(grouperDataField.getConfigId());
+        if (grouperDataFieldConfig != null && grouperDataFieldConfig.getFieldDataStructure() == GrouperDataFieldStructure.rowColumn) {
+          dataFieldInternalIds.add(grouperDataField.getInternalId());
+        }
+      }
+      
+      if (dataFieldInternalIds.size() == 0) {
+        return;
+      }
+      
+      List<Object[]> dataRowFieldAssignDataListAll = GrouperDataRowFieldAssignDao.selectDataRowFieldAssignValuesByDataFieldInternalIdsAndMemberInternalIds(dataFieldInternalIds, memberInternalIdToProvisioningEntity.keySet());
+      Map<Long, Map<Long, List<Object[]>>> memberInternalIdToDataRowAssignInternalIdToDataList = new LinkedHashMap<>();
+      Set<Long> dataRowInternalIds = new LinkedHashSet<>();
+      
+      // organize by member and assignment
+      for (Object[] dataRowFieldAssignData : dataRowFieldAssignDataListAll) {
+        Long dataRowInternalId = GrouperUtil.longValue(dataRowFieldAssignData[0]);
+        Long dataRowAssignInternalId = GrouperUtil.longValue(dataRowFieldAssignData[2]);
+        Long memberInternalId = GrouperUtil.longValue(dataRowFieldAssignData[3]);
+        
+        if (memberInternalIdToDataRowAssignInternalIdToDataList.get(memberInternalId) == null) {
+          memberInternalIdToDataRowAssignInternalIdToDataList.put(memberInternalId, new LinkedHashMap<>());
+        }
+        
+        if (memberInternalIdToDataRowAssignInternalIdToDataList.get(memberInternalId).get(dataRowAssignInternalId) == null) {
+          memberInternalIdToDataRowAssignInternalIdToDataList.get(memberInternalId).put(dataRowAssignInternalId, new ArrayList<>());
+        }
+        
+        memberInternalIdToDataRowAssignInternalIdToDataList.get(memberInternalId).get(dataRowAssignInternalId).add(dataRowFieldAssignData);
+        dataRowInternalIds.add(dataRowInternalId);
+      }
+      
+      // get all the data rows
+      Set<GrouperDataRow> grouperDataRows = GrouperDataRowDao.selectByInternalIds(dataRowInternalIds);
+      Map<Long, GrouperDataRow> dataRowInternalIdToDataRow = new LinkedHashMap<>();
+      for (GrouperDataRow grouperDataRow : grouperDataRows) {
+        dataRowInternalIdToDataRow.put(grouperDataRow.getInternalId(), grouperDataRow);
+      }
+      
+      for (Long memberInternalId : memberInternalIdToDataRowAssignInternalIdToDataList.keySet()) {
+        ProvisioningEntity provisioningEntity = memberInternalIdToProvisioningEntity.get(memberInternalId);
+        if (provisioningEntity == null) {
+          continue;
+        }
+        
+        Map<Long, List<Object[]>> dataRowAssignInternalIdToDataList = memberInternalIdToDataRowAssignInternalIdToDataList.get(memberInternalId);
+        
+        for (Long dataRowAssignInternalId : dataRowAssignInternalIdToDataList.keySet()) {
+          List<Object[]> dataRowFieldAssignDataList = dataRowAssignInternalIdToDataList.get(dataRowAssignInternalId);
+          Long dataRowInternalId = GrouperUtil.longValue(dataRowFieldAssignDataList.iterator().next()[0]);
+
+          GrouperDataRow grouperDataRow = dataRowInternalIdToDataRow.get(dataRowInternalId);
+          if (grouperDataRow == null) {
+            continue;
+          }
+          
+          GrouperDataRowConfig grouperDataRowConfig = configIdToGrouperDataRowConfig.get(grouperDataRow.getConfigId());
+          if (grouperDataRowConfig == null) {
+            continue;
+          }
+          
+          Map<String, Object> dataFieldValues = new LinkedHashMap<>();
+
+          for (String alias : grouperDataRowConfig.getRowAliases()) {
+            if (provisioningEntity.getDataRowAliasToDataFieldValues().get(alias) == null) {
+              provisioningEntity.getDataRowAliasToDataFieldValues().put(alias, new ArrayList<>());
+            }
+            
+            provisioningEntity.getDataRowAliasToDataFieldValues().get(alias).add(dataFieldValues);
+          }
+          
+          for (Object[] dataRowFieldAssignData : dataRowFieldAssignDataList) {
+            Long dataFieldInternalId = GrouperUtil.longValue(dataRowFieldAssignData[1]);
+            String valueString = (String)dataRowFieldAssignData[4];
+            Long valueInteger = dataRowFieldAssignData[5] == null ? null : GrouperUtil.longValue(dataRowFieldAssignData[5]);
+            
+            GrouperDataField grouperDataField = dataFieldInternalIdToDataField.get(dataFieldInternalId);
+            if (grouperDataField == null) {
+              continue;
+            }
+            
+            GrouperDataFieldConfig grouperDataFieldConfig = configIdToGrouperDataFieldConfig.get(grouperDataField.getConfigId());
+            if (grouperDataFieldConfig == null) {
+              continue;
+            }
+                        
+            Object value = grouperDataFieldConfig.getFieldDataType().convertValue(valueInteger, valueString);
+            if (grouperDataFieldConfig.isFieldMultiValued()) {
+              for (String alias : grouperDataFieldConfig.getFieldAliases()) {
+                if (dataFieldValues.get(alias) == null) {
+                  dataFieldValues.put(alias, new LinkedHashSet<>());
+                }
+                
+                ((Set<Object>)dataFieldValues.get(alias)).add(value);
+              }
+            } else {
+              for (String alias : grouperDataFieldConfig.getFieldAliases()) {
+                dataFieldValues.put(alias, value);
+              }
+            }
+          }
+        }        
+      }
+    }
+  }
+  
+  public void enhanceEntityAttributesWithSqlResolver(boolean isFullSync) {
+    
+    GrouperProvisioningConfiguration provisioningConfiguration = this.grouperProvisioner.retrieveGrouperProvisioningConfiguration();
+    
+    if (!provisioningConfiguration.isResolveAttributesWithSql()) {
+      return;
+    }
+    
+    String dbConnectionName = null;
+    String grouperAttributeThatMatchesRow = null;
+    String subjectSearchMatchingColumn = null;
+    String subjectSourceIdColumn = null;
+    String tableOrViewName = null;
+    String expression = null;
+    String commaSeparatedColumns = null;
+    String lastUpdatedColumn = null;
+    String lastUpdatedColumnType = null;
+    
+    String globalSqlResolver = provisioningConfiguration.getGlobalSqlResolver();
+    
+    if (StringUtils.isNotBlank(globalSqlResolver)) {
+      
+      boolean isEnabled = GrouperConfig.retrieveConfig().propertyValueBoolean("entityAttributeResolver."+globalSqlResolver+".enabled", true);
+      
+      if (!isEnabled) {
+        return;
+      }
+      
+      dbConnectionName = GrouperConfig.retrieveConfig().propertyValueStringRequired("entityAttributeResolver."+globalSqlResolver+".sqlConfigId");
+      
+      grouperAttributeThatMatchesRow = GrouperConfig.retrieveConfig().propertyValueStringRequired("entityAttributeResolver."+globalSqlResolver+".grouperAttributeThatMatchesRow");
+
+      subjectSearchMatchingColumn = GrouperConfig.retrieveConfig().propertyValueStringRequired("entityAttributeResolver."+globalSqlResolver+".subjectSearchMatchingColumn");
+
+      tableOrViewName = GrouperConfig.retrieveConfig().propertyValueStringRequired("entityAttributeResolver."+globalSqlResolver+".tableOrViewName");
+
+      commaSeparatedColumns = GrouperConfig.retrieveConfig().propertyValueStringRequired("entityAttributeResolver."+globalSqlResolver+".columnNames");
+
+      subjectSourceIdColumn = GrouperConfig.retrieveConfig().propertyValueString("entityAttributeResolver."+globalSqlResolver+".subjectSourceIdColumn");
+
+      lastUpdatedColumn = GrouperConfig.retrieveConfig().propertyValueString("entityAttributeResolver."+globalSqlResolver+".lastUpdatedColumn");
+      
+      lastUpdatedColumnType = GrouperConfig.retrieveConfig().propertyValueString("entityAttributeResolver."+globalSqlResolver+".lastUpdatedType");
+        
+    } else {
+      
+      dbConnectionName = provisioningConfiguration.getEntityAttributesSqlExternalSystem();
+      
+      grouperAttributeThatMatchesRow = provisioningConfiguration.getEntityAttributesSqlMappingEntityAttribute();
+
+      subjectSearchMatchingColumn = provisioningConfiguration.getEntityAttributesSubjectSearchMatchingColumn();
+      
+      tableOrViewName = provisioningConfiguration.getEntityAttributesTableViewName();
+      
+      commaSeparatedColumns = provisioningConfiguration.getEntityAttributesColumnNames();
+      
+      subjectSourceIdColumn = provisioningConfiguration.getEntityAttributesSubjectSourceIdColumn();
+      
+      expression = provisioningConfiguration.getEntityAttributesSqlMappingExpression();
+      
+      lastUpdatedColumn = provisioningConfiguration.getEntityAttributesLastUpdatedColumn();
+
+      lastUpdatedColumnType = provisioningConfiguration.getEntityAttributesLastUpdatedType();
+      
+    }
+    
+    Set<String> columnsWhichAreAttributes = GrouperUtil.splitTrimToSet(commaSeparatedColumns, ",");
+    
+    Set<String> columnNamesToFetch = GrouperUtil.splitTrimToSet(commaSeparatedColumns, ",");
+    
+    if (StringUtils.isNotBlank(lastUpdatedColumn) && !columnNamesToFetch.contains(lastUpdatedColumn.trim())) {
+      columnNamesToFetch.add(lastUpdatedColumn.trim());
+    }
+    
+    if (!columnNamesToFetch.contains(subjectSearchMatchingColumn.trim())) {
+      columnNamesToFetch.add(subjectSearchMatchingColumn.trim());
+    }
+    
+    String commaSeparatedColNames = GrouperUtil.setToString(columnNamesToFetch);
+      
+    boolean selectAllSqlOnFull = provisioningConfiguration.isSelectAllSqlOnFull();
+    
+    List<ProvisioningEntity> provisioningEntities = 
+        this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperProvisioningEntities();
+        
+    StringBuilder sqlInitial = new StringBuilder("select ");
+    sqlInitial.append(commaSeparatedColNames);
+    sqlInitial.append(" from ");
+    sqlInitial.append(tableOrViewName);
+    
+    List<Object[]> attributesFromTable = new ArrayList<Object[]>();
+    
+    if ( (isFullSync && !selectAllSqlOnFull) || !isFullSync) {
+      if (provisioningEntities.size() == 0) {
+        return;
+      }
+      
+      int numberOfBatches = GrouperUtil.batchNumberOfBatches(provisioningEntities.size(), 900);
+      
+      Map<String, Object> elVariableMap = new HashMap<String, Object>();
+      
+      for (int i = 0; i < numberOfBatches; i++) {
+        
+        List<ProvisioningEntity> currentBatchProvisioningEntities = GrouperUtil.batchList(provisioningEntities, 900, i);
+        StringBuilder sql = new StringBuilder(sqlInitial);
+        
+        sql.append(" where "+ subjectSearchMatchingColumn + " in ( ");
+        
+        GcDbAccess gcDbAccess = new GcDbAccess().connectionName(dbConnectionName);
+        
+        for (int j=0; j<currentBatchProvisioningEntities.size();j++) {
+          ProvisioningEntity provisioningEntity = currentBatchProvisioningEntities.get(j);
+          
+          String subjectMatchingIdentifier = null;
+          if (StringUtils.isNotBlank(expression)) {
+            elVariableMap.clear();
+            elVariableMap.put("grouperProvisioningEntity", provisioningEntity);
+            Object object = this.getGrouperProvisioner().retrieveGrouperProvisioningTranslator().runScript(expression, elVariableMap);
+            subjectMatchingIdentifier = GrouperUtil.stringValue(object);
+          } else if (StringUtils.equals(grouperAttributeThatMatchesRow, "subjectId")) {
+              subjectMatchingIdentifier = provisioningEntity.getSubjectId();
+          } else if (StringUtils.equals(grouperAttributeThatMatchesRow, "subjectIdentifier0")) {
+            subjectMatchingIdentifier = (String)provisioningEntity.retrieveAttributeValueString("subjectIdentifier0");
+          } else if (StringUtils.equals(grouperAttributeThatMatchesRow, "subjectIdentifier1")) {
+            subjectMatchingIdentifier = (String)provisioningEntity.retrieveAttributeValueString("subjectIdentifier1");
+          } else if (StringUtils.equals(grouperAttributeThatMatchesRow, "subjectIdentifier2")) {
+            subjectMatchingIdentifier = (String)provisioningEntity.retrieveAttributeValueString("subjectIdentifier2");
+          } else {
+              throw new RuntimeException("invalid grouperAttributeThatMatchesRow: "+grouperAttributeThatMatchesRow + " expected 'subjectId', 'subjectIdentifier0', 'subjectIdentifier1', 'subjectIdentifier2'");
+          }
+          
+          gcDbAccess.addBindVar(subjectMatchingIdentifier);
+          if (j>0) {
+            sql.append(",");
+          }
+          sql.append("?");
+        }
+        sql.append(" ) ");
+        attributesFromTable.addAll(gcDbAccess.sql(sql.toString()).selectList(Object[].class));
+      
+      }
+    } else {
+      attributesFromTable.addAll(new GcDbAccess().connectionName(dbConnectionName).sql(sqlInitial.toString()).selectList(Object[].class));
+    }
+
+    String[] colNamesFromAttributesTable = GrouperUtil.splitTrim(commaSeparatedColNames, ",");
+    
+    Map<MultiKey, Object[]> subjectSearchMatchingColumnToAttributes = new HashMap<MultiKey, Object[]>();
+    
+    int indexOfSubjectSearchMatchingColumn = GrouperUtil.indexOf(colNamesFromAttributesTable, subjectSearchMatchingColumn);
+    
+    for (Object[] oneRowOfAttributes: attributesFromTable) {
+      Object subjectSearchMatchingValue = oneRowOfAttributes[indexOfSubjectSearchMatchingColumn];
+      if (subjectSearchMatchingValue != null) {
+        
+        String subjectSearchMatchingValueString = GrouperUtil.stringValue(subjectSearchMatchingValue);
+        
+        MultiKey identifier = null;
+        if (StringUtils.isNotBlank(subjectSourceIdColumn)) {
+          identifier = new MultiKey(subjectSearchMatchingValueString, subjectSourceIdColumn);
+        } else {
+          identifier = new MultiKey(new String[] {subjectSearchMatchingValueString});
+        }
+        
+        subjectSearchMatchingColumnToAttributes.put(identifier, oneRowOfAttributes);
+      }
+    }
+    
+    /**
+     * subjectSearchMatchingColumnToAttributes looks like
+     * test.subject.0 -> [school0, description0,....]
+     */
+    
+    Map<String, Object> elVariableMap = new HashMap<String, Object>();
+    
+    for (ProvisioningEntity provisioningEntity: provisioningEntities) {
+      
+      String subjectMatchingIdentifier = null;
+      
+      if (StringUtils.isNotBlank(expression)) {
+        elVariableMap.clear();
+        elVariableMap.put("grouperProvisioningEntity", provisioningEntity);
+        Object object = this.getGrouperProvisioner().retrieveGrouperProvisioningTranslator().runScript(expression, elVariableMap);
+        subjectMatchingIdentifier = GrouperUtil.stringValue(object);
+      } else if (StringUtils.equals(grouperAttributeThatMatchesRow, "subjectId")) {
+          subjectMatchingIdentifier = provisioningEntity.getSubjectId();
+      } else if (StringUtils.equals(grouperAttributeThatMatchesRow, "subjectIdentifier0")) {
+        subjectMatchingIdentifier = (String)provisioningEntity.retrieveAttributeValueString("subjectIdentifier0");
+      } else if (StringUtils.equals(grouperAttributeThatMatchesRow, "subjectIdentifier1")) {
+        subjectMatchingIdentifier = (String)provisioningEntity.retrieveAttributeValueString("subjectIdentifier1");
+      } else if (StringUtils.equals(grouperAttributeThatMatchesRow, "subjectIdentifier2")) {
+        subjectMatchingIdentifier = (String)provisioningEntity.retrieveAttributeValueString("subjectIdentifier2");
+      } else {
+          throw new RuntimeException("invalid grouperAttributeThatMatchesRow: "+grouperAttributeThatMatchesRow + " expected 'subjectId', 'subjectIdentifier0', 'subjectIdentifier1', 'subjectIdentifier2'");
+      }
+      
+      MultiKey identifier = null;
+      if (StringUtils.isNotBlank(subjectSourceIdColumn)) {
+        String subjectSourceIdFromProvisioningEntity = provisioningEntity.retrieveAttributeValueString("subjectSourceId");
+        identifier = new MultiKey(subjectMatchingIdentifier, subjectSourceIdFromProvisioningEntity);
+      } else {
+        identifier = new MultiKey(new String[] {subjectMatchingIdentifier});
+      }
+        
+      Object[] attributeValues = subjectSearchMatchingColumnToAttributes.get(identifier);
+      if (attributeValues != null) {
+        int i = 0;
+        for (String attributeName: colNamesFromAttributesTable) {
+          
+          if (columnsWhichAreAttributes.contains(attributeName)) {
+            
+            provisioningEntity.assignAttributeValue("entityAttributeResolverSql__"+attributeName.toLowerCase(), attributeValues[i]);
+          }
+
+          i++;
+         
+        }
+      }
+      
+    }
+        
+  }
+  
+  public void enhanceEntityAttributesWithLdapResolver(boolean isFullSync) {
+    
+    GrouperProvisioningConfiguration provisioningConfiguration = this.grouperProvisioner.retrieveGrouperProvisioningConfiguration();
+    
+    if (!provisioningConfiguration.isResolveAttributesWithLdap()) {
+      return;
+    }
+    
+    List<ProvisioningEntity> provisioningEntities = this.getGrouperProvisioner().retrieveGrouperProvisioningData().retrieveGrouperProvisioningEntities();
+    
+    String globalLdapResolver = provisioningConfiguration.getGlobalLdapResolver();
+    
+    String ldapConfigId = null;
+    String baseDn = null;
+    String searchScope = null;
+    String ldapAttributes = null;
+    String subjectSearchMatchingAttribute = null;
+    String subjectSourceId = null;
+    String grouperAttributeThatMatchesRecord = null;
+    String filterPart = null;
+    String lastUpdatedAttribute = null;
+    String multiValuedLdapAttributes = null;
+    String expression = null;
+    String lastUpdatedAttributeFormat = null;
+    boolean filterAllLdapOnFull = true;
+    
+    if (StringUtils.isNotBlank(globalLdapResolver)) {
+      
+      boolean isEnabled = GrouperConfig.retrieveConfig().propertyValueBoolean("entityAttributeResolver."+globalLdapResolver+".enabled", true);
+      
+      if (!isEnabled) {
+        return;
+      }
+      
+      ldapConfigId = GrouperConfig.retrieveConfig().propertyValueStringRequired("entityAttributeResolver."+globalLdapResolver+".ldapConfigId");
+      baseDn = GrouperConfig.retrieveConfig().propertyValueStringRequired("entityAttributeResolver."+globalLdapResolver+".baseDn");
+      subjectSourceId = GrouperConfig.retrieveConfig().propertyValueString("entityAttributeResolver."+globalLdapResolver+".subjectSourceId");
+      searchScope = GrouperConfig.retrieveConfig().propertyValueStringRequired("entityAttributeResolver."+globalLdapResolver+".searchScope");
+      ldapAttributes = GrouperConfig.retrieveConfig().propertyValueStringRequired("entityAttributeResolver."+globalLdapResolver+".ldapAttributes");
+      subjectSearchMatchingAttribute = GrouperConfig.retrieveConfig().propertyValueStringRequired("entityAttributeResolver."+globalLdapResolver+".subjectSearchMatchingAttribute");
+      grouperAttributeThatMatchesRecord = GrouperConfig.retrieveConfig().propertyValueStringRequired("entityAttributeResolver."+globalLdapResolver+".grouperAttributeThatMatchesRecord");
+      filterPart = GrouperConfig.retrieveConfig().propertyValueString("entityAttributeResolver."+globalLdapResolver+".filterPart");
+      lastUpdatedAttribute = GrouperConfig.retrieveConfig().propertyValueString("entityAttributeResolver."+globalLdapResolver+".lastUpdatedAttribute");
+      lastUpdatedAttributeFormat = GrouperConfig.retrieveConfig().propertyValueString("entityAttributeResolver."+globalLdapResolver+".ldapLastUpdatedFormat");
+      multiValuedLdapAttributes = GrouperConfig.retrieveConfig().propertyValueString("entityAttributeResolver."+globalLdapResolver+".multiValuedLdapAttributes");
+      
+    } else {
+      
+      ldapConfigId = provisioningConfiguration.getEntityAttributesLdapExternalSystem();
+      baseDn = provisioningConfiguration.getEntityAttributesLdapBaseDn();
+      subjectSourceId = provisioningConfiguration.getEntityAttributesLdapSubjectSource();
+      searchScope = provisioningConfiguration.getEntityAttributesLdapSearchScope();
+      ldapAttributes = provisioningConfiguration.getEntityAttributesLdapAttributes();
+      subjectSearchMatchingAttribute = provisioningConfiguration.getEntityAttributesLdapMatchingSearchAttribute();
+      grouperAttributeThatMatchesRecord = provisioningConfiguration.getEntityAttributesLdapMappingEntityAttribute();
+      filterPart = provisioningConfiguration.getEntityAttributesLdapFilterPart();
+      lastUpdatedAttribute = provisioningConfiguration.getEntityAttributesLdapLastUpdatedAttribute();
+      lastUpdatedAttributeFormat = provisioningConfiguration.getEntityAttributesLdapLastUpdatedAttributeFormat();
+      expression = provisioningConfiguration.getEntityAttributesLdapMatchingExpression();
+    }
+    
+    List<LdapEntry> ldapEntries = new ArrayList<LdapEntry>();
+    
+    filterAllLdapOnFull = provisioningConfiguration.isFilterAllLDAPOnFull();
+    
+    Set<String> ldapAttributesSet = GrouperUtil.splitTrimToSet(ldapAttributes, ",");
+    
+    Set<String> multiValuedAttributesSet = GrouperUtil.nonNull(GrouperUtil.splitTrimToSet(multiValuedLdapAttributes, ","));
+    
+    if (StringUtils.isNotBlank(multiValuedLdapAttributes)) {
+      ldapAttributesSet.addAll(multiValuedAttributesSet);
+    }
+    
+    if (StringUtils.isNotBlank(subjectSearchMatchingAttribute)) {
+      ldapAttributesSet.add(subjectSearchMatchingAttribute);
+    }
+    
+    String[] ldapAttributesArray = GrouperUtil.toArray(ldapAttributesSet, String.class);
+    
+    LdapSearchScope ldapSearchScope = LdapSearchScope.valueOfIgnoreCase(searchScope, true);
+    
+    if ( (isFullSync && !filterAllLdapOnFull) || !isFullSync) {
+
+      
+      if (provisioningEntities.size() == 0) {
+        return;
+      }
+      
+      int numberOfBatches = GrouperUtil.batchNumberOfBatches(provisioningEntities.size(), 900);
+      
+      Map<String, Object> elVariableMap = new HashMap<String, Object>();
+      
+      for (int i = 0; i < numberOfBatches; i++) {
+        
+        List<ProvisioningEntity> currentBatchProvisioningEntities = GrouperUtil.batchList(provisioningEntities, 900, i);
+        
+        StringBuilder filter = new StringBuilder();
+        if (StringUtils.isNotBlank(filterPart)) {
+          filter.append("(&");
+          filterPart = filterPart.trim();
+          if (filterPart.startsWith("(")) {
+            filter.append(filterPart);
+          } else {
+            filter.append("(" + filterPart + ")");
+          }
+        }
+        filter.append("(|");
+        
+        
+        for (int j=0; j<currentBatchProvisioningEntities.size(); j++) {
+          
+          ProvisioningEntity provisioningEntity = currentBatchProvisioningEntities.get(j);
+          
+          String subjectMatchingIdentifier = null;
+          if (StringUtils.isNotBlank(expression)) {
+            elVariableMap.clear();
+            elVariableMap.put("grouperProvisioningEntity", provisioningEntity);
+            Object object = this.getGrouperProvisioner().retrieveGrouperProvisioningTranslator().runScript(expression, elVariableMap);
+            subjectMatchingIdentifier = GrouperUtil.stringValue(object);
+          } else if (StringUtils.equals(grouperAttributeThatMatchesRecord, "subjectId")) {
+              subjectMatchingIdentifier = provisioningEntity.getSubjectId();
+          } else if (StringUtils.equals(grouperAttributeThatMatchesRecord, "subjectIdentifier0")) {
+            subjectMatchingIdentifier = (String)provisioningEntity.retrieveAttributeValueString("subjectIdentifier0");
+          } else if (StringUtils.equals(grouperAttributeThatMatchesRecord, "subjectIdentifier1")) {
+            subjectMatchingIdentifier = (String)provisioningEntity.retrieveAttributeValueString("subjectIdentifier1");
+          } else if (StringUtils.equals(grouperAttributeThatMatchesRecord, "subjectIdentifier2")) {
+            subjectMatchingIdentifier = (String)provisioningEntity.retrieveAttributeValueString("subjectIdentifier2");
+          } else {
+              throw new RuntimeException("invalid grouperAttributeThatMatchesRecord: "+grouperAttributeThatMatchesRecord + " expected 'subjectId', 'subjectIdentifier0', 'subjectIdentifier1', 'subjectIdentifier2' ");
+          }
+          
+          filter.append("("+subjectSearchMatchingAttribute+"="+subjectMatchingIdentifier+")");  
+        }
+        filter.append(")");
+        if (StringUtils.isNotBlank(filterPart)) {
+          filter.append(")");
+        }
+        ldapEntries.addAll(LdapSessionUtils.ldapSession().list(ldapConfigId, baseDn, ldapSearchScope, filter.toString(), ldapAttributesArray, null));
+      
+      }
+    } else {
+      
+      String filter = null;
+      if (StringUtils.isNotBlank(filterPart)) {
+        filter = "(&";
+        filterPart = filterPart.trim();
+        if (filterPart.startsWith("(")) {
+          filter += filterPart;
+        } else {
+          filter += "(" + filterPart + ")";
+        }
+        filter += "("+subjectSearchMatchingAttribute+"=*))"; 
+        
+      } else {
+        filter = "("+subjectSearchMatchingAttribute+"=*)"; 
+      }
+      
+      ldapEntries.addAll(LdapSessionUtils.ldapSession().list(ldapConfigId, baseDn, ldapSearchScope, filter, ldapAttributesArray, null));
+      
+    }
+    
+    Map<MultiKey, LdapEntry> identifierToLdapEntry = new HashMap<MultiKey, LdapEntry>();
+    
+    for (LdapEntry ldapEntry: GrouperUtil.nonNull(ldapEntries)) {
+      
+      LdapAttribute attribute = ldapEntry.getAttribute(subjectSearchMatchingAttribute);
+      if (attribute != null) {
+        
+        Collection<String> stringValues = attribute.getStringValues();
+        if (GrouperUtil.length(stringValues) == 1) {
+          
+          MultiKey identifier = null;
+          if (StringUtils.isNotBlank(subjectSourceId)) {
+            identifier = new MultiKey(stringValues.iterator().next(), subjectSourceId);
+          } else {
+            identifier = new MultiKey(new String[] {stringValues.iterator().next()});
+          }
+          identifierToLdapEntry.put(identifier, ldapEntry);
+        }
+      }
+    }
+    
+    Map<String, Object> elVariableMap = new HashMap<String, Object>();
+    
+    for (ProvisioningEntity provisioningEntity: provisioningEntities) {
+      
+      String subjectMatchingIdentifier = null;
+      if (StringUtils.isNotBlank(expression)) {
+        elVariableMap.clear();
+        elVariableMap.put("grouperProvisioningEntity", provisioningEntity);
+        Object object = this.getGrouperProvisioner().retrieveGrouperProvisioningTranslator().runScript(expression, elVariableMap);
+        subjectMatchingIdentifier = GrouperUtil.stringValue(object);
+      } else if (StringUtils.equals(grouperAttributeThatMatchesRecord, "subjectId")) {
+          subjectMatchingIdentifier = provisioningEntity.getSubjectId();
+      } else if (StringUtils.equals(grouperAttributeThatMatchesRecord, "subjectIdentifier0")) {
+        subjectMatchingIdentifier = (String)provisioningEntity.getSubjectIdentifier0();
+      } else if (StringUtils.equals(grouperAttributeThatMatchesRecord, "subjectIdentifier1")) {
+        subjectMatchingIdentifier = (String)provisioningEntity.getSubjectIdentifier1();
+      } else if (StringUtils.equals(grouperAttributeThatMatchesRecord, "subjectIdentifier2")) {
+        subjectMatchingIdentifier = (String)provisioningEntity.getSubjectIdentifier2();
+      } else {
+        throw new RuntimeException("invalid grouperAttributeThatMatchesRecord: "+grouperAttributeThatMatchesRecord + " expected 'subjectId', 'subjectIdentifier0', 'subjectIdentifier1', 'subjectIdentifier2'");
+      }
+      if (StringUtils.isBlank(subjectMatchingIdentifier)) {
+        continue;
+      }
+      MultiKey identifier = null;
+      if (StringUtils.isNotBlank(subjectSourceId)) {
+        String subjectSourceIdFromProvisioningEntity = provisioningEntity.retrieveAttributeValueString("subjectSourceId");
+        identifier = new MultiKey(subjectMatchingIdentifier, subjectSourceIdFromProvisioningEntity);
+      } else {
+        identifier = new MultiKey(new String[] {subjectMatchingIdentifier});
+      }
+      
+      LdapEntry ldapEntry = identifierToLdapEntry.get(identifier);
+      if (ldapEntry != null) {
+        
+        for (String ldapAttributeName: ldapAttributesArray) {
+          
+          if (StringUtils.equals(ldapAttributeName, "lastUpdatedAttribute")) {
+            continue;
+          }
+          
+          if (StringUtils.equalsIgnoreCase("ldap_dn", ldapAttributeName)) {
+            
+            provisioningEntity.assignAttributeValue("entityAttributeResolverLdap__ldap_dn", ldapEntry.getDn());
+            
+          } else {
+
+            LdapAttribute attribute = ldapEntry.getAttribute(ldapAttributeName);
+            if (attribute != null) {
+              
+              if (multiValuedAttributesSet.contains(attribute.getName())) {
+                
+                for ( String attributeValue: GrouperUtil.nonNull(attribute.getStringValues())) {
+                  provisioningEntity.addAttributeValue("entityAttributeResolverLdap__"+attribute.getName().toLowerCase(), attributeValue);
+                }
+                
+              } else {
+                
+                if (GrouperUtil.length(attribute.getStringValues()) == 0) {
+                  continue;
+                }
+                
+                if (GrouperUtil.length(attribute.getStringValues()) == 1) {
+                  provisioningEntity.assignAttributeValue("entityAttributeResolverLdap__"+attribute.getName().toLowerCase(), attribute.getStringValues().iterator().next());
+                } else {
+                  
+                  String concatenatedAttributeValues = GrouperUtil.join(attribute.getStringValues().iterator(), ",");
+                  provisioningEntity.assignAttributeValue("entityAttributeResolverLdap__"+attribute.getName().toLowerCase(), concatenatedAttributeValues);
+                  
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /** 
+   * override this method to do some logic after all target data is retrieved (e.g. if there are DN overrides)
+   * @param grouperProvisioningLists grouper data to get extra target data from
+   * @return newly selected data
+   */
+  public GrouperProvisioningLists retrieveExtraTargetData(GrouperProvisioningLists grouperProvisioningLists) {
+    return null;
+  }
+
+  /**
+   * take target data and add wrapper and add to data store.
+   * put them in wrappers irrespective of matching or whatever
+   * @param targetProvisioningGroups 
+   * @param isExtra true if this is like a dn override, an extra group that needs retrieved
+   * @param targetProvisioningLists 
+   */
+  public void processTargetDataGroups(List<ProvisioningGroup> targetProvisioningGroups, boolean isExtra) {
+    if (GrouperUtil.length(targetProvisioningGroups) == 0) {
+      return;
+    }
+    
+    // never null
+    Map<ProvisioningGroup, Object> targetGroupToTargetNativeGroup = this.getGrouperProvisioner().retrieveGrouperProvisioningData().getTargetGroupToTargetNativeGroup();
+
+    int logProgressEveryTargetGroup = this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().isLogProgressWhileRetrievingTargetData()
+        ? this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().getLogProgressEveryRetrievedTargetGroupCount() : -1;
+    int targetGroupProgressCount = 0;
+
+    // add wrappers for all groups
+    for (ProvisioningGroup targetProvisioningGroup : GrouperUtil.nonNull(targetProvisioningGroups)) {
+      ProvisioningGroupWrapper provisioningGroupWrapper = targetProvisioningGroup.getProvisioningGroupWrapper();
+      if (provisioningGroupWrapper == null) {
+        provisioningGroupWrapper = new ProvisioningGroupWrapper();
+        provisioningGroupWrapper.setGrouperProvisioner(this.grouperProvisioner);
+      }
+      provisioningGroupWrapper.setTargetProvisioningGroup(targetProvisioningGroup);
+      this.getGrouperProvisioner().retrieveGrouperProvisioningData().addAndIndexGroupWrapper(provisioningGroupWrapper);
+      provisioningGroupWrapper.getProvisioningStateGroup().setSelectResultProcessed(true);
+      provisioningGroupWrapper.setTargetNativeGroup(targetGroupToTargetNativeGroup.get(targetProvisioningGroup));
+      
+      GcGrouperSyncGroup gcGrouperSyncGroup = provisioningGroupWrapper.getGcGrouperSyncGroup();
+
+      if (gcGrouperSyncGroup != null && (gcGrouperSyncGroup.getInTarget() == null || !gcGrouperSyncGroup.getInTarget())) {
+
+        Timestamp nowTimestamp = new Timestamp(System.currentTimeMillis());
+        gcGrouperSyncGroup.setInTarget(true);
+        gcGrouperSyncGroup.setInTargetStart(nowTimestamp);
+        if (StringUtils.isBlank(gcGrouperSyncGroup.getInTargetInsertOrExistsDb())) {
+          gcGrouperSyncGroup.setInTargetInsertOrExists(false);
+        }
+      }
+
+      targetGroupProgressCount++;
+      if (logProgressEveryTargetGroup > 0 && targetGroupProgressCount % logProgressEveryTargetGroup == 0) {
+        this.grouperProvisioner.retrieveGrouperProvisioningObjectLog().info("retrieved " + targetGroupProgressCount + " groups from target");
+      }
+
+    }
+
+    // Go through the full logic and see if any other processing is done on the target entities
+    this.grouperProvisioner.retrieveGrouperProvisioningAttributeManipulation().manipulateDefaultsFilterAttributesGroups(targetProvisioningGroups, true, true, false, false);
+    
+    this.grouperProvisioner.retrieveGrouperProvisioningTranslator().idTargetGroups(targetProvisioningGroups);
+    
+    this.grouperProvisioner.retrieveGrouperProvisioningMatchingIdIndex().mergeInNewTargetGroups(targetProvisioningGroups);
+
+    GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "targetGroupsRetrieved", 
+        GrouperUtil.length(targetProvisioningGroups));
+    if (!isExtra) {
+      GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "originalTargetGroupsRetrieved", 
+          GrouperUtil.length(targetProvisioningGroups));
+      GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "originalTargetTotalCount", 
+          GrouperUtil.length(targetProvisioningGroups));
+    }
+    
+    if (this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().getGrouperProvisioningBehaviorMembershipType() 
+        == GrouperProvisioningBehaviorMembershipType.groupAttributes) {
+    
+      String membershipAttributeName = this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().getAttributeNameForMemberships();
+
+      for (ProvisioningGroup provisioningGroup : GrouperUtil.nonNull(targetProvisioningGroups)) {
+        int membershipSize = GrouperUtil.length(provisioningGroup.retrieveAttributeValueSetForMemberships());
+        GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "targetMembershipsRetrieved", 
+            membershipSize);
+        if (!isExtra) {
+          GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "originalTargetMembershipsRetrieved", 
+              membershipSize);
+          GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "originalTargetTotalCount", 
+              membershipSize);
+        }
+      }
+    }
+
+    
+  }
+
+  /**
+   * take target data and add wrapper and add to data store.
+   * put them in wrappers irrespective of matching or whatever
+   * @param targetProvisioningEntities 
+   * @param isExtra true if this is an extra entity i.e. once not in the base ou with dn override
+   */
+  public void processTargetDataEntities(List<ProvisioningEntity> targetProvisioningEntities, boolean isExtra) {
+    if (GrouperUtil.length(targetProvisioningEntities) == 0) {
+      return;
+    }
+    
+    // never null
+    Map<ProvisioningEntity, Object> targetEntityToTargetNativeEntity = this.getGrouperProvisioner().retrieveGrouperProvisioningData().getTargetEntityToTargetNativeEntity();
+
+    int logProgressEveryTargetEntity = this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().isLogProgressWhileRetrievingTargetData()
+        ? this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().getLogProgressEveryRetrievedTargetEntityCount() : -1;
+    int targetEntityProgressCount = 0;
+
+    // add wrappers for all entities
+    for (ProvisioningEntity targetProvisioningEntity : GrouperUtil.nonNull(targetProvisioningEntities)) {
+      ProvisioningEntityWrapper provisioningEntityWrapper = targetProvisioningEntity.getProvisioningEntityWrapper();
+      if (provisioningEntityWrapper == null) {
+        // note: should any of this happen if already registered?  register again?
+        provisioningEntityWrapper = new ProvisioningEntityWrapper();
+        provisioningEntityWrapper.setGrouperProvisioner(this.grouperProvisioner);
+      }
+      provisioningEntityWrapper.setTargetProvisioningEntity(targetProvisioningEntity);
+      this.getGrouperProvisioner().retrieveGrouperProvisioningData().addAndIndexEntityWrapper(provisioningEntityWrapper);
+      provisioningEntityWrapper.getProvisioningStateEntity().setSelectResultProcessed(true);
+      provisioningEntityWrapper.setTargetNativeEntity(targetEntityToTargetNativeEntity.get(targetProvisioningEntity));
+      
+      GcGrouperSyncMember gcGrouperSyncMember = provisioningEntityWrapper.getGcGrouperSyncMember();
+
+      if (gcGrouperSyncMember != null && (gcGrouperSyncMember.getInTarget() == null || !gcGrouperSyncMember.getInTarget())) {
+
+        Timestamp nowTimestamp = new Timestamp(System.currentTimeMillis());
+        gcGrouperSyncMember.setInTarget(true);
+        gcGrouperSyncMember.setInTargetStart(nowTimestamp);
+        if (StringUtils.isBlank(gcGrouperSyncMember.getInTargetInsertOrExistsDb())) {
+          gcGrouperSyncMember.setInTargetInsertOrExists(false);
+        }
+      }
+
+      targetEntityProgressCount++;
+      if (logProgressEveryTargetEntity > 0 && targetEntityProgressCount % logProgressEveryTargetEntity == 0) {
+        this.grouperProvisioner.retrieveGrouperProvisioningObjectLog().info("retrieved " + targetEntityProgressCount + " entities from target");
+      }
+
+    }
+
+    // Go through the full logic and see if any other processing is done on the target entities
+    this.grouperProvisioner.retrieveGrouperProvisioningAttributeManipulation().manipulateDefaultsFilterAttributesEntities(targetProvisioningEntities, true, true, false, false);
+
+    this.grouperProvisioner.retrieveGrouperProvisioningTranslator().idTargetEntities(targetProvisioningEntities);
+   
+    this.grouperProvisioner.retrieveGrouperProvisioningMatchingIdIndex().mergeInNewTargetEntities(targetProvisioningEntities);
+
+    GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "targetEntitiesRetrieved", 
+        GrouperUtil.length(targetProvisioningEntities));
+    if (!isExtra) {
+      GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "originalTargetEntitiesRetrieved", 
+          GrouperUtil.length(targetProvisioningEntities));
+      GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "originalTargetTotalCount", 
+          GrouperUtil.length(targetProvisioningEntities));
+    }
+    
+    String membershipAttributeName = this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().getAttributeNameForMemberships();
+
+    if (this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().getGrouperProvisioningBehaviorMembershipType() 
+        == GrouperProvisioningBehaviorMembershipType.entityAttributes) {
+        
+      for (ProvisioningEntity provisioningEntity : GrouperUtil.nonNull(targetProvisioningEntities)) {
+        int membershipSize = GrouperUtil.length(provisioningEntity.retrieveAttributeValueSetForMemberships());
+        GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "targetMembershipsRetrieved", 
+            membershipSize);
+        if (!isExtra) {
+          GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "originalTargetMembershipsRetrieved", 
+              membershipSize);
+          GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "originalTargetTotalCount", 
+              membershipSize);
+        }
+      }
+    }
+
+
+  }
+
+
+  /**
+   * take target data and add wrapper and add to data store.
+   * put them in wrappers irrespective of matching or whatever
+   * @param targetProvisioningMemberships 
+   * @param isExtra if these are from a group or entity with dn override or outside of normal search
+   */
+  public void processTargetDataMemberships(List<ProvisioningMembership> targetProvisioningMemberships, boolean isExtra) {
+    if (GrouperUtil.length(targetProvisioningMemberships) == 0) {
+      return;
+    }
+    int logProgressEveryTargetMembership = this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().isLogProgressWhileRetrievingTargetData()
+        ? this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().getLogProgressEveryRetrievedTargetMembershipCount() : -1;
+    int targetMembershipProgressCount = 0;
+
+    // add wrappers for all memberships
+    for (ProvisioningMembership targetProvisioningMembership : GrouperUtil.nonNull(targetProvisioningMemberships)) {
+      ProvisioningMembershipWrapper provisioningMembershipWrapper = targetProvisioningMembership.getProvisioningMembershipWrapper();
+      if (provisioningMembershipWrapper == null) {
+        provisioningMembershipWrapper = new ProvisioningMembershipWrapper();
+        provisioningMembershipWrapper.setGrouperProvisioner(this.grouperProvisioner);
+      }
+      provisioningMembershipWrapper.setTargetProvisioningMembership(targetProvisioningMembership);
+      this.getGrouperProvisioner().retrieveGrouperProvisioningData().addAndIndexMembershipWrapper(provisioningMembershipWrapper);
+      provisioningMembershipWrapper.getProvisioningStateMembership().setSelectResultProcessed(true);
+      GcGrouperSyncMembership gcGrouperSyncMembership = provisioningMembershipWrapper.getGcGrouperSyncMembership();
+
+      if (gcGrouperSyncMembership != null && !gcGrouperSyncMembership.isInTarget()) {
+
+        Timestamp nowTimestamp = new Timestamp(System.currentTimeMillis());
+        gcGrouperSyncMembership.setInTarget(true);
+        gcGrouperSyncMembership.setInTargetStart(nowTimestamp);
+        if (StringUtils.isBlank(gcGrouperSyncMembership.getInTargetInsertOrExistsDb())) {
+          gcGrouperSyncMembership.setInTargetInsertOrExists(false);
+        }
+      }
+
+      targetMembershipProgressCount++;
+      if (logProgressEveryTargetMembership > 0 && targetMembershipProgressCount % logProgressEveryTargetMembership == 0) {
+        this.grouperProvisioner.retrieveGrouperProvisioningObjectLog().info("retrieved " + targetMembershipProgressCount + " memberships from target");
+      }
+
+    }
+
+    // Go through the full logic and see if any other processing is done on the target memberships
+    this.grouperProvisioner.retrieveGrouperProvisioningAttributeManipulation().manipulateDefaultsFilterAttributesMemberships(targetProvisioningMemberships, true, true, false, false);
+
+    // set the groups and entities in case they are used for translation
+    for (ProvisioningMembership targetProvisioningMembership : GrouperUtil.nonNull(targetProvisioningMemberships)) {
+      
+      if (targetProvisioningMembership.getProvisioningGroup() == null && !StringUtils.isBlank(targetProvisioningMembership.getProvisioningGroupId())) {
+        ProvisioningGroupWrapper provisioningGroupWrapper = this.getGrouperProvisioner().retrieveGrouperProvisioningDataIndex().getTargetGroupIdToProvisioningGroupWrapper().get(targetProvisioningMembership.getProvisioningGroupId());
+        if (provisioningGroupWrapper != null && provisioningGroupWrapper.getTargetProvisioningGroup() != null) {
+          targetProvisioningMembership.setProvisioningGroup(provisioningGroupWrapper.getTargetProvisioningGroup());
+        }
+      }
+
+      if (targetProvisioningMembership.getProvisioningEntity() == null && !StringUtils.isBlank(targetProvisioningMembership.getProvisioningEntityId())) {
+        ProvisioningEntityWrapper provisioningEntityWrapper = this.getGrouperProvisioner().retrieveGrouperProvisioningDataIndex().getTargetEntityIdToProvisioningEntityWrapper().get(targetProvisioningMembership.getProvisioningEntityId());
+        if (provisioningEntityWrapper != null && provisioningEntityWrapper.getTargetProvisioningEntity() != null) {
+          targetProvisioningMembership.setProvisioningEntity(provisioningEntityWrapper.getTargetProvisioningEntity());
+        }
+      }
+
+    }
+    
+    this.grouperProvisioner.retrieveGrouperProvisioningTranslator().idTargetMemberships(targetProvisioningMemberships);
+
+    this.grouperProvisioner.retrieveGrouperProvisioningMatchingIdIndex().mergeInNewTargetMemberships(targetProvisioningMemberships);
+
+    GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "targetMembershipsRetrieved", 
+        GrouperUtil.length(targetProvisioningMemberships));
+    if (!isExtra) {
+      GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "originalTargetMembershipsRetrieved", 
+          GrouperUtil.length(targetProvisioningMemberships));
+      GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "originalTargetTotalCount", 
+          GrouperUtil.length(targetProvisioningMemberships));
+    }
+
+  }
+
+  public void retrieveGrouperDataIncrementalGroupsEntities(String logLabel) {
+
+    // get all grouper data for the provisioner
+    // and put in GrouperProvisioningDataGrouper
+    GrouperProvisioningLists grouperProvisioningLists = this.grouperProvisioner.retrieveGrouperDao().retrieveGrouperDataIncrementalGroupsEntities(logLabel);
+
+    // put wrappers on the grouper objects and put in the grouper uuid maps in data object
+    // put these wrapper in the GrouperProvisioningData and GrouperProvisioningDataIndex
+    this.grouperProvisioner.retrieveGrouperDao().processWrappers(grouperProvisioningLists);
+    
+    // point the membership pointers to groups and entities to what they should point to
+    // and fix data problems (for instance race conditions as data was retrieved)
+    this.grouperProvisioner.retrieveGrouperDao().fixGrouperProvisioningMembershipReferences();
+    
+//    // incrementals need to clone and setup sync objects as deletes
+//    this.getGrouperProvisioner().retrieveGrouperProvisioningLogicIncremental().setupIncrementalClonesOfGroupProvisioningObjects();
+
+    // add / update / delete sync objects based on grouper data
+    this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().fixSyncObjects();
+
+    // incrementals need to consult sync objects to know what to delete
+    this.calculateProvisioningGroupsToDelete();
+    this.calculateProvisioningEntitiesToDelete();
+    
+  }
+
+  public void retrieveGrouperDataIncrementalMemberships() {
+
+    // get all grouper data for the provisioner
+    // and put in GrouperProvisioningDataGrouper
+    GrouperProvisioningLists grouperProvisioningLists = this.grouperProvisioner.retrieveGrouperDao().retrieveGrouperDataIncrementalMemberships();
+
+    // put wrappers on the grouper objects and put in the grouper uuid maps in data object
+    // put these wrapper in the GrouperProvisioningData and GrouperProvisioningDataIndex
+    this.grouperProvisioner.retrieveGrouperDao().processWrappers(grouperProvisioningLists);
+    
+    // point the membership pointers to groups and entities to what they should point to
+    // and fix data problems (for instance race conditions as data was retrieved)
+    this.grouperProvisioner.retrieveGrouperDao().fixGrouperProvisioningMembershipReferences();
+    
+//    // incrementals need to clone and setup sync objects as deletes
+//    this.getGrouperProvisioner().retrieveGrouperProvisioningLogicIncremental().setupIncrementalClonesOfGroupProvisioningObjects();
+
+    // add / update / delete sync objects based on grouper data
+    this.grouperProvisioner.retrieveGrouperProvisioningSyncDao().fixSyncObjects();
+
+    // incrementals need to consult sync objects to know what to delete
+    this.calculateProvisioningGroupsToDelete();
+    this.calculateProvisioningEntitiesToDelete();
+    this.calculateProvisioningMembershipsToDelete();
+    
+  }
+
+  /**
+   * create one grouper_sync_log row per group processed in this incremental run, owned by the group's
+   * sync group record.  these show up on the group provisioning logs screen
+   * (UiV2Provisioning.viewProvisioningTargetLogsOnGroup).  only done for incremental syncs; a full sync
+   * would create a row for every group on every run which is too much volume, and full syncs are
+   * represented by the overall job log instead.
+   */
+  protected void createPerGroupSyncLogsIncremental() {
+
+    if (!this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().getGrouperProvisioningType().isIncrementalSync()) {
+      return;
+    }
+
+    GcGrouperSync gcGrouperSync = this.getGrouperProvisioner().getGcGrouperSync();
+
+    Timestamp syncStart = new Timestamp(this.getGrouperProvisioner().getMillisWhenSyncStarted());
+    Timestamp nowTimestamp = new Timestamp(System.currentTimeMillis());
+    int jobTookMillis = (int)(nowTimestamp.getTime() - syncStart.getTime());
+
+    // sync group id -> sync group / records processed / records changed for this run
+    Map<String, GcGrouperSyncGroup> syncGroupIdToSyncGroup = new HashMap<String, GcGrouperSyncGroup>();
+    Map<String, Integer> syncGroupIdToRecordsProcessed = new HashMap<String, Integer>();
+    Map<String, Integer> syncGroupIdToRecordsChanged = new HashMap<String, Integer>();
+
+    // records processed: every group wrapper (with a sync group) touched this run, plus its memberships
+    for (ProvisioningGroupWrapper provisioningGroupWrapper : GrouperUtil.nonNull(this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningGroupWrappers())) {
+      GcGrouperSyncGroup gcGrouperSyncGroup = provisioningGroupWrapper.getGcGrouperSyncGroup();
+      if (gcGrouperSyncGroup == null || gcGrouperSyncGroup.getId() == null) {
+        continue;
+      }
+      String syncGroupId = gcGrouperSyncGroup.getId();
+      syncGroupIdToSyncGroup.put(syncGroupId, gcGrouperSyncGroup);
+      // count the group itself as one record processed
+      addToCountMap(syncGroupIdToRecordsProcessed, syncGroupId, 1);
+    }
+
+    for (ProvisioningMembershipWrapper provisioningMembershipWrapper : GrouperUtil.nonNull(this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningMembershipWrappers())) {
+      GcGrouperSyncGroup gcGrouperSyncGroup = syncGroupForMembership(provisioningMembershipWrapper);
+      if (gcGrouperSyncGroup == null || gcGrouperSyncGroup.getId() == null) {
+        continue;
+      }
+      String syncGroupId = gcGrouperSyncGroup.getId();
+      if (!syncGroupIdToSyncGroup.containsKey(syncGroupId)) {
+        continue;
+      }
+      addToCountMap(syncGroupIdToRecordsProcessed, syncGroupId, 1);
+    }
+
+    GrouperProvisioningDataChanges dataChanges = this.getGrouperProvisioner().retrieveGrouperProvisioningDataChanges();
+
+    // records changed: provisioned group object changes
+    List<ProvisioningGroup> changedGroups = new ArrayList<ProvisioningGroup>();
+    changedGroups.addAll(GrouperUtil.nonNull(dataChanges.getTargetObjectInserts().getProvisioningGroups()));
+    changedGroups.addAll(GrouperUtil.nonNull(dataChanges.getGrouperTargetObjectsMissing().getProvisioningGroups()));
+    changedGroups.addAll(GrouperUtil.nonNull(dataChanges.getTargetObjectUpdates().getProvisioningGroups()));
+    changedGroups.addAll(GrouperUtil.nonNull(dataChanges.getTargetObjectDeletes().getProvisioningGroups()));
+
+    for (ProvisioningGroup provisioningGroup : changedGroups) {
+      if (provisioningGroup.getProvisioned() == null || !provisioningGroup.getProvisioned()) {
+        continue;
+      }
+      GcGrouperSyncGroup gcGrouperSyncGroup = provisioningGroup.getProvisioningGroupWrapper() == null
+          ? null : provisioningGroup.getProvisioningGroupWrapper().getGcGrouperSyncGroup();
+      if (gcGrouperSyncGroup == null || gcGrouperSyncGroup.getId() == null) {
+        continue;
+      }
+      addToCountMap(syncGroupIdToRecordsChanged, gcGrouperSyncGroup.getId(), 1);
+    }
+
+    // records changed: provisioned membership changes
+    List<ProvisioningMembership> changedMemberships = new ArrayList<ProvisioningMembership>();
+    changedMemberships.addAll(GrouperUtil.nonNull(dataChanges.getTargetObjectInserts().getProvisioningMemberships()));
+    changedMemberships.addAll(GrouperUtil.nonNull(dataChanges.getTargetObjectUpdates().getProvisioningMemberships()));
+    changedMemberships.addAll(GrouperUtil.nonNull(dataChanges.getTargetObjectDeletes().getProvisioningMemberships()));
+    for (List<ProvisioningMembership> replaceMemberships : GrouperUtil.nonNull(dataChanges.getTargetObjectReplaces().getProvisioningMemberships()).values()) {
+      changedMemberships.addAll(GrouperUtil.nonNull(replaceMemberships));
+    }
+
+    for (ProvisioningMembership provisioningMembership : changedMemberships) {
+      if (provisioningMembership.getProvisioned() == null || !provisioningMembership.getProvisioned()) {
+        continue;
+      }
+      GcGrouperSyncGroup gcGrouperSyncGroup = syncGroupForMembership(provisioningMembership.getProvisioningMembershipWrapper());
+      if (gcGrouperSyncGroup == null || gcGrouperSyncGroup.getId() == null) {
+        continue;
+      }
+      addToCountMap(syncGroupIdToRecordsChanged, gcGrouperSyncGroup.getId(), 1);
+    }
+
+    // create one log per processed group; it is flushed to grouper_sync_log by storeAllObjects()
+    for (String syncGroupId : syncGroupIdToSyncGroup.keySet()) {
+      GcGrouperSyncGroup gcGrouperSyncGroup = syncGroupIdToSyncGroup.get(syncGroupId);
+
+      GcGrouperSyncLog gcGrouperSyncLog = gcGrouperSync.getGcGrouperSyncGroupDao().groupCreateLog(gcGrouperSyncGroup);
+      gcGrouperSyncLog.setSyncTimestampStart(syncStart);
+      gcGrouperSyncLog.setSyncTimestamp(nowTimestamp);
+      gcGrouperSyncLog.setJobTookMillis(jobTookMillis);
+
+      Integer recordsProcessedInteger = syncGroupIdToRecordsProcessed.get(syncGroupId);
+      int recordsProcessed = recordsProcessedInteger == null ? 0 : recordsProcessedInteger.intValue();
+      Integer recordsChangedInteger = syncGroupIdToRecordsChanged.get(syncGroupId);
+      int recordsChanged = recordsChangedInteger == null ? 0 : recordsChangedInteger.intValue();
+
+      gcGrouperSyncLog.setRecordsProcessed(recordsProcessed);
+      gcGrouperSyncLog.setRecordsChanged(recordsChanged);
+
+      if (!StringUtils.isBlank(gcGrouperSyncGroup.getErrorMessage())) {
+        gcGrouperSyncLog.setStatus(GcGrouperSyncLogState.ERROR);
+      } else {
+        gcGrouperSyncLog.setStatus(GcGrouperSyncLogState.SUCCESS);
+      }
+
+      gcGrouperSyncLog.setDescription("incremental: records processed " + recordsProcessed
+          + ", records changed " + recordsChanged);
+    }
+  }
+
+  /**
+   * add an amount to a count in a map, treating a missing key as zero
+   * @param countMap
+   * @param key
+   * @param amount
+   */
+  private static void addToCountMap(Map<String, Integer> countMap, String key, int amount) {
+    Integer current = countMap.get(key);
+    countMap.put(key, (current == null ? 0 : current.intValue()) + amount);
+  }
+
+  /**
+   * find the sync group that owns a membership wrapper, or null if it cannot be resolved
+   * @param provisioningMembershipWrapper
+   * @return the sync group or null
+   */
+  private GcGrouperSyncGroup syncGroupForMembership(ProvisioningMembershipWrapper provisioningMembershipWrapper) {
+    if (provisioningMembershipWrapper == null) {
+      return null;
+    }
+    ProvisioningGroupWrapper provisioningGroupWrapper = provisioningMembershipWrapper.getProvisioningGroupWrapper();
+    if (provisioningGroupWrapper == null) {
+      return null;
+    }
+    return provisioningGroupWrapper.getGcGrouperSyncGroup();
+  }
+
+  protected void countInsertsUpdatesDeletes() {
+    countAttributesFieldsInsertsUpdatesDeletes(ProvisioningObjectChangeAction.insert, this.getGrouperProvisioner().retrieveGrouperProvisioningDataChanges().getTargetObjectInserts().getProvisioningGroups());
+    countAttributesFieldsInsertsUpdatesDeletes(ProvisioningObjectChangeAction.insert, this.getGrouperProvisioner().retrieveGrouperProvisioningDataChanges().getTargetObjectInserts().getProvisioningEntities());
+    countAttributesFieldsInsertsUpdatesDeletes(ProvisioningObjectChangeAction.insert, this.getGrouperProvisioner().retrieveGrouperProvisioningDataChanges().getTargetObjectInserts().getProvisioningMemberships());
+
+    {
+      //TODO: Is this correct?
+      //countAttributesFieldsInsertsUpdatesDeletes(ProvisioningObjectChangeAction.replace, this.getGrouperProvisioner().retrieveGrouperProvisioningDataChanges().getTargetObjectReplaces().getProvisioningMemberships());
+      List<ProvisioningMembership> targetMemberships = new ArrayList<ProvisioningMembership>();
+      
+      Collection<List<ProvisioningMembership>> targetMembershipsLists = this.getGrouperProvisioner().retrieveGrouperProvisioningDataChanges().getTargetObjectReplaces().getProvisioningMemberships().values();
+      for (List<ProvisioningMembership> provisioningMemberships: targetMembershipsLists) {
+        targetMemberships.addAll(provisioningMemberships);
+      }
+      this.grouperProvisioner.retrieveGrouperProvisioningOutput().addReplace(GrouperUtil.length(targetMemberships));  
+        
+    }
+    
+    countAttributesFieldsInsertsUpdatesDeletes(ProvisioningObjectChangeAction.insert, this.getGrouperProvisioner().retrieveGrouperProvisioningDataChanges().getGrouperTargetObjectsMissing().getProvisioningGroups());
+    countAttributesFieldsInsertsUpdatesDeletes(ProvisioningObjectChangeAction.insert, this.getGrouperProvisioner().retrieveGrouperProvisioningDataChanges().getGrouperTargetObjectsMissing().getProvisioningEntities());
+    
+    
+    countAttributesFieldsInsertsUpdatesDeletes(ProvisioningObjectChangeAction.update, this.getGrouperProvisioner().retrieveGrouperProvisioningDataChanges().getTargetObjectUpdates().getProvisioningGroups());
+    countAttributesFieldsInsertsUpdatesDeletes(ProvisioningObjectChangeAction.update, this.getGrouperProvisioner().retrieveGrouperProvisioningDataChanges().getTargetObjectUpdates().getProvisioningEntities());
+    countAttributesFieldsInsertsUpdatesDeletes(ProvisioningObjectChangeAction.update, this.getGrouperProvisioner().retrieveGrouperProvisioningDataChanges().getTargetObjectUpdates().getProvisioningMemberships());
+    countAttributesFieldsInsertsUpdatesDeletes(ProvisioningObjectChangeAction.delete, this.getGrouperProvisioner().retrieveGrouperProvisioningDataChanges().getTargetObjectDeletes().getProvisioningGroups());
+    countAttributesFieldsInsertsUpdatesDeletes(ProvisioningObjectChangeAction.delete, this.getGrouperProvisioner().retrieveGrouperProvisioningDataChanges().getTargetObjectDeletes().getProvisioningEntities());
+    countAttributesFieldsInsertsUpdatesDeletes(ProvisioningObjectChangeAction.delete, this.getGrouperProvisioner().retrieveGrouperProvisioningDataChanges().getTargetObjectDeletes().getProvisioningMemberships());
+    
+    GrouperProvisioningReplacesObjects targetObjectReplaces = this.getGrouperProvisioner().retrieveGrouperProvisioningDataChanges().getTargetObjectReplaces();
+    Set<ProvisioningMembershipWrapper> provisioningMembershipWrappers = this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningMembershipWrappers();
+    if (targetObjectReplaces != null) {
+      for (ProvisioningGroup provisioningGroup : targetObjectReplaces.getProvisioningMemberships().keySet()) {
+
+        Timestamp inTargetStart = provisioningGroup.getProvisioningGroupWrapper().getGcGrouperSyncGroup().getInTargetStart();
+        Timestamp inTargetEnd = provisioningGroup.getProvisioningGroupWrapper().getGcGrouperSyncGroup().getInTargetEnd();
+        if (inTargetStart != null && inTargetStart.getTime() >= this.getGrouperProvisioner().getMillisWhenSyncStarted()) {
+          this.grouperProvisioner.retrieveGrouperProvisioningOutput().addInsert(1);
+        }
+        if (inTargetEnd != null && inTargetEnd.getTime() >= this.getGrouperProvisioner().getMillisWhenSyncStarted()) {
+          this.grouperProvisioner.retrieveGrouperProvisioningOutput().addDelete(1);
+        }
+        List<ProvisioningMembership> memberships = targetObjectReplaces.getProvisioningMemberships().get(provisioningGroup);
+        for (ProvisioningMembership provisioningMembership : GrouperUtil.nonNull(memberships)) {
+          inTargetStart = provisioningMembership.getProvisioningMembershipWrapper().getGcGrouperSyncMembership().getInTargetStart();
+          if (inTargetStart != null && inTargetStart.getTime() >= this.getGrouperProvisioner().getMillisWhenSyncStarted()) {
+            this.grouperProvisioner.retrieveGrouperProvisioningOutput().addInsert(1);
+          }
+        }
+      }
+
+      // Count membership deletes driven by replace: any wrapper whose inTargetEnd was set at
+      // or after sync start. Run once across all wrappers (not per replaced group) to avoid
+      // N× over-counting, and skip wrappers with no sync row (target-only orphans). Only do this
+      // when there are actually replaced memberships; otherwise (e.g. groupAttributes/update-delete
+      // mode) these deletes are already counted by countAttributesFieldsInsertsUpdatesDeletes and
+      // counting them here would double-count.
+      if (GrouperUtil.length(targetObjectReplaces.getProvisioningMemberships()) > 0) {
+        for (ProvisioningMembershipWrapper provisioningMembershipWrapper : GrouperUtil.nonNull(provisioningMembershipWrappers)) {
+          GcGrouperSyncMembership syncMembership = provisioningMembershipWrapper.getGcGrouperSyncMembership();
+          if (syncMembership == null) {
+            continue;
+          }
+          Timestamp inTargetEnd = syncMembership.getInTargetEnd();
+          if (inTargetEnd != null && inTargetEnd.getTime() >= this.getGrouperProvisioner().getMillisWhenSyncStarted()) {
+            this.grouperProvisioner.retrieveGrouperProvisioningOutput().addDelete(1);
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * make sure we dont doublecount actions
+   */
+  private Set<MultiKey> alreadyCounted = new HashSet<MultiKey>();
+
+  protected void countAttributesFieldsInsertsUpdatesDeletes(ProvisioningObjectChangeAction provisioningObjectChangeAction, List<? extends ProvisioningUpdatable> provisioningUpdatables) {
+    // maybe not count fields?
+    if (provisioningUpdatables == null) {
+      return;
+    }
+
+    String membershipAttribute = GrouperProvisioningLogic.this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().getAttributeNameForMemberships();
+    boolean groupAttributes = GrouperProvisioningLogic.this.grouperProvisioner.retrieveGrouperProvisioningBehavior().getGrouperProvisioningBehaviorMembershipType() 
+        == GrouperProvisioningBehaviorMembershipType.groupAttributes;
+    boolean entityAttributes = GrouperProvisioningLogic.this.grouperProvisioner.retrieveGrouperProvisioningBehavior().getGrouperProvisioningBehaviorMembershipType() 
+        == GrouperProvisioningBehaviorMembershipType.entityAttributes;
+
+    
+    for (ProvisioningUpdatable provisioningUpdatable : GrouperUtil.nonNull(provisioningUpdatables)) {
+
+      MultiKey multiKey = new MultiKey(provisioningObjectChangeAction, provisioningUpdatable.provisioningUpdatableTypeShort(), provisioningUpdatable);
+      
+      // if this is an update, dont doublecount the inserts if we are only updating the membership objects
+      MultiKey insertMultiKey = provisioningObjectChangeAction == ProvisioningObjectChangeAction.update ? new MultiKey(ProvisioningObjectChangeAction.insert, provisioningUpdatable.provisioningUpdatableTypeShort(), provisioningUpdatable) : null;
+      
+      if (!alreadyCounted.contains(multiKey) && provisioningUpdatable.getProvisioned() != null && provisioningUpdatable.getProvisioned()) {
+        switch(provisioningObjectChangeAction) {
+          case insert:
+            this.grouperProvisioner.retrieveGrouperProvisioningOutput().addInsert(1);  
+            alreadyCounted.add(multiKey);
+            break;
+          case update:
+            // its an update if we are doing something other than membership stuff and it is also an insert 
+            if (!alreadyCounted.contains(insertMultiKey) || StringUtils.isBlank(membershipAttribute) || (!groupAttributes && !entityAttributes)
+              || (groupAttributes && (!(provisioningUpdatable instanceof ProvisioningGroup)))
+                  || (entityAttributes && (!(provisioningUpdatable instanceof ProvisioningEntity)))) {
+              this.grouperProvisioner.retrieveGrouperProvisioningOutput().addUpdate(1);  
+              alreadyCounted.add(multiKey);
+            } else {
+                  
+              for (ProvisioningObjectChange provisioningObjectChange : GrouperUtil.nonNull(provisioningUpdatable.getInternal_objectChanges())) {
+                if (!StringUtils.equals(provisioningObjectChange.getAttributeName(), membershipAttribute)
+                    && provisioningObjectChange.getProvisioned() != null && provisioningObjectChange.getProvisioned()) {
+                  this.grouperProvisioner.retrieveGrouperProvisioningOutput().addUpdate(1);  
+                  alreadyCounted.add(multiKey);
+                  break;
+                }
+              }
+            }
+            break;
+          case replace:
+            this.grouperProvisioner.retrieveGrouperProvisioningOutput().addReplace(1);  
+            alreadyCounted.add(multiKey);
+            break;
+          case delete:
+            this.grouperProvisioner.retrieveGrouperProvisioningOutput().addDelete(1);
+            alreadyCounted.add(multiKey);
+            break;
+        }
+        
+      }
+      
+      // go through the membership attributes and count as memberships
+      if (!StringUtils.isBlank(membershipAttribute) && (groupAttributes || entityAttributes)) {
+        if ((groupAttributes && provisioningUpdatable instanceof ProvisioningGroup)
+            || entityAttributes && provisioningUpdatable instanceof ProvisioningEntity) {
+
+          for (ProvisioningObjectChange provisioningObjectChange : GrouperUtil.nonNull(provisioningUpdatable.getInternal_objectChanges())) {
+            
+            if (!StringUtils.equals(provisioningObjectChange.getAttributeName(), membershipAttribute)) {
+              
+            }
+            
+            if (StringUtils.equals(provisioningObjectChange.getAttributeName(), membershipAttribute)
+                && provisioningObjectChange.getProvisioned() != null && provisioningObjectChange.getProvisioned()) {
+
+              ProvisioningObjectChangeAction attributeProvisioningObjectChangeAction = provisioningObjectChange.getProvisioningObjectChangeAction();
+              Object value = null;
+              switch (attributeProvisioningObjectChangeAction) {
+              case insert:
+              case update:
+                value = provisioningObjectChange.getNewValue();
+                break;
+              case delete:
+                value = provisioningObjectChange.getOldValue();
+                break;
+              }
+
+              multiKey = new MultiKey(attributeProvisioningObjectChangeAction, provisioningUpdatable.provisioningUpdatableTypeShort(), provisioningUpdatable, value);
+
+              if (alreadyCounted.contains(multiKey)) {
+                continue;
+              }
+              alreadyCounted.add(multiKey);
+
+              switch (attributeProvisioningObjectChangeAction) {
+              case insert:
+                this.grouperProvisioner.retrieveGrouperProvisioningOutput().addInsert(1);  
+                break;
+              case update:
+                this.grouperProvisioner.retrieveGrouperProvisioningOutput().addUpdate(1);  
+                break;
+              case delete:
+                this.grouperProvisioner.retrieveGrouperProvisioningOutput().addDelete(1);  
+                break;
+
+              }
+            }
+          }
+        }
+      }
+
+      
+    }
+    
+  }
+  
+  /**
+   * reference back up to the provisioner
+   */
+  private GrouperProvisioner grouperProvisioner = null;
+  
+  /** logger */
+  private static final Log LOG = GrouperUtil.getLog(GrouperProvisioningLogic.class);
+
+  /**
+   * reference back up to the provisioner
+   * @return the provisioner
+   */
+  public GrouperProvisioner getGrouperProvisioner() {
+    return this.grouperProvisioner;
+  }
+
+  /**
+   * reference back up to the provisioner
+   * @param grouperProvisioner1
+   */
+  public void setGrouperProvisioner(GrouperProvisioner grouperProvisioner1) {
+    this.grouperProvisioner = grouperProvisioner1;
+  }
+
+
+
+
+  public void calculateProvisioningDataToDelete() {
+    this.calculateProvisioningGroupsToDelete();
+    this.calculateProvisioningEntitiesToDelete();
+    this.calculateProvisioningMembershipsToDelete();
+    
+  }
+
+
+  /**
+   * take the sync members and see which ones do not correspond to a grouper member
+   */
+  public void calculateProvisioningEntitiesToDelete() {
+  
+    Map<String, ProvisioningEntityWrapper> memberUuidToProvisioningMemberWrapper = this.getGrouperProvisioner().retrieveGrouperProvisioningDataIndex().getMemberUuidToProvisioningEntityWrapper();
+  
+    int provisioningEntitiesInTargetNotGrouper = 0;
+    
+    List<GrouperProvisioningObjectMetadataItem> grouperProvisioningObjectMetadataItems = 
+        this.grouperProvisioner.retrieveGrouperProvisioningObjectMetadata().getGrouperProvisioningObjectMetadataItems();
+    
+    Map<String, ProvisioningEntityWrapper> memberIdToEntityWrapperToDelete = new HashMap<>();
+  
+    // loop through sync entities
+    for (ProvisioningEntityWrapper provisioningEntityWrapper : this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningEntityWrappers()) {
+  
+      GcGrouperSyncMember gcGrouperSyncMember = provisioningEntityWrapper.getGcGrouperSyncMember();
+      ProvisioningEntity grouperProvisioningEntity = provisioningEntityWrapper.getGrouperProvisioningEntity();
+      
+      // if a entity has been deleted in grouper_members table but copy still exists in grouper_sync_member
+      // we are sending the copy over to the target so that target can also delete
+      if (grouperProvisioningEntity == null && gcGrouperSyncMember != null) {
+        
+        memberIdToEntityWrapperToDelete.put(gcGrouperSyncMember.getMemberId(), provisioningEntityWrapper);
+        provisioningEntitiesInTargetNotGrouper++;
+        continue;
+      }
+      if (this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().isUnresolvableSubjectsRemove() && provisioningEntityWrapper.getProvisioningStateEntity().isUnresolvable()) {
+        
+        memberIdToEntityWrapperToDelete.put(gcGrouperSyncMember.getMemberId(), provisioningEntityWrapper);
+        provisioningEntitiesInTargetNotGrouper++;
+        continue;
+      }
+    }
+    
+    if (memberIdToEntityWrapperToDelete.size() == 0) {
+      return;
+    }
+    
+    List<ProvisioningEntity> membersNonProvisionable = this.getGrouperProvisioner().retrieveGrouperDao().retrieveMembersNonProvisionable(memberIdToEntityWrapperToDelete.keySet());
+    
+    Map<String, ProvisioningEntity> memberIdToProvisioningEntityToDelete = new HashMap<>();
+    
+    for (ProvisioningEntity provisioningEntityNotProvisionable: GrouperUtil.nonNull(membersNonProvisionable)) {
+      memberIdToProvisioningEntityToDelete.put(provisioningEntityNotProvisionable.getId(), provisioningEntityNotProvisionable);
+    }
+    
+    for (String memberIdToDelete: memberIdToEntityWrapperToDelete.keySet()) {
+      
+      ProvisioningEntity grouperProvisioningEntity = memberIdToProvisioningEntityToDelete.get(memberIdToDelete);
+      
+      ProvisioningEntityWrapper provisioningEntityWrapper = memberIdToEntityWrapperToDelete.get(memberIdToDelete);
+      
+      if (grouperProvisioningEntity == null) {
+        
+        GcGrouperSyncMember gcGrouperSyncMember = provisioningEntityWrapper.getGcGrouperSyncMember();
+        
+        grouperProvisioningEntity = new ProvisioningEntity(true);
+        grouperProvisioningEntity.setId(gcGrouperSyncMember.getMemberId());
+        grouperProvisioningEntity.setSubjectId(gcGrouperSyncMember.getSubjectId());
+        grouperProvisioningEntity.assignAttributeValue("subjectSourceId", gcGrouperSyncMember.getSourceId());
+        if ("subjectIdentifier1".equals(grouperProvisioner.retrieveGrouperProvisioningBehavior().getSubjectIdentifierForMemberSyncTable())) {
+          grouperProvisioningEntity.assignAttributeValue("subjectIdentifier1", gcGrouperSyncMember.getSubjectIdentifier());
+        } else if ("subjectIdentifier2".equals(grouperProvisioner.retrieveGrouperProvisioningBehavior().getSubjectIdentifierForMemberSyncTable())) {
+          grouperProvisioningEntity.assignAttributeValue("subjectIdentifier2", gcGrouperSyncMember.getSubjectIdentifier());
+        } else {
+          grouperProvisioningEntity.assignAttributeValue("subjectIdentifier0", gcGrouperSyncMember.getSubjectIdentifier());
+        }
+        
+        if (GrouperUtil.length(grouperProvisioningObjectMetadataItems) > 0) {
+          
+          String jsonMetadata = gcGrouperSyncMember.getMetadataJson();
+          
+          if (!StringUtils.isBlank(jsonMetadata) && !StringUtils.equals("{}", jsonMetadata)) {
+            JsonNode jsonNode = GrouperUtil.jsonJacksonNode(jsonMetadata);
+            for (GrouperProvisioningObjectMetadataItem grouperProvisioningObjectMetadataItem : grouperProvisioningObjectMetadataItems) {
+              if (grouperProvisioningObjectMetadataItem.isShowForMember()) {
+                
+                String metadataItemName = grouperProvisioningObjectMetadataItem.getName();
+                if (metadataItemName.startsWith("md_")) {
+                  if (jsonNode.has(metadataItemName)) {
+                    GrouperProvisioningObjectMetadataItemValueType grouperProvisioningObjectMetadataItemValueType = 
+                        GrouperUtil.defaultIfNull(grouperProvisioningObjectMetadataItem.getValueType(), GrouperProvisioningObjectMetadataItemValueType.STRING);
+                    String value = GrouperUtil.jsonJacksonGetString(jsonNode, metadataItemName);
+                    grouperProvisioningEntity.assignAttributeValue(metadataItemName, grouperProvisioningObjectMetadataItemValueType.convert(value));
+                  }
+                }
+              }
+            }
+          }
+        }
+        
+//        //TODO select in bulk from grouper members
+//        Member member = MemberFinder.findByUuid(GrouperSession.staticGrouperSession(), gcGrouperSyncMember.getMemberId(), false);
+//        if (member != null) {
+//          grouperProvisioningEntity.setName(member.getName());
+//          grouperProvisioningEntity.setEmail(member.getEmail0());
+//          
+//          grouperProvisioningEntity.assignAttributeValue("description", member.getDescription());
+//        }
+
+      }
+      
+      provisioningEntityWrapper.setGrouperProvisioningEntity(grouperProvisioningEntity);
+      if (provisioningEntityWrapper.getGcGrouperSyncMember() != null &&
+    		  GrouperUtil.booleanValue(provisioningEntityWrapper.getGcGrouperSyncMember().getInTarget(), false)) {
+		  provisioningEntityWrapper.getProvisioningStateEntity().setDelete(true);
+	      provisioningEntityWrapper.getProvisioningStateEntity().setUpdate(false);
+	      provisioningEntityWrapper.getProvisioningStateEntity().setCreate(false);
+      }
+      
+      if (provisioningEntityWrapper.getGcGrouperSyncMember() != null && provisioningEntityWrapper.getGcGrouperSyncMember().isProvisionable()) {
+        provisioningEntityWrapper.getGcGrouperSyncMember().setProvisionable(false);
+        provisioningEntityWrapper.getGcGrouperSyncMember().setProvisionableEnd(new Timestamp(System.currentTimeMillis()));
+      }
+      
+      memberUuidToProvisioningMemberWrapper.put(grouperProvisioningEntity.getId(), provisioningEntityWrapper);
+      
+    }
+        
+    if (provisioningEntitiesInTargetNotGrouper > 0) {
+      this.getGrouperProvisioner().getDebugMap().put("provisioningEntitiesInTargetNotGrouper", provisioningEntitiesInTargetNotGrouper);
+    }
+  
+  }
+
+
+  /**
+   * take the sync groups and see which ones do not correspond to a grouper group
+   */
+  public void calculateProvisioningGroupsToDelete() {
+  
+    Map<String, ProvisioningGroupWrapper> groupUuidToProvisioningGroupWrapper = this.getGrouperProvisioner().retrieveGrouperProvisioningDataIndex().getGroupUuidToProvisioningGroupWrapper();
+    
+    int provisioningGroupsInTargetNotGrouper = 0;
+  
+    List<GrouperProvisioningObjectMetadataItem> grouperProvisioningObjectMetadataItems = 
+        this.grouperProvisioner.retrieveGrouperProvisioningObjectMetadata().getGrouperProvisioningObjectMetadataItems();
+    
+    Set<ProvisioningGroupWrapper> provisioningGroupWrappers = this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningGroupWrappers();
+  
+    // loop through sync groups
+    for (ProvisioningGroupWrapper provisioningGroupWrapper : provisioningGroupWrappers) {
+  
+      //TODO Perhaps look at grouper_groups information for unprovisionable groups that aren't deleted from grouper just like 
+      // we did for entities.
+      
+      // if a group has been deleted in grouper_groups table but copy still exists in grouper_sync_group
+      // we are sending the copy over to the target so that target can also delete
+      ProvisioningGroup grouperProvisioningGroup = provisioningGroupWrapper.getGrouperProvisioningGroup();
+      GcGrouperSyncGroup gcGrouperSyncGroup = provisioningGroupWrapper.getGcGrouperSyncGroup();
+      if (grouperProvisioningGroup == null && gcGrouperSyncGroup != null) {
+        
+        provisioningGroupsInTargetNotGrouper++;
+        
+        // create a provisioning group to delete
+        grouperProvisioningGroup = new ProvisioningGroup(true);
+        grouperProvisioningGroup.setId(gcGrouperSyncGroup.getGroupId());
+        grouperProvisioningGroup.setName(gcGrouperSyncGroup.getGroupName());
+        grouperProvisioningGroup.setIdIndex(gcGrouperSyncGroup.getGroupIdIndex());
+        
+        if (GrouperUtil.length(grouperProvisioningObjectMetadataItems) > 0) {
+          
+          String jsonMetadata = gcGrouperSyncGroup.getMetadataJson();
+          
+          if (!StringUtils.isBlank(jsonMetadata) && !StringUtils.equals("{}", jsonMetadata)) {
+            JsonNode jsonNode = GrouperUtil.jsonJacksonNode(jsonMetadata);
+            for (GrouperProvisioningObjectMetadataItem grouperProvisioningObjectMetadataItem : grouperProvisioningObjectMetadataItems) {
+              if (grouperProvisioningObjectMetadataItem.isShowForMember()) {
+                
+                String metadataItemName = grouperProvisioningObjectMetadataItem.getName();
+                if (metadataItemName.startsWith("md_")) {
+                  if (jsonNode.has(metadataItemName)) {
+                    GrouperProvisioningObjectMetadataItemValueType grouperProvisioningObjectMetadataItemValueType = 
+                        GrouperUtil.defaultIfNull(grouperProvisioningObjectMetadataItem.getValueType(), GrouperProvisioningObjectMetadataItemValueType.STRING);
+                    String value = GrouperUtil.jsonJacksonGetString(jsonNode, metadataItemName);
+                    grouperProvisioningGroup.assignAttributeValue(metadataItemName, grouperProvisioningObjectMetadataItemValueType.convert(value));
+                  }
+                }
+              }
+            }
+          }
+        }
+        
+        provisioningGroupWrapper.setGrouperProvisioningGroup(grouperProvisioningGroup);
+        
+        if (GrouperUtil.booleanValue(gcGrouperSyncGroup.getInTarget(), false)) {
+        	provisioningGroupWrapper.getProvisioningStateGroup().setDelete(true);
+        	provisioningGroupWrapper.getProvisioningStateGroup().setUpdate(false);
+            provisioningGroupWrapper.getProvisioningStateGroup().setCreate(false);
+        }
+        
+        groupUuidToProvisioningGroupWrapper.put(gcGrouperSyncGroup.getGroupId(), provisioningGroupWrapper);
+        
+      }
+      
+    }
+    if (provisioningGroupsInTargetNotGrouper > 0) {
+      GrouperUtil.mapAddValue(this.getGrouperProvisioner().getDebugMap(), "provisioningGroupsInTargetNotGrouper", provisioningGroupsInTargetNotGrouper);
+    }
+  
+  }
+
+
+  /**
+   * take the sync groups and see which ones do not correspond to a grouper group
+   */
+  public void calculateProvisioningMembershipsToDelete() {
+  
+    Map<String, ProvisioningEntityWrapper> gcGrouperSyncMemberIdToProvisioningEntityWrapper = this.getGrouperProvisioner().retrieveGrouperProvisioningDataIndex().getGrouperSyncMemberIdToProvisioningEntityWrapper();
+    Map<String, ProvisioningGroupWrapper> gcGrouperSyncGroupIdToProvisioningGroupWrapper = this.getGrouperProvisioner().retrieveGrouperProvisioningDataIndex().getGrouperSyncGroupIdToProvisioningGroupWrapper();
+
+    Map<MultiKey, ProvisioningMembershipWrapper> groupUuidMemberUuidToProvisioningMembershipWrapper = this.getGrouperProvisioner().retrieveGrouperProvisioningDataIndex().getGroupUuidMemberUuidToProvisioningMembershipWrapper();
+
+    int provisioningMshipsInTargetNotGrouper = 0;
+    
+    // loop through sync groups
+    for (ProvisioningMembershipWrapper provisioningMembershipWrapper : this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningMembershipWrappers()) {
+
+      ProvisioningMembership grouperProvisioningMembership = provisioningMembershipWrapper.getGrouperProvisioningMembership();
+
+      GcGrouperSyncMembership gcGrouperSyncMembership = provisioningMembershipWrapper.getGcGrouperSyncMembership();
+
+      if (grouperProvisioningMembership == null && gcGrouperSyncMembership != null) {
+
+        provisioningMshipsInTargetNotGrouper++;
+        
+        ProvisioningGroupWrapper provisioningGroupWrapper = gcGrouperSyncGroupIdToProvisioningGroupWrapper.get(gcGrouperSyncMembership.getGrouperSyncGroupId());
+        if (provisioningGroupWrapper == null) {
+          this.getGrouperProvisioner().retrieveGrouperProvisioningValidation().assignMembershipError(provisioningMembershipWrapper, GcGrouperSyncErrorCode.ERR, 
+              "Cant find syncGroupId: '" + gcGrouperSyncMembership.getGrouperSyncGroupId() + "'");
+          continue;
+        }
+        ProvisioningEntityWrapper provisioningEntityWrapper = gcGrouperSyncMemberIdToProvisioningEntityWrapper.get(gcGrouperSyncMembership.getGrouperSyncMemberId());
+        if (provisioningEntityWrapper == null) {
+          this.getGrouperProvisioner().retrieveGrouperProvisioningValidation().assignMembershipError(provisioningMembershipWrapper, GcGrouperSyncErrorCode.ERR, 
+              "Cant find syncMemberId: '" + gcGrouperSyncMembership.getGrouperSyncMemberId() + "'");
+          continue;
+        }
+
+        GcGrouperSyncGroup gcGrouperSyncGroup = provisioningGroupWrapper.getGcGrouperSyncGroup();
+        GcGrouperSyncMember gcGrouperSyncMember = provisioningEntityWrapper.getGcGrouperSyncMember();
+
+        // these can be null if in the index
+        
+        String groupId = gcGrouperSyncGroup.getGroupId();
+        String memberId = gcGrouperSyncMember.getMemberId();
+
+
+        // create a provisioning group to delete
+        ProvisioningMembership provisioningMembership = new ProvisioningMembership(true);
+        provisioningMembership.setProvisioningGroupId(groupId);
+        provisioningMembership.setProvisioningEntityId(memberId);
+        
+        // the group is either the provisioning group or provisioning group to delete
+        if (provisioningGroupWrapper.getGrouperProvisioningGroup() != null) {
+          provisioningMembership.setProvisioningGroup(provisioningGroupWrapper.getGrouperProvisioningGroup());
+        } else {
+          this.getGrouperProvisioner().retrieveGrouperProvisioningValidation().assignMembershipError(provisioningMembershipWrapper, GcGrouperSyncErrorCode.ERR, 
+              "Cant find provisioning group, groupId: '" + groupId + "'");
+          continue;
+        }
+  
+        // the group is either the provisioning group or provisioning group to delete
+        if (provisioningEntityWrapper.getGrouperProvisioningEntity() != null) {
+          provisioningMembership.setProvisioningEntity(provisioningEntityWrapper.getGrouperProvisioningEntity());
+        } else {
+          this.getGrouperProvisioner().retrieveGrouperProvisioningValidation().assignMembershipError(provisioningMembershipWrapper, GcGrouperSyncErrorCode.ERR, 
+              "Cant find provisioning entity, memberId: '" + memberId + "'");
+          continue;
+        }
+          
+        provisioningMembershipWrapper.setGrouperProvisioningMembership(provisioningMembership);
+        
+        // GRP-6676: Mark this stale sync membership for deletion. This membership exists in
+        // the sync table but NOT in Grouper (grouperProvisioningMembership is null above).
+        // We must mark it isDelete=true so it is excluded from replace payloads.
+        //
+        // Previously this only set isDelete when inTarget=true OR when both selectMemberships
+        // and replaceMemberships were false. This caused a flapping bug with replaceMemberships:
+        // if a member was removed from group B but still existed in group A, the sync membership
+        // for group B would have in_target='F' after deletion. On the next sync, this record
+        // was NOT marked isDelete (because in_target=F and replaceMemberships=true), so the
+        // replace logic in GrouperProvisioningCompare incorrectly included it in the replace
+        // payload, re-adding the member to group B. The next sync would remove it again, etc.
+        //
+        // Fix: mark stale sync memberships for deletion when replaceMemberships is on, or when we
+        // cannot select memberships from the target, regardless of the in_target flag. GRP-7115
+        // made isSelectMembershipsInGeneral() true for group-centric targets (SCIM/Azure), so it
+        // can no longer be used alone to detect replace-style targets here -- isReplaceMemberships()
+        // is checked explicitly so stale memberships are excluded from the replace payload.
+        if (GrouperUtil.booleanValue(gcGrouperSyncMembership.getInTarget(), false)
+            || this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isReplaceMemberships()
+            || !this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().isSelectMembershipsInGeneral()) {
+        	provisioningMembershipWrapper.getProvisioningStateMembership().setDelete(true);
+        }
+        
+        groupUuidMemberUuidToProvisioningMembershipWrapper.put(provisioningMembershipWrapper.getGroupIdMemberId(), provisioningMembershipWrapper);
+        
+      } else if (provisioningMembershipWrapper.getProvisioningEntityWrapper() != null && provisioningMembershipWrapper.getProvisioningEntityWrapper().getProvisioningStateEntity().isUnresolvable()
+          && this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().isUnresolvableSubjectsRemove()) {
+        provisioningMshipsInTargetNotGrouper++;
+        provisioningMembershipWrapper.getProvisioningStateMembership().setDelete(true);
+        
+      }
+      provisioningMembershipWrapper.setGcGrouperSyncMembership(gcGrouperSyncMembership);
+        
+      if (gcGrouperSyncMembership != null) {
+        this.getGrouperProvisioner().retrieveGrouperProvisioningDataIndex()
+        .getGrouperSyncGroupIdGrouperSyncMemberIdToProvisioningMembershipWrapper().put(new MultiKey(gcGrouperSyncMembership.getGrouperSyncGroupId(), gcGrouperSyncMembership.getGrouperSyncMemberId()), provisioningMembershipWrapper);
+      }
+      
+    }      
+    if (provisioningMshipsInTargetNotGrouper > 0) {
+      this.getGrouperProvisioner().getDebugMap().put("provisioningMshipsInTargetNotGrouper", provisioningMshipsInTargetNotGrouper);
+    }
+    
+    
+  }
+
+  /**
+   * if incremental, and there are missing groups or entities, then retrieve them
+   */
+  public void retrieveMissingObjectsIncremental() {
+    retrieveMissingGroupsIncremental();
+    retrieveMissingEntitiesIncremental();
+  }
+
+  /**
+   * if incremental, and there are missing groups or entities, then retrieve them
+   */
+  public void retrieveMissingGroupsIncremental() {
+    
+    // first lets see if we should even be doing this
+    if (!this.grouperProvisioner.retrieveGrouperProvisioningBehavior().isSelectGroupMissingIncremental()) {
+      return;
+    }
+      
+    //do we have missing groups?
+    List<ProvisioningGroup> missingGroups = new ArrayList<ProvisioningGroup>();
+    
+    for (ProvisioningGroup provisioningGroup : GrouperUtil.nonNull(this.grouperProvisioner.retrieveGrouperProvisioningData().retrieveGrouperProvisioningGroups())) {
+      
+      // shouldnt be null at this point
+      GcGrouperSyncGroup gcGrouperSyncGroup = provisioningGroup.getProvisioningGroupWrapper().getGcGrouperSyncGroup();
+      
+      if (!gcGrouperSyncGroup.isProvisionable()) {
+        continue;
+      }
+      if (this.grouperProvisioner.retrieveGrouperProvisioningLinkLogic().groupLinkMissing(gcGrouperSyncGroup)) {
+        missingGroups.add(provisioningGroup);
+      }
+    }
+
+    if (GrouperUtil.length(missingGroups) == 0) {
+      return;
+    }
+    // how many do we have 
+    this.grouperProvisioner.getDebugMap().put("missingIncrementalGroupsForRetrieve", missingGroups);
+    
+    // log this
+    this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.missingGroupsForCreate, missingGroups);
+
+    // translate
+    List<ProvisioningGroup> grouperTargetGroups = this.grouperProvisioner.retrieveGrouperProvisioningTranslator().translateGrouperToTargetGroups(missingGroups, false, false);
+    this.getGrouperProvisioner().retrieveGrouperProvisioningDataChanges().getGrouperTargetObjectsMissing().setProvisioningGroups(grouperTargetGroups);
+
+    // index
+    this.grouperProvisioner.retrieveGrouperProvisioningTranslator().idTargetGroups(grouperTargetGroups);
+    
+    //lets retrieve these
+    TargetDaoRetrieveGroupsResponse targetDaoRetrieveGroupsResponse = 
+        this.grouperProvisioner.retrieveGrouperProvisioningTargetDaoAdapter().retrieveGroups(new TargetDaoRetrieveGroupsRequest(grouperTargetGroups, false));
+    
+    List<ProvisioningGroup> targetGroups = GrouperUtil.nonNull(targetDaoRetrieveGroupsResponse == null ? null : targetDaoRetrieveGroupsResponse.getTargetGroups());
+    
+    // index
+    this.grouperProvisioner.retrieveGrouperProvisioningTranslator().idTargetGroups(targetGroups);
+    this.grouperProvisioner.retrieveGrouperProvisioningMatchingIdIndex().indexMatchingIdGroups(targetGroups);
+
+    this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.missingTargetGroupsRetrieved, targetGroups);
+
+    
+  }
+
+  /**
+   * 
+   */
+  public void retrieveIndividualMissingGroups() {
+    
+    if (!this.grouperProvisioner.retrieveGrouperProvisioningBehavior().isSelectGroups()) {
+      return;
+    }
+    
+    List<ProvisioningGroupWrapper> missingGroupWrappers = new ArrayList<ProvisioningGroupWrapper>();
+    List<ProvisioningGroup> missingGrouperTargetGroups = new ArrayList<ProvisioningGroup>();
+    
+    for (ProvisioningGroupWrapper provisioningGroupWrapper : GrouperUtil.nonNull(this.grouperProvisioner.retrieveGrouperProvisioningData().getProvisioningGroupWrappers())) {
+      
+      if (provisioningGroupWrapper.getGrouperProvisioningGroup() == null || provisioningGroupWrapper.getGrouperTargetGroup() == null
+          || !provisioningGroupWrapper.getProvisioningStateGroup().isRecalcObject()) {
+        continue;
+      }
+
+      if (provisioningGroupWrapper.getProvisioningStateGroup().isSelectResultProcessed()) {
+        continue;
+      }
+
+      GcGrouperSyncGroup gcGrouperSyncGroup = provisioningGroupWrapper.getGcGrouperSyncGroup();
+      
+      if (gcGrouperSyncGroup == null) {
+        continue;
+      }
+
+      // the case we have a problem with is its in target but the target group is not there
+      if ((gcGrouperSyncGroup.getInTarget() == null || !gcGrouperSyncGroup.getInTarget()) || provisioningGroupWrapper.getTargetProvisioningGroup() != null) {
+        continue;
+      }
+            
+      missingGrouperTargetGroups.add(provisioningGroupWrapper.getGrouperTargetGroup());
+      missingGroupWrappers.add(provisioningGroupWrapper);
+    }
+
+    if (GrouperUtil.length(missingGroupWrappers) == 0) {
+      return;
+    }
+
+    // how many do we have 
+    this.grouperProvisioner.getDebugMap().put("missingGroupsForRetrieve", GrouperUtil.length(missingGroupWrappers));
+
+    // Step 1 - Get all the grouper target entities and select them from the target (Call the batch method that gets all at once)
+
+    TargetDaoRetrieveGroupsResponse targetDaoRetrieveGroupsResponse = this.grouperProvisioner.retrieveGrouperProvisioningTargetDaoAdapter()
+        .retrieveGroups(new TargetDaoRetrieveGroupsRequest(missingGrouperTargetGroups, true));
+    
+    List<ProvisioningGroup> targetGroups = GrouperUtil.nonNull(targetDaoRetrieveGroupsResponse == null ? null : targetDaoRetrieveGroupsResponse.getTargetGroups());
+    
+    GrouperProvisioningLogic.this.getGrouperProvisioner().retrieveGrouperProvisioningData().getTargetGroupToTargetNativeGroup().putAll(
+        GrouperUtil.nonNull(targetDaoRetrieveGroupsResponse.getTargetGroupToTargetNativeGroup()));
+
+    this.grouperProvisioner.getDebugMap().put("missingGroupsForRetrieveFound", GrouperUtil.length(targetGroups));
+
+    if (GrouperUtil.length(targetGroups) == 0) {
+      return;
+    }
+    
+    // Step 2 - Go through retrieveAllData method and whatever processing is done on the target entities; perform them here as well
+    
+    Set<ProvisioningGroupWrapper> provisioningGroupWrappers = this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningGroupWrappers();
+
+    // add wrappers for all groups
+    for (ProvisioningGroup targetProvisioningGroup : GrouperUtil.nonNull(targetGroups)) {
+      if (targetProvisioningGroup.getProvisioningGroupWrapper() == null) {
+        ProvisioningGroupWrapper provisioningGroupWrapper = new ProvisioningGroupWrapper();
+        provisioningGroupWrapper.setGrouperProvisioner(this.grouperProvisioner);
+        provisioningGroupWrappers.add(provisioningGroupWrapper);
+    
+        provisioningGroupWrapper.setTargetProvisioningGroup(targetProvisioningGroup);
+      }
+    }
+    
+    // Step 3 - Go through the full logic and see if any other processing is done on the target entities
+    this.grouperProvisioner.retrieveGrouperProvisioningAttributeManipulation().manipulateDefaultsFilterAttributesGroups(targetGroups, false, true, false, false);
+    
+    this.grouperProvisioner.retrieveGrouperProvisioningTranslator()
+      .idTargetGroups(targetGroups);
+
+    // index the groups and entity matching ids
+    this.grouperProvisioner.retrieveGrouperProvisioningMatchingIdIndex().indexMatchingIdGroups(targetGroups);
+
+    this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.retrieveIndividualMissingGroups, targetGroups);
+
+  }
+
+  /**
+   * if incremental, and there are missing groups or entities, then retrieve them
+   */
+  public void retrieveMissingEntitiesIncremental() {
+    
+    // first lets see if we should even be doing this
+    if (!this.grouperProvisioner.retrieveGrouperProvisioningBehavior().isSelectEntityMissingIncremental()) {
+      return;
+    }
+      
+    //do we have missing groups?
+    List<ProvisioningEntity> missingEntities = new ArrayList<ProvisioningEntity>();
+    
+    for (ProvisioningEntity provisioningEntity : GrouperUtil.nonNull(this.grouperProvisioner.retrieveGrouperProvisioningData().retrieveGrouperProvisioningEntities())) {
+      
+      // shouldnt be null at this point
+      GcGrouperSyncMember gcGrouperSyncMember = provisioningEntity.getProvisioningEntityWrapper().getGcGrouperSyncMember();
+      
+      if (!gcGrouperSyncMember.isProvisionable()) {
+        continue;
+      }
+      if (this.grouperProvisioner.retrieveGrouperProvisioningLinkLogic().entityLinkMissing(gcGrouperSyncMember)) {
+        missingEntities.add(provisioningEntity);
+      }
+    }
+
+    if (GrouperUtil.length(missingEntities) == 0) {
+      return;
+    }
+    // how many do we have 
+    this.grouperProvisioner.getDebugMap().put("missingIncrementalEntitiesForRetrieve", missingEntities);
+    
+    // log this
+    this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.missingEntitiesForCreate, missingEntities);
+
+    // translate
+    List<ProvisioningEntity> grouperTargetEntities = this.grouperProvisioner.retrieveGrouperProvisioningTranslator().translateGrouperToTargetEntities(missingEntities, false, false);
+    this.getGrouperProvisioner().retrieveGrouperProvisioningDataChanges().getGrouperTargetObjectsMissing().setProvisioningEntities(grouperTargetEntities);
+
+    // index
+    this.grouperProvisioner.retrieveGrouperProvisioningTranslator().idTargetEntities(grouperTargetEntities);
+    
+    //lets retrieve these
+    TargetDaoRetrieveEntitiesResponse targetDaoRetrieveEntitiesResponse = 
+        this.grouperProvisioner.retrieveGrouperProvisioningTargetDaoAdapter().retrieveEntities(new TargetDaoRetrieveEntitiesRequest(grouperTargetEntities, false));
+    
+    List<ProvisioningEntity> targetEntities = GrouperUtil.nonNull(targetDaoRetrieveEntitiesResponse == null ? null : targetDaoRetrieveEntitiesResponse.getTargetEntities());
+    
+    // index
+    this.grouperProvisioner.retrieveGrouperProvisioningTranslator().idTargetEntities(targetEntities);
+    this.grouperProvisioner.retrieveGrouperProvisioningMatchingIdIndex().indexMatchingIdEntities(targetEntities);
+
+    this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.missingTargetEntitiesRetrieved, targetEntities);
+
+    
+  }
+
+  /**
+   * 
+   */
+  public void retrieveIndividualMissingEntities() {
+    
+    if (!this.grouperProvisioner.retrieveGrouperProvisioningBehavior().isSelectEntities()) {
+      return;
+    }
+    
+    List<ProvisioningEntityWrapper> missingEntityWrappers = new ArrayList<ProvisioningEntityWrapper>();
+    List<ProvisioningEntity> missingGrouperTargetEntities = new ArrayList<ProvisioningEntity>();
+    
+    for (ProvisioningEntityWrapper provisioningEntityWrapper : GrouperUtil.nonNull(this.grouperProvisioner.retrieveGrouperProvisioningData().getProvisioningEntityWrappers())) {
+      
+      if (provisioningEntityWrapper.getGrouperProvisioningEntity() == null || provisioningEntityWrapper.getGrouperTargetEntity() == null
+          || !provisioningEntityWrapper.getProvisioningStateEntity().isRecalcObject()) {
+        continue;
+      }
+  
+      if (provisioningEntityWrapper.getProvisioningStateEntity().isSelectResultProcessed()) {
+        continue;
+      }
+      
+      GcGrouperSyncMember gcGrouperSyncMember = provisioningEntityWrapper.getGcGrouperSyncMember();
+      
+      if (gcGrouperSyncMember == null) {
+        continue;
+      }
+  
+      // the case we have a problem with is its in target but the target group is not there
+      if ((gcGrouperSyncMember.getInTarget() == null || !gcGrouperSyncMember.getInTarget()) || provisioningEntityWrapper.getTargetProvisioningEntity() != null) {
+        continue;
+      }
+      
+      missingGrouperTargetEntities.add(provisioningEntityWrapper.getGrouperTargetEntity());
+      missingEntityWrappers.add(provisioningEntityWrapper);
+    }
+  
+    if (GrouperUtil.length(missingEntityWrappers) == 0) {
+      return;
+    }
+  
+    // how many do we have 
+    this.grouperProvisioner.getDebugMap().put("missingEntitiesForRetrieve", GrouperUtil.length(missingEntityWrappers));
+  
+    // Step 1 - Get all the grouper target entities and select them from the target (Call the batch method that gets all at once)
+  
+    TargetDaoRetrieveEntitiesResponse targetDaoRetrieveEntitiesResponse = this.grouperProvisioner.retrieveGrouperProvisioningTargetDaoAdapter()
+        .retrieveEntities(new TargetDaoRetrieveEntitiesRequest(missingGrouperTargetEntities, true));
+    
+    List<ProvisioningEntity> targetEntities = GrouperUtil.nonNull(targetDaoRetrieveEntitiesResponse == null ? null : targetDaoRetrieveEntitiesResponse.getTargetEntities());
+  
+    GrouperProvisioningLogic.this.getGrouperProvisioner().retrieveGrouperProvisioningData().getTargetEntityToTargetNativeEntity().putAll(
+        GrouperUtil.nonNull(targetDaoRetrieveEntitiesResponse.getTargetEntityToTargetNativeEntity()));
+
+    this.grouperProvisioner.getDebugMap().put("missingEntitiesForRetrieveFound", GrouperUtil.length(targetEntities));
+  
+    if (GrouperUtil.length(targetEntities) == 0) {
+      return;
+    }
+    
+    // Step 2 - Go through retrieveAllData method and whatever processing is done on the target entities; perform them here as well
+    
+    Set<ProvisioningEntityWrapper> provisioningEntityWrappers = this.getGrouperProvisioner().retrieveGrouperProvisioningData().getProvisioningEntityWrappers();
+  
+    // add wrappers for all groups
+    for (ProvisioningEntity targetProvisioningEntity : GrouperUtil.nonNull(targetEntities)) {
+      if (targetProvisioningEntity.getProvisioningEntityWrapper() == null) {
+        ProvisioningEntityWrapper provisioningEntityWrapper = new ProvisioningEntityWrapper();
+        provisioningEntityWrapper.setGrouperProvisioner(this.grouperProvisioner);
+        provisioningEntityWrappers.add(provisioningEntityWrapper);
+    
+        provisioningEntityWrapper.setTargetProvisioningEntity(targetProvisioningEntity);
+      }
+    }
+    
+    // Step 3 - Go through the full logic and see if any other processing is done on the target entities
+    this.grouperProvisioner.retrieveGrouperProvisioningAttributeManipulation().manipulateDefaultsFilterAttributesEntities(targetEntities, false, true, false, false);
+    
+    this.grouperProvisioner.retrieveGrouperProvisioningTranslator()
+      .idTargetEntities(targetEntities);
+  
+    // index the groups and entity matching ids
+    this.grouperProvisioner.retrieveGrouperProvisioningMatchingIdIndex().indexMatchingIdEntities(targetEntities);
+  
+    this.getGrouperProvisioner().retrieveGrouperProvisioningObjectLog().debug(GrouperProvisioningObjectLogType.retrieveIndividualMissingEntities, targetEntities);
+  
+  }
+
+  /**
+   * 
+   */
+  public List<ProvisioningMembership> retrieveIndividualTargetMembershipsIfNeeded() {
+
+    // GRP-6676/GRP-7115: In blind replace mode (replaceMemberships=true, selectMemberships=false)
+    // we do NOT authoritatively read target memberships -- we simply replace each group's full
+    // membership list every sync. GRP-7115 made canRetrieveMembershipsAllByGroup (and therefore
+    // isSelectMembershipsInGeneral()) true for group-centric targets even when the operator disabled
+    // membership selection, so without this guard this method would run, retrieve zero memberships,
+    // and retrieveFullIndividualTargetMemberships() would then mark EVERY membership wrapper
+    // select-result-processed. processResultsSelectMembershipsFull would flip every in-target
+    // membership to not-in-target (exists=false), and the following replace would re-insert them,
+    // resetting in_target_start and reporting phantom inserts on every idempotent full sync. When we
+    // are replacing blindly without selecting memberships, skip the individual membership read.
+    if (this.grouperProvisioner.retrieveGrouperProvisioningBehavior().isReplaceMemberships()
+        && !this.grouperProvisioner.retrieveGrouperProvisioningConfiguration().isSelectMemberships()) {
+      return null;
+    }
+
+    if (this.grouperProvisioner.retrieveGrouperProvisioningBehavior().isSelectAllData() 
+        || this.grouperProvisioner.retrieveGrouperProvisioningBehavior().isSelectMembershipsAll() 
+        || !this.grouperProvisioner.retrieveGrouperProvisioningBehavior().isSelectMembershipsInGeneral()) {
+      return null;
+    }
+
+    if (this.grouperProvisioner.getProvisioningStateGlobal().isSelectResultProcessedMemberships()) {
+      return null;
+    }
+    
+    if (this.getGrouperProvisioner().retrieveGrouperProvisioningBehavior().getGrouperProvisioningBehaviorMembershipType() != GrouperProvisioningBehaviorMembershipType.membershipObjects) {
+      return null;
+    }
+
+    // see if we can get memberships by group
+    if (GrouperUtil.booleanValue(
+        this.grouperProvisioner.retrieveGrouperProvisioningTargetDaoAdapter().getWrappedDao()
+          .getGrouperProvisionerDaoCapabilities().getCanRetrieveMembershipsAllByGroup(), false)
+        || GrouperUtil.booleanValue(
+            this.grouperProvisioner.retrieveGrouperProvisioningTargetDaoAdapter().getWrappedDao()
+            .getGrouperProvisionerDaoCapabilities().getCanRetrieveMembershipsAllByGroups(), false)) {
+      
+      // deal with all groups, get the target groups already selected
+      List<ProvisioningGroup> targetProvisioningGroups = new ArrayList<>();
+      for (ProvisioningGroup targetGroup : GrouperUtil.nonNull(this.getGrouperProvisioner()
+          .retrieveGrouperProvisioningData().retrieveTargetProvisioningGroups())) {
+        if (targetGroup.getProvisioningGroupWrapper() == null || !targetGroup.getProvisioningGroupWrapper().getProvisioningStateGroup().isSelectAllMembershipsResultProcessed()) {
+          targetProvisioningGroups.add(targetGroup);
+        }
+      }
+
+      if (GrouperUtil.length(targetProvisioningGroups) == 0) {
+        return null;
+      }
+      
+      for (ProvisioningGroup targetProvisioningGroup: targetProvisioningGroups) {
+        targetProvisioningGroup.getProvisioningGroupWrapper()
+          .getProvisioningStateGroup().setSelectAllMembershipsResultProcessed(true);
+      }
+      
+      TargetDaoRetrieveMembershipsByGroupsRequest targetDaoRetrieveMembershipsByGroupsRequest = new TargetDaoRetrieveMembershipsByGroupsRequest(targetProvisioningGroups);
+      
+      TargetDaoRetrieveMembershipsByGroupsResponse retrieveMembershipsByGroups = this.getGrouperProvisioner()
+          .retrieveGrouperProvisioningTargetDaoAdapter().retrieveMembershipsByGroups(targetDaoRetrieveMembershipsByGroupsRequest);
+
+      List<ProvisioningMembership> membershipObjects = retrieveMembershipsByGroups.getTargetMemberships();
+      
+      this.getGrouperProvisioner().getProvisioningStateGlobal().setSelectResultProcessedIndividualMemberships(true);
+      
+      return membershipObjects;
+    } else if (GrouperUtil.booleanValue(
+          this.grouperProvisioner.retrieveGrouperProvisioningTargetDaoAdapter().getWrappedDao()
+            .getGrouperProvisionerDaoCapabilities().getCanRetrieveMembershipsAllByEntity(), false)
+          || GrouperUtil.booleanValue(
+              this.grouperProvisioner.retrieveGrouperProvisioningTargetDaoAdapter().getWrappedDao()
+              .getGrouperProvisionerDaoCapabilities().getCanRetrieveMembershipsAllByEntities(), false)) {
+        
+      // deal with all entities, get the target entities already selected
+      List<ProvisioningEntity> targetProvisioningEntities = new ArrayList<>();
+      for (ProvisioningEntity targetEntity : GrouperUtil.nonNull(this.getGrouperProvisioner()
+          .retrieveGrouperProvisioningData().retrieveTargetProvisioningEntities())) {
+        if (targetEntity.getProvisioningEntityWrapper() == null || !targetEntity.getProvisioningEntityWrapper().getProvisioningStateEntity().isSelectAllMembershipsResultProcessed()) {
+          targetProvisioningEntities.add(targetEntity);
+        }
+      }
+
+      if (GrouperUtil.length(targetProvisioningEntities) == 0) {
+        return null;
+      }
+      
+      for (ProvisioningEntity targetProvisioningEntity: targetProvisioningEntities) {
+        targetProvisioningEntity.getProvisioningEntityWrapper()
+          .getProvisioningStateEntity().setSelectAllMembershipResultProcessed(true);
+      }
+      
+      TargetDaoRetrieveMembershipsByEntitiesRequest targetDaoRetrieveMembershipsByEntitiesRequest = new TargetDaoRetrieveMembershipsByEntitiesRequest(targetProvisioningEntities);
+      
+      TargetDaoRetrieveMembershipsByEntitiesResponse retrieveMembershipsByEntities = this.getGrouperProvisioner()
+          .retrieveGrouperProvisioningTargetDaoAdapter().retrieveMembershipsByEntities(targetDaoRetrieveMembershipsByEntitiesRequest);
+
+      List<ProvisioningMembership> membershipObjects = retrieveMembershipsByEntities.getTargetMemberships();
+      
+      this.getGrouperProvisioner().getProvisioningStateGlobal().setSelectResultProcessedIndividualMemberships(true);
+      
+      return membershipObjects;
+    } else {
+      throw new RuntimeException("Not expecting DAO capabilities when selecting memberships!  Should be able to select memberships by group or entity!");
+    }
+
+  }
+
+  private void garbageCollectAndLogMemoryIfDebug(Map<String, Object> debugMap, String logLabel) {
+    if (this.getGrouperProvisioner().retrieveGrouperProvisioningConfiguration().isDebugLog()) {
+      debugMap.put("state", "determineMemory" + logLabel);
+      long start = System.currentTimeMillis();
+      Runtime runtime = Runtime.getRuntime();
+      runtime.gc();
+      runtime.gc();
+      long memoryBytes = runtime.totalMemory() - runtime.freeMemory();
+      long memoryCalcTimeMillis = System.currentTimeMillis() - start;
+      debugMap.put("memory" + logLabel + "Bytes", memoryBytes);
+      debugMap.put("memory" + logLabel + "CalcTimeMillis", memoryCalcTimeMillis);
+    }
+  }
+}

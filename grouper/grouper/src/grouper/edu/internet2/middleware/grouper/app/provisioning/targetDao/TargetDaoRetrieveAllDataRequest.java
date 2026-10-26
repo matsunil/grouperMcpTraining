@@ -1,0 +1,68 @@
+package edu.internet2.middleware.grouper.app.provisioning.targetDao;
+
+
+public class TargetDaoRetrieveAllDataRequest {
+
+  private boolean includeNativeEntity;
+
+  public boolean isIncludeNativeEntity() {
+    return includeNativeEntity;
+  }
+
+  public void setIncludeNativeEntity(boolean includeNativeEntity) {
+    this.includeNativeEntity = includeNativeEntity;
+  }
+
+  /**
+   * GRP-7048: whether the DAO should retrieve entities (users) from the target as part of the
+   * "retrieve all" pass. Defaults to true. When {@code fullSyncUsersFromSyncBack} is enabled the
+   * framework sets this to false so a DAO that supports it skips its (potentially very large) user
+   * pull -- and any per-membership missing-user lookup -- and the framework instead seeds the
+   * target users from the sync-back cache. Groups and memberships are still retrieved normally.
+   */
+  private boolean retrieveEntities = true;
+
+  public boolean isRetrieveEntities() {
+    return retrieveEntities;
+  }
+
+  public void setRetrieveEntities(boolean retrieveEntities) {
+    this.retrieveEntities = retrieveEntities;
+  }
+
+  /**
+   * GRP-7048: whether the DAO should retrieve memberships from the target as part of the
+   * "retrieve all" pass. Defaults to true. When {@code fullSyncMembershipsFromSyncBack} is enabled
+   * the framework sets this to false so a DAO that supports it skips its (potentially expensive)
+   * membership retrieval -- e.g. the per-group member iteration -- and the framework instead seeds
+   * the target memberships from the sync-back cache. Groups and entities are still retrieved per
+   * their own flags.
+   */
+  private boolean retrieveMemberships = true;
+
+  public boolean isRetrieveMemberships() {
+    return retrieveMemberships;
+  }
+
+  public void setRetrieveMemberships(boolean retrieveMemberships) {
+    this.retrieveMemberships = retrieveMemberships;
+  }
+
+  /**
+   * GRP-7048: whether the DAO should retrieve groups from the target as part of the "retrieve all"
+   * pass. Defaults to true. When {@code fullSyncGroupsFromSyncBack} is enabled (and, for targets
+   * whose memberships are fetched by iterating groups, memberships are also from the cache) the
+   * framework sets this to false so the DAO skips its group pull and the framework seeds the target
+   * groups from the sync-back cache.
+   */
+  private boolean retrieveGroups = true;
+
+  public boolean isRetrieveGroups() {
+    return retrieveGroups;
+  }
+
+  public void setRetrieveGroups(boolean retrieveGroups) {
+    this.retrieveGroups = retrieveGroups;
+  }
+
+}

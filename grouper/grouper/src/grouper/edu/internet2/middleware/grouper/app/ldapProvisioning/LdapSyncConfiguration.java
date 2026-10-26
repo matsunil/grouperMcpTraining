@@ -1,0 +1,202 @@
+/**
+ * @author mchyzer
+ * $Id$
+ */
+package edu.internet2.middleware.grouper.app.ldapProvisioning;
+
+import java.util.Set;
+
+import org.apache.commons.lang3.StringUtils;
+
+import edu.internet2.middleware.grouper.app.loader.GrouperLoaderConfig;
+import edu.internet2.middleware.grouper.app.provisioning.GrouperProvisioningConfiguration;
+import edu.internet2.middleware.grouper.util.GrouperUtil;
+
+/**
+ * an instance of this class focuses on the configuration for ldap sync
+ * create an instance, set the key, and call configure
+ */
+public class LdapSyncConfiguration extends GrouperProvisioningConfiguration {
+
+  private String ldapExternalSystemConfigId;
+  private String userSearchBaseDn;
+  private String groupSearchBaseDn;
+  private LdapSyncGroupDnType groupDnType;
+  private String folderRdnAttribute;
+  private String groupRdnAttribute;
+  private Set<String> folderObjectClasses;
+  private String userRdnAttribute;
+  
+  public String getUserRdnAttribute() {
+    return userRdnAttribute;
+  }
+
+  public void setUserRdnAttribute(String userRdnAttribute) {
+    this.userRdnAttribute = userRdnAttribute;
+  }
+
+  @Override
+  public void configureSpecificSettings() {
+
+    this.ldapExternalSystemConfigId = this.retrieveConfigString("ldapExternalSystemConfigId", true);
+    if (!GrouperLoaderConfig.retrieveConfig().assertPropertyValueRequired("ldap." + ldapExternalSystemConfigId + ".url")) {
+      throw new RuntimeException("Unable to find ldap." + ldapExternalSystemConfigId + ".url property.  Is ldapExternalSystemConfigId set correctly?");
+    }
+            
+    this.userSearchBaseDn = this.retrieveConfigString("userSearchBaseDn", false);
+    this.groupSearchBaseDn = this.retrieveConfigString("groupSearchBaseDn", false);
+    this.groupRdnAttribute = GrouperUtil.defaultIfNull(this.retrieveConfigString("groupRdnAttribute", false), "cn");
+    this.userRdnAttribute = this.retrieveConfigString("userRdnAttribute", false);
+
+    {
+      String groupDnTypeString = this.retrieveConfigString("groupDnType", false);
+      if (!StringUtils.isBlank(groupDnTypeString)) {
+        if (StringUtils.equalsIgnoreCase("flat", groupDnTypeString)) {
+          this.groupDnType = LdapSyncGroupDnType.flat;
+        } else if (StringUtils.equalsIgnoreCase("bushy", groupDnTypeString)) {
+          this.groupDnType = LdapSyncGroupDnType.bushy;
+          
+          this.folderRdnAttribute = GrouperUtil.defaultIfNull(this.retrieveConfigString("folderRdnAttribute", false), "ou");
+          String objectClassesString = GrouperUtil.defaultIfNull(this.retrieveConfigString("folderObjectClasses", false), "top, organizationalUnit");
+          this.folderObjectClasses = GrouperUtil.splitTrimToSet(objectClassesString, ",");
+          this.bushyFolderPreserveCase = GrouperUtil.booleanValue(this.retrieveConfigString("bushyFolderPreserveCase", false), false);
+        } else {
+          throw new RuntimeException("Invalid groupDnType: '" + groupDnTypeString + "'");
+        }
+      }
+    }
+    this.allowLdapGroupDnOverride = GrouperUtil.booleanValue(this.retrieveConfigString("allowLdapGroupDnOverride", false), false);
+    this.onlyLdapGroupDnOverride = GrouperUtil.booleanValue(this.retrieveConfigString("onlyLdapGroupDnOverride", false), false);
+  }
+  
+  /**
+   * when doing bushy provisioning, preserve the case of folder DNs as they are in Grouper
+   */
+  private boolean bushyFolderPreserveCase;
+
+  /**
+   * when doing bushy provisioning, preserve the case of folder DNs as they are in Grouper
+   * @return preserve case
+   */
+  public boolean isBushyFolderPreserveCase() {
+    return this.bushyFolderPreserveCase;
+  }
+
+  /**
+   * when doing bushy provisioning, preserve the case of folder DNs as they are in Grouper
+   * @param bushyFolderPreserveCase1
+   */
+  public void setBushyFolderPreserveCase(boolean bushyFolderPreserveCase1) {
+    this.bushyFolderPreserveCase = bushyFolderPreserveCase1;
+  }
+
+  /**
+   * If you want a metadata item on groups to allow a DN override
+   */
+  private boolean allowLdapGroupDnOverride;
+
+  /**
+   * If you want a metadata item on groups to set a DN override (only way to provision)
+   */
+  private boolean onlyLdapGroupDnOverride;
+
+  /**
+   * If you want a metadata item on groups to allow a DN override
+   * @return only override
+   */
+  public boolean isOnlyLdapGroupDnOverride() {
+    return this.onlyLdapGroupDnOverride;
+  }
+
+  /**
+   * If you want a metadata item on groups to allow a DN override
+   * @param onlyLdapGroupDnOverride1
+   */
+  public void setOnlyLdapGroupDnOverride(boolean onlyLdapGroupDnOverride1) {
+    this.onlyLdapGroupDnOverride = onlyLdapGroupDnOverride1;
+  }
+
+  /**
+   * If you want a metadata item on groups to allow a DN override
+   * @return override
+   */
+  public boolean isAllowLdapGroupDnOverride() {
+    return this.allowLdapGroupDnOverride;
+  }
+
+  /**
+   * If you want a metadata item on groups to allow a DN override
+   * @param allowLdapGroupDnOverride1
+   */
+  public void setAllowLdapGroupDnOverride(boolean allowLdapGroupDnOverride1) {
+    this.allowLdapGroupDnOverride = allowLdapGroupDnOverride1;
+  }
+
+
+  public String getLdapExternalSystemConfigId() {
+    return ldapExternalSystemConfigId;
+  }
+
+  
+  public void setLdapExternalSystemConfigId(String ldapExternalSystemConfigId) {
+    this.ldapExternalSystemConfigId = ldapExternalSystemConfigId;
+  }
+
+  
+  public String getUserSearchBaseDn() {
+    return userSearchBaseDn;
+  }
+
+  
+  public void setUserSearchBaseDn(String userSearchBaseDn) {
+    this.userSearchBaseDn = userSearchBaseDn;
+  }
+  
+  public String getGroupSearchBaseDn() {
+    return groupSearchBaseDn;
+  }
+
+  
+  public void setGroupSearchBaseDn(String groupSearchBaseDn) {
+    this.groupSearchBaseDn = groupSearchBaseDn;
+  }
+  
+  public LdapSyncGroupDnType getGroupDnType() {
+    return groupDnType;
+  }
+
+  
+  public void setGroupDnType(LdapSyncGroupDnType groupDnType) {
+    this.groupDnType = groupDnType;
+  }
+
+  
+  public String getFolderRdnAttribute() {
+    return folderRdnAttribute;
+  }
+
+  
+  public void setFolderRdnAttribute(String folderRdnAttribute) {
+    this.folderRdnAttribute = folderRdnAttribute;
+  }
+
+  
+  public Set<String> getFolderObjectClasses() {
+    return folderObjectClasses;
+  }
+
+  
+  public void setFolderObjectClasses(Set<String> folderObjectClasses) {
+    this.folderObjectClasses = folderObjectClasses;
+  }
+
+  
+  public String getGroupRdnAttribute() {
+    return groupRdnAttribute;
+  }
+
+  
+  public void setGroupRdnAttribute(String groupRdnAttribute) {
+    this.groupRdnAttribute = groupRdnAttribute;
+  }
+}

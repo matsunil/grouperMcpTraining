@@ -1,0 +1,1056 @@
+/*******************************************************************************
+ * Copyright 2012 Internet2
+ * 
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ * 
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ * 
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ ******************************************************************************/
+/**
+ * 
+ */
+package edu.internet2.middleware.grouper.ws;
+
+import java.io.IOException;
+import java.lang.reflect.Method;
+import java.security.Principal;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+import javax.servlet.Filter;
+import javax.servlet.FilterChain;
+import javax.servlet.FilterConfig;
+import javax.servlet.ServletException;
+import javax.servlet.ServletRequest;
+import javax.servlet.ServletResponse;
+import javax.servlet.http.HttpServlet;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+import org.apache.commons.codec.binary.Base64;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.exception.ExceptionUtils;
+import org.apache.commons.logging.Log;
+import org.apache.logging.log4j.ThreadContext;
+
+import edu.internet2.middleware.grouper.Group;
+import edu.internet2.middleware.grouper.GroupFinder;
+import edu.internet2.middleware.grouper.GrouperSession;
+import edu.internet2.middleware.grouper.Member;
+import edu.internet2.middleware.grouper.MemberFinder;
+import edu.internet2.middleware.grouper.SubjectFinder;
+import edu.internet2.middleware.grouper.audit.GrouperEngineBuiltin;
+import edu.internet2.middleware.grouper.authentication.GrouperOidc;
+import edu.internet2.middleware.grouper.authentication.GrouperPassword;
+import edu.internet2.middleware.grouper.authentication.GrouperPublicPrivateKeyJwt;
+import edu.internet2.middleware.grouper.authentication.GrouperTrustedJwt;
+
+import edu.internet2.middleware.grouper.cache.GrouperCache;
+import edu.internet2.middleware.grouper.cfg.GrouperHibernateConfig;
+import edu.internet2.middleware.grouper.exception.GrouperSessionException;
+import edu.internet2.middleware.grouper.exception.SessionException;
+import edu.internet2.middleware.grouper.hibernate.GrouperContext;
+import edu.internet2.middleware.grouper.hooks.beans.GrouperContextTypeBuiltIn;
+import edu.internet2.middleware.grouper.hooks.beans.HooksContext;
+import edu.internet2.middleware.grouper.instrumentation.InstrumentationThread;
+import edu.internet2.middleware.grouper.j2ee.Authentication;
+import edu.internet2.middleware.grouper.j2ee.ServletRequestUtils;
+import edu.internet2.middleware.grouper.misc.GrouperSessionHandler;
+import edu.internet2.middleware.grouper.misc.GrouperStartup;
+import edu.internet2.middleware.grouper.privs.PrivilegeHelper;
+import edu.internet2.middleware.grouper.util.GrouperLogger;
+import edu.internet2.middleware.grouper.util.GrouperLoggerState;
+import edu.internet2.middleware.grouper.util.GrouperUtil;
+import edu.internet2.middleware.grouper.ws.coresoap.WsSubjectLookup;
+import edu.internet2.middleware.grouper.ws.exceptions.WsInvalidQueryException;
+import edu.internet2.middleware.grouper.ws.security.WsCustomAuthentication;
+import edu.internet2.middleware.grouper.ws.security.WsGrouperDefaultAuthentication;
+import edu.internet2.middleware.grouper.ws.util.GrouperWsLog;
+import edu.internet2.middleware.grouper.ws.util.GrouperWsLongRunningLog;
+import edu.internet2.middleware.grouperClient.collections.MultiKey;
+import edu.internet2.middleware.subject.Subject;
+import edu.internet2.middleware.subject.SubjectNotFoundException;
+
+/**
+ * Extend the servlet to get user info
+ * 
+ * @author mchyzer
+ * 
+ */
+public class GrouperServiceJ2ee implements Filter {
+
+  /** logger */
+  private static final Log LOG = GrouperUtil.getLog(GrouperServiceJ2ee.class);
+  
+  /**
+   * if in request, get the start time
+   * @return the start time
+   */
+  public static long retrieveRequestStartMillis() {
+    return GrouperWsRequestContext.retrieveRequestStartMillis();
+  }
+
+  /**
+   * get a single parameter value for key.  If multiple exist, throw error
+   * @param paramMap is the map of params.  will get value from here if no request object
+   * @param httpServletRequest optional.  if there, will make sure no dupes
+   * @param key to lookup
+   * @return the value
+   */
+  public static String parameterValue(Map<String, String[]> paramMap,
+      HttpServletRequest httpServletRequest, String key) {
+    //if no servlet (probably just testing), get from map
+    if (httpServletRequest == null) {
+      if (paramMap == null || paramMap.isEmpty() || !paramMap.containsKey(key)) {
+        return null;
+      }
+      return paramMap.get(key)[0];
+    }
+    String[] values = httpServletRequest.getParameterValues(key);
+    if (values == null || values.length == 0) {
+      return null;
+    }
+    //there is probably something wrong if multiple values detected
+    if (values.length > 1) {
+      throw new RuntimeException(
+          "Multiple request parameter values where detected for key: " + key
+              + ", when only one is expected: " + GrouperUtil.toStringForLog(values));
+    }
+    return values[0];
+  }
+
+  /**
+   * retrieve the user principal (who is authenticated) from the (threadlocal)
+   * request object
+   * 
+   * @return the user principal name
+   */
+  public static String retrieveUserPrincipalNameFromRequest() {
+
+    HttpServletRequest httpServletRequest = retrieveHttpServletRequest();
+    GrouperUtil
+        .assertion(httpServletRequest != null,
+            "HttpServletRequest is null, is the GrouperServiceServlet mapped in the web.xml?");
+    Principal principal = httpServletRequest.getUserPrincipal();
+    String principalName = null;
+    if (principal == null) {
+      principalName = httpServletRequest.getRemoteUser();
+      if (StringUtils.isBlank(principalName)) {
+        principalName = (String)httpServletRequest.getAttribute("REMOTE_USER");
+      }
+    } else {
+      principalName = principal.getName();
+    }
+    GrouperUtil.assertion(StringUtils.isNotBlank(principalName),
+        "There is no user logged in, make sure the container requires authentication");
+    return principalName;
+  }
+
+  /**
+   * how the web service works out who is logged in: from the servlet request and the configured
+   * authentication class.  assigned to the request context for every request this filter handles
+   */
+  private static final GrouperWsSubjectResolver WS_SUBJECT_RESOLVER = new GrouperWsSubjectResolver() {
+
+    public Subject retrieveSubjectLoggedIn() {
+      return GrouperServiceJ2ee.retrieveSubjectLoggedInFromRequest();
+    }
+  };
+
+  /**
+   * retrieve the subject logged in.  kept so that existing callers do not change; the answer now
+   * comes from the request context, which asks the resolver this request assigned
+   *
+   * @return the subject
+   */
+  public static Subject retrieveSubjectLoggedIn() {
+    return GrouperWsRequestContext.retrieveSubjectLoggedIn();
+  }
+
+  /**
+   * work out who is logged in from the servlet request and the configured authentication class.
+   * this is the web service's answer to that question, registered with the request context in
+   * {@link #init(FilterConfig)} so that logic in core can ask without knowing about servlets
+   *
+   * If there are four colons, then this is the source and subjectId since
+   * overlap in namespace
+   *
+   * @return the subject
+   */
+  @SuppressWarnings({ "unchecked", "deprecation" })
+  public static Subject retrieveSubjectLoggedInFromRequest() {
+
+    Map<String, Object> debugMap = GrouperServiceJ2ee.retrieveDebugMap();
+
+    String authenticationClassName = GrouperWsConfig.getPropertyString(
+        GrouperWsConfig.WS_SECURITY_NON_RAMPART_AUTHENTICATION_CLASS,
+        WsGrouperDefaultAuthentication.class.getName());
+    
+    // add this in for JWT
+    String userIdLoggedIn = (String)retrieveHttpServletRequest().getAttribute("REMOTE_USER");
+    if (StringUtils.isBlank(userIdLoggedIn)) {
+      if (wssecServlet()) {
+  
+        Class<?> clazz = GrouperUtil.forName("edu.internet2.middleware.grouper.ws.security.RampartUtil");
+        try {
+          Method method = clazz.getMethod("getUserIdLoggedIn");
+          userIdLoggedIn = (String)method.invoke(null);
+        } catch (Exception e) {
+          throw new RuntimeException(e);
+        }
+        
+        GrouperUtil.assertion(StringUtils.isNotBlank(userIdLoggedIn),
+            "There is no Rampart user logged in, make sure the container requires authentication");
+      } else {
+        //this is for container auth (or custom auth, non-rampart)
+        //get an instance
+        Class<? extends WsCustomAuthentication> theClass = GrouperUtil
+            .forName(authenticationClassName);
+  
+        WsCustomAuthentication wsAuthentication = GrouperUtil.newInstance(theClass);
+  
+        userIdLoggedIn = wsAuthentication
+            .retrieveLoggedInSubjectId(retrieveHttpServletRequest());
+      }
+    }
+    
+    // cant be blank!
+    if (StringUtils.isBlank(userIdLoggedIn)) {
+      //server is having trouble if got this far, but also the user's fault
+      throw new WsInvalidQueryException("No user is logged in");
+    }
+
+    //null means dont look in a certain source
+    String sourceId = null;
+
+    //see if we need to split with 4 colons in login name
+    if (StringUtils.contains(userIdLoggedIn, GrouperWsConfig.WS_SEPARATOR)) {
+      String[] sourceSubjectId = GrouperUtil.splitTrim(userIdLoggedIn,
+          GrouperWsConfig.WS_SEPARATOR);
+      sourceId = sourceSubjectId[0];
+      userIdLoggedIn = sourceSubjectId[1];
+    } else {
+      //see if there is a default source for all users to web service
+      sourceId = StringUtils.trimToNull(GrouperWsConfig.retrieveConfig().propertyValueString(GrouperWsConfig.WS_LOGGED_IN_SUBJECT_DEFAULT_SOURCE));
+    }
+
+    String subjectIdPrefix = GrouperWsConfig
+        .getPropertyString("ws.security.prependToUserIdForSubjectLookup");
+    if (!StringUtils.isBlank(subjectIdPrefix)) {
+      boolean skipDueToJwt = false;
+      String authorizationHeader = retrieveHttpServletRequest().getHeader("Authorization");
+      if (!StringUtils.isBlank(authorizationHeader) && authorizationHeader.startsWith("Bearer jwtUser_")) {
+        skipDueToJwt = true;
+      }
+      if (!skipDueToJwt) {
+        userIdLoggedIn = subjectIdPrefix + userIdLoggedIn;
+      }
+    }
+    
+    //puts it in the log4j ndc context so userid is logged
+    if (ThreadContext.getDepth() == 0) {
+      StringBuilder ndcBuilder = new StringBuilder("< ");
+      if (!StringUtils.isBlank(sourceId)) {
+        ndcBuilder.append(sourceId).append(" - ");
+      }
+      ndcBuilder.append(userIdLoggedIn).append(" - ");
+      HttpServletRequest request = retrieveHttpServletRequest();
+      if (request != null) {
+        ndcBuilder.append(request.getRemoteAddr());
+      }
+      ndcBuilder.append(" >");
+      ThreadContext.push(ndcBuilder.toString());
+    }
+
+    debugMap.put("userIdLoggedIn", userIdLoggedIn);
+    
+    Subject caller = null;
+    GrouperSession grouperSession = GrouperSession.startRootSession(false);
+    try {
+      final String SOURCE_ID = sourceId;
+      final String USER_ID_LOGGED_IN = userIdLoggedIn;
+      caller = (Subject)GrouperSession.callbackGrouperSession(grouperSession, new GrouperSessionHandler() {
+
+        public Object callback(GrouperSession theGrouperSession)
+            throws GrouperSessionException {
+
+          try {
+            //see if across all sources
+            if (SOURCE_ID == null) {
+              return SubjectFinder.findByIdOrIdentifier(USER_ID_LOGGED_IN, true);
+            }
+            //see if in specified sources
+            String[] sourceIds = GrouperUtil.splitTrim(SOURCE_ID, ",");
+            for (String curSource : sourceIds) {
+              Subject s = SubjectFinder.findByIdOrIdentifierAndSource(USER_ID_LOGGED_IN, curSource, false);
+              if (s != null) {
+                return s;
+              }
+            }
+            throw new SubjectNotFoundException("Unable to find subject in source type(s): " + SOURCE_ID);
+          } catch (Exception e) {
+            //this is probably a system error...  not a user error
+            throw new RuntimeException("Cant find subject from login id: " + USER_ID_LOGGED_IN, e);
+          }
+        }
+      });
+
+      Subject originalCaller = caller;
+      if (caller != null) {
+        debugMap.put("userIdLoggedInSource", caller.getSourceId());
+        if (!StringUtils.equals(caller.getId(), (String)debugMap.get("userIdLoggedIn"))) {
+          debugMap.put("userIdLoggedInSubjectId", caller.getId());
+        }
+      }
+
+      caller = retrieveSubjectGrouperActAsHelper(caller);
+
+      if (caller != null && originalCaller != null && !StringUtils.equals(caller.getId(), originalCaller.getId())) {
+        debugMap.put("userIdActAsSource", caller.getSourceId());
+        debugMap.put("userIdActAsSubjectId", caller.getId());
+      }
+      
+      //this is set in filter
+      GrouperContext grouperContext = GrouperContext.retrieveDefaultContext();
+      
+      Member member = MemberFinder.findBySubject(grouperSession, caller, true);
+      
+      grouperContext.setLoggedInMemberId(member.getUuid());
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+
+    
+    return caller;
+
+  }
+
+  /**
+   * see if there is a grouper act as in play here
+   * @param loggedInSubject
+   * @return the subject
+   */
+  private static Subject retrieveSubjectGrouperActAsHelper(final Subject loggedInSubject) {
+    
+    //see if we are acting as someone else
+    String grouperActAsGroup = GrouperWsConfig.retrieveConfig().propertyValueString("ws.grouper.act.as.group");
+    if (StringUtils.isBlank(grouperActAsGroup)
+        || loggedInSubject == null) {
+      LOG.debug("No grouperActAs configured");
+      return loggedInSubject;
+    }
+
+    GrouperSession session = null;
+    
+    HttpServletRequest httpServletRequest = retrieveHttpServletRequest();
+
+    String grouperActAsSubjectId = httpServletRequest.getHeader("X-Grouper-actAsSubjectId");
+    String grouperActAsSubjectIdentifier = httpServletRequest.getHeader("X-Grouper-actAsSubjectIdentifier");
+    String grouperActAsSubjectSource = httpServletRequest.getHeader("X-Grouper-actAsSourceId");
+
+    if (!StringUtils.isBlank(grouperActAsSubjectSource)) {
+
+      if (!StringUtils.isBlank(grouperActAsSubjectId) 
+          && !StringUtils.isBlank(grouperActAsSubjectIdentifier)) {
+        throw new RuntimeException("You can only have one of X-Grouper-actAsSubjectId or X-Grouper-actAsSubjectIdentifier set!");
+      }
+
+      if (StringUtils.isBlank(grouperActAsSubjectId) 
+          && StringUtils.isBlank(grouperActAsSubjectIdentifier)) {
+        throw new RuntimeException("You must have one of X-Grouper-actAsSubjectId or X-Grouper-actAsSubjectIdentifier set if X-Grouper-actAsSourceId is set!");
+      }
+
+      try {
+        grouperActAsSubjectSource = new String(new Base64().decode(grouperActAsSubjectSource.getBytes("UTF-8")), "UTF-8");
+  
+        if (!StringUtils.isBlank(grouperActAsSubjectId)) {
+          grouperActAsSubjectId = new String(new Base64().decode(grouperActAsSubjectId.getBytes("UTF-8")), "UTF-8");
+        } else if (!StringUtils.isBlank(grouperActAsSubjectIdentifier)) {
+          grouperActAsSubjectIdentifier = new String(new Base64().decode(grouperActAsSubjectIdentifier.getBytes("UTF-8")), "UTF-8");
+        }
+      } catch (Exception e) {
+        throw new RuntimeException("Problem with: source: '" + grouperActAsSubjectSource + "', id: '" 
+            + grouperActAsSubjectId + "', or identifier: '" + grouperActAsSubjectIdentifier + "'", e);
+      }
+    } else {
+      if (!StringUtils.isBlank(grouperActAsSubjectId) 
+          || !StringUtils.isBlank(grouperActAsSubjectIdentifier)) {
+        throw new RuntimeException("If X-Grouper-actAsSubjectId or X-Grouper-actAsSubjectIdentifier is set, then you must have a X-Grouper-actAsSourceId!");
+      }
+      //there is nothing there, go back
+      return loggedInSubject;
+    }
+    
+    // get the all powerful user
+    Subject rootSubject = SubjectFinder.findRootSubject();
+
+    try {
+      session = GrouperSession.start(rootSubject);
+
+      Subject actAsSubject = null;
+
+      if (!StringUtils.isBlank(grouperActAsSubjectId)) {
+        actAsSubject = SubjectFinder.findByIdAndSource(grouperActAsSubjectId, grouperActAsSubjectSource, true);
+      } else if (!StringUtils.isBlank(grouperActAsSubjectIdentifier)) {
+        actAsSubject = SubjectFinder.findByIdentifierAndSource(grouperActAsSubjectIdentifier, grouperActAsSubjectSource, true);
+      } else {
+        throw new RuntimeException("Why am I here?");
+      }
+
+      final Subject ACT_AS_SUBJECT = actAsSubject;
+      
+      //cache key to get or set if a user can act as another
+      final MultiKey cacheKey = new MultiKey(loggedInSubject.getId(), loggedInSubject.getSource()
+          .getId(), actAsSubject.getId(), actAsSubject.getSource().getId());
+
+      Boolean inCache = null;
+      
+      if (actAsCacheMinutes() > 0) {
+        inCache = grouperActAsCache().get(cacheKey);
+      } else {
+        inCache = false;
+      }
+
+      if (inCache != null && Boolean.TRUE.equals(inCache)) {
+        LOG.debug("grouperActAs retrieved from cache");
+        //if in cache and true, then allow
+        return actAsSubject;
+      }
+      
+      {
+        //see if root or wheel group
+        Subject rootAllowedSubject = (Subject)GrouperSession.callbackGrouperSession(session, new GrouperSessionHandler() {
+
+          public Object callback(GrouperSession grouperSession) throws GrouperSessionException {
+            if (PrivilegeHelper.isWheelOrRoot(loggedInSubject)) {
+              actAsCache().put(cacheKey, Boolean.TRUE);
+              if (LOG.isDebugEnabled()) {
+                LOG.debug("grouperActAs allowed since logged in user is wheel or root: " + GrouperUtil.subjectToString(loggedInSubject));
+              }
+              return ACT_AS_SUBJECT;
+            }
+            return null;
+          }
+        });
+  
+        if (rootAllowedSubject != null) {
+          return rootAllowedSubject;
+        }
+      }
+      
+      //first separate by comma
+      String[] groupEntries = GrouperUtil.splitTrim(grouperActAsGroup, ",");
+
+      //see if all throw exceptions
+      int countNoExceptions = 0;
+
+      //we could also cache which entries the user is in...  not sure how many entries will be here
+      for (String groupEntry : groupEntries) {
+
+        //each entry should be failsafe
+        try {
+          //now see if it is a multi input
+          if (StringUtils.contains(groupEntry, GrouperWsConfig.WS_SEPARATOR)) {
+
+            //it is the group the user is in, and the group the act as has to be in
+            String[] groupEntryArray = GrouperUtil.splitTrim(groupEntry,
+                GrouperWsConfig.WS_SEPARATOR);
+            String userMustBeInGroupName = groupEntryArray[0];
+            String actAsMustBeInGroupName = groupEntryArray[1];
+
+            Group userMustBeInGroup = GroupFinder.findByName(session,
+                userMustBeInGroupName, true);
+            Group actAsMustBeInGroup = GroupFinder.findByName(session,
+                actAsMustBeInGroupName, true);
+
+            if (userMustBeInGroup.hasMember(loggedInSubject)
+                && actAsMustBeInGroup.hasMember(actAsSubject)) {
+              if (LOG.isDebugEnabled()) {
+                LOG.debug("grouperActAs allowed since logged in user is in group: " + userMustBeInGroupName + ", and act as user is in group: " + actAsMustBeInGroupName);
+              }
+              //its ok, lets add to cache
+              actAsCache().put(cacheKey, Boolean.TRUE);
+              return actAsSubject;
+            }
+
+          } else {
+            //else this is a straightforward rule where the logged in user just has to be in a group and
+            //can act as anyone
+            Group actAsGroup = GroupFinder.findByName(session, grouperActAsGroup, true);
+
+            // if the logged in user is a member of the actAs group, then allow
+            // the actAs
+            if (actAsGroup.hasMember(loggedInSubject)) {
+              if (LOG.isDebugEnabled()) {
+                LOG.debug("grouperActAs allowed since logged in user is in group: " + grouperActAsGroup);
+              }
+              //its ok, lets add to cache
+              actAsCache().put(cacheKey, Boolean.TRUE);
+              // this is the subject the web service wants to use
+              return actAsSubject;
+            }
+          }
+          countNoExceptions++;
+        } catch (Exception e) {
+          //just log and dont act since other entries could be fine
+          LOG.error("Problem with groupEntry: " + groupEntry + ", loggedInUser: "
+              + loggedInSubject + ", actAsSubject: " + actAsSubject, e);
+        }
+
+      }
+
+      if (countNoExceptions == 0) {
+        throw new RuntimeException("Problems seeing if web service user '"
+            + loggedInSubject + "' can actAs the other subject: '" + actAsSubject + "'");
+      }
+      // if not an effective member
+      throw new RuntimeException(
+          "A web service is specifying an actAsUser, but the groups specified in "
+              + GrouperWsConfig.WS_ACT_AS_GROUP + " in the grouper-ws.properties "
+              + " does not have a valid rule for member: '" + loggedInSubject
+              + "', and actAs: '" + actAsSubject + "'");
+    } catch (SessionException se) {
+      throw new RuntimeException(se);
+    } finally {
+      GrouperSession.stopQuietly(session);
+    }
+    
+  }
+  
+  /** cache the grouper actAs */
+  private static GrouperCache<MultiKey, Boolean> grouperActAsCache = null;
+
+  /**
+   * get the grouperActAsCache, and init if not initted
+   * @return the grouperActAsCache
+   */
+  private static GrouperCache<MultiKey, Boolean> grouperActAsCache() {
+    if (grouperActAsCache == null) {
+      int actAsTimeoutMinutes = actAsCacheMinutes();
+
+      synchronized(GrouperServiceJ2ee.class) {
+        if (grouperActAsCache == null) {
+          grouperActAsCache = new GrouperCache<MultiKey, Boolean>(GrouperServiceJ2ee.class.getName() + "grouperGrouperWsActAsCache", 10000, false, 60*60*24, actAsTimeoutMinutes*60, false);
+        }
+      }
+    }
+    return grouperActAsCache;
+  }
+
+  /**
+   * @return act as cache minutes
+   */
+  private static int actAsCacheMinutes() {
+    return GrouperWsSubjectUtils.actAsCacheMinutes();
+  }
+
+  /**
+   * the actAs cache now lives in core with the rest of the actAs logic.  note that the
+   * X-Grouper-actAs path below reads grouperActAsCache() but writes this one, which is how it
+   * was before this moved; left alone rather than changed as part of a relocation
+   * @return the actAs cache
+   */
+  private static GrouperCache<MultiKey, Boolean> actAsCache() {
+    return GrouperWsSubjectUtils.actAsCache();
+  }
+
+  /**
+   * retrieve the subject to act as
+   * 
+   * @param actAsLookup that the caller wants to act as
+   * @return the subject
+   * @throws WsInvalidQueryException if there is a problem
+   */
+  public static Subject retrieveSubjectActAs(WsSubjectLookup actAsLookup)
+      throws WsInvalidQueryException {
+    return GrouperWsSubjectUtils.retrieveSubjectActAs(actAsLookup);
+  }
+
+
+  /**
+   * 
+   */
+  private static final long serialVersionUID = 1L;
+
+  /**
+   * thread local for servlet
+   */
+  private static ThreadLocal<HttpServlet> threadLocalServlet = new ThreadLocal<HttpServlet>();
+
+  /**
+   * thread local for request
+   */
+  private static ThreadLocal<HttpServletRequest> threadLocalRequest = new ThreadLocal<HttpServletRequest>();
+
+  /**
+   * thread local for response
+   */
+  private static ThreadLocal<HttpServletResponse> threadLocalResponse = new ThreadLocal<HttpServletResponse>();
+
+  /**
+   * public method to get the http servlet request
+   * 
+   * @return the http servlet request
+   */
+  public static HttpServletRequest retrieveHttpServletRequest() {
+    return threadLocalRequest.get();
+  }
+
+  /**
+   * public method to get the http servlet
+   * 
+   * @return the http servlet
+   */
+  public static HttpServlet retrieveHttpServlet() {
+    return threadLocalServlet.get();
+  }
+
+  /**
+   * is this a wssec servlet?  must have servlet init param
+   * @return true if wssec
+   */
+  public static boolean wssecServlet() {
+    String wssecValue = retrieveHttpServlet().getServletConfig()
+        .getInitParameter("wssec");
+    return GrouperUtil.booleanValue(wssecValue, false);
+  }
+
+  /**
+   * public method to get the http servlet
+   * 
+   * @param httpServlet is servlet to assign
+   */
+  public static void assignHttpServlet(HttpServlet httpServlet) {
+    threadLocalServlet.set(httpServlet);
+  }
+
+  /**
+   * public method to get the http servlet request
+   * 
+   * @return the http servlet request
+   */
+  public static HttpServletResponse retrieveHttpServletResponse() {
+    return threadLocalResponse.get();
+  }
+
+  /**
+   * filter method
+   */
+  public void destroy() {
+    InstrumentationThread.shutdownThread();
+  }
+
+  /**
+   * 
+   * @return the debug map
+   */
+  public static Map<String, Object> retrieveDebugMap() {
+    return GrouperWsRequestContext.retrieveDebugMap();
+  }
+
+  /**
+   * request attribute the tomcat access log valve reads with %{grouperRemoteUser}r (the container
+   * pattern uses it since %u is not set for bearer token or grouper db basic auth).  the UI sets it
+   * in GrouperUiFilter, this sets it for WS and MCP
+   */
+  public static final String GROUPER_REMOTE_USER_ATTRIBUTE = "grouperRemoteUser";
+
+  /**
+   * assign the remote user request attribute for the tomcat access log if it is not already set.
+   * the access log valve runs after the filter chain returns, so this is called at the end of the
+   * request once WS or MCP has authenticated the caller.  uses the REMOTE_USER request attribute
+   * (set for JWT, OIDC, OAuth, basic auth, etc), then the container remote user or principal
+   * @param httpServletRequest request
+   */
+  public static void assignRemoteUserForAccessLog(HttpServletRequest httpServletRequest) {
+    // never let access log bookkeeping break a request
+    try {
+      if (httpServletRequest == null
+          || httpServletRequest.getAttribute(GROUPER_REMOTE_USER_ATTRIBUTE) != null) {
+        return;
+      }
+      String remoteUser = (String)httpServletRequest.getAttribute("REMOTE_USER");
+      // token auth (JWT, OIDC, OAuth) sets sourceId::::subjectId, just log the subjectId so it reads like the UI
+      if (StringUtils.contains(remoteUser, "::::")) {
+        remoteUser = GrouperUtil.prefixOrSuffix(remoteUser, "::::", false);
+      }
+      if (StringUtils.isBlank(remoteUser)) {
+        remoteUser = httpServletRequest.getRemoteUser();
+      }
+      if (StringUtils.isBlank(remoteUser) && httpServletRequest.getUserPrincipal() != null) {
+        remoteUser = httpServletRequest.getUserPrincipal().getName();
+      }
+      if (!StringUtils.isBlank(remoteUser)) {
+        httpServletRequest.setAttribute(GROUPER_REMOTE_USER_ATTRIBUTE, StringUtils.trim(remoteUser));
+      }
+    } catch (RuntimeException re) {
+      LOG.debug("error assigning remote user for access log", re);
+    }
+  }
+
+  /**
+   * time format in logs
+   */
+  private static SimpleDateFormat timeFormat = new SimpleDateFormat("HH:mm:ss.SSS");
+  
+  @Override
+  public void doFilter(ServletRequest request, ServletResponse response,
+      FilterChain filterChain) throws IOException, ServletException {
+
+    Map<String, Object> debugMap = new LinkedHashMap<String, Object>();
+    Long start = System.nanoTime();
+    HttpServletRequest httpServletRequest = (HttpServletRequest) request;
+    
+    String xRequestId = httpServletRequest.getHeader("X-Request-Id");
+    if (!StringUtils.isBlank(xRequestId)) {
+      GrouperLoggerState grouperLoggerState = GrouperLogger.retrieveGrouperLoggerState(true);
+      grouperLoggerState.setRequestId(xRequestId);
+    }
+
+    String xCorrelationId = httpServletRequest.getHeader("X-Correlation-Id");
+    if (!StringUtils.isBlank(xCorrelationId)) {
+      GrouperLoggerState grouperLoggerState = GrouperLogger.retrieveGrouperLoggerState(true);
+      grouperLoggerState.setCorrelationId(xCorrelationId);
+    }
+    try {
+
+      request.setCharacterEncoding("UTF-8");
+      response.setCharacterEncoding("UTF-8");
+
+      // MCP endpoints handle their own authentication (OAuth JWT and/or normal WS auth)
+      // but need the thread local request so GrouperServiceLogic can read REMOTE_USER
+      String requestUri = httpServletRequest.getRequestURI();
+      String contextPath = httpServletRequest.getContextPath();
+      String pathInContext = requestUri.substring(contextPath.length());
+      if (pathInContext.startsWith("/mcp") || pathInContext.startsWith("/.well-known/")) {
+        threadLocalRequest.set((HttpServletRequest) request);
+        GrouperWsRequestContext.assignDebugMap(debugMap);
+        GrouperWsRequestContext.assignRequestStartMillis(System.currentTimeMillis());
+        GrouperWsRequestContext.assignRemoteAddr(request.getRemoteAddr());
+        GrouperWsRequestContext.assignSubjectResolverForRequest(WS_SUBJECT_RESOLVER);
+        GrouperContext.createNewDefaultContext(GrouperEngineBuiltin.MCP, false, false);
+        try {
+          filterChain.doFilter(request, response);
+        } finally {
+          // MCP servlet sets REMOTE_USER when it authenticates, copy for the access log
+          assignRemoteUserForAccessLog((HttpServletRequest) request);
+          threadLocalRequest.remove();
+          GrouperWsRequestContext.clearThreadLocals();
+        }
+        return;
+      }
+
+      //make sure nulls are not returned for params for Axis bug where
+      //empty strings work, but nulls make things off a bit
+      request = new WsHttpServletRequest((HttpServletRequest) request);
+
+      String authHeader = ((HttpServletRequest) request).getHeader("Authorization");
+      if (StringUtils.isNotBlank(authHeader) && authHeader.startsWith("Bearer jwtTrusted_")) {
+        Subject subject = new GrouperTrustedJwt().assignBearerTokenHeader(authHeader).decode();
+        if (subject != null) {
+          ((HttpServletRequest) request).setAttribute("REMOTE_USER", subject.getSourceId()+"::::"+subject.getId());
+        } else {
+          ((HttpServletResponse) response).sendError(401, "Unauthorized");          
+          return;
+        }
+      } else if (StringUtils.isNotBlank(authHeader) && (authHeader.startsWith("Bearer oidc_") || authHeader.startsWith("Bearer oidcWithRedirectUri_"))) {
+        
+        Subject subject = new GrouperOidc().assignBearerTokenHeader(authHeader)
+            .assignWs(true)
+            .decode();
+        if (subject != null) {
+          ((HttpServletRequest) request).setAttribute("REMOTE_USER", subject.getSourceId()+"::::"+subject.getId());
+        } else {
+          ((HttpServletResponse) response).sendError(401, "Unauthorized");          
+          return;
+        }
+        
+      } else if (StringUtils.isNotBlank(authHeader) && authHeader.startsWith("Bearer jwtUser_")) {
+
+        Subject subject = new GrouperPublicPrivateKeyJwt().assignBearerTokenHeader(authHeader).decode(request.getRemoteAddr());
+
+        if (subject != null) {
+          ((HttpServletRequest) request).setAttribute("REMOTE_USER", subject.getSourceId()+"::::"+subject.getId());
+        } else {
+          ((HttpServletResponse) response).sendError(401, "Unauthorized");
+          return;
+        }
+
+      } else {
+        
+        boolean runGrouperWsWithBasicAuth = GrouperHibernateConfig.retrieveConfig().propertyValueBoolean("grouper.is.ws.basicAuthn", false);
+        if (runGrouperWsWithBasicAuth) {
+          // String authHeader = ((HttpServletRequest) request).getHeader("Authorization");
+          
+          boolean isValid = new Authentication().authenticate(authHeader, GrouperPassword.Application.WS, request.getRemoteAddr());
+          
+          if (!isValid) {
+            ((HttpServletResponse) response).setHeader("WWW-Authenticate", "Basic realm=\"" + "Protected" + "\"");
+            ((HttpServletResponse) response).sendError(401, "Unauthorized");          
+            return;
+          } else {
+            String userName = Authentication.retrieveUsername(authHeader);
+            ((HttpServletRequest) request).setAttribute("REMOTE_USER", userName);
+          }
+          
+        } else {
+          // also return 401 if authentication fails and using custom authentication, not sure about the rampart case
+          String authenticationClassName = GrouperWsConfig.retrieveConfig().propertyValueString(GrouperWsConfig.WS_SECURITY_NON_RAMPART_AUTHENTICATION_CLASS, null);
+          boolean checkAuthentication = GrouperWsConfig.retrieveConfig().propertyValueBoolean("ws.security.non-rampart.error.401.authentication.error", true);
+          
+          if (!StringUtils.isEmpty(authenticationClassName) && checkAuthentication) {
+            Class<? extends WsCustomAuthentication> theClass = GrouperUtil.forName(authenticationClassName);
+
+            WsCustomAuthentication wsAuthentication = GrouperUtil.newInstance(theClass);
+
+            String userIdLoggedIn = wsAuthentication.retrieveLoggedInSubjectId((HttpServletRequest) request);
+            if (StringUtils.isBlank(userIdLoggedIn)) {
+              ((HttpServletResponse) response).setHeader("WWW-Authenticate", "Basic realm=\"" + "Protected" + "\"");
+              ((HttpServletResponse) response).sendError(401, "Unauthorized");
+              return;
+            }
+            // custom auth does not set REMOTE_USER (and should not, that changes who is logged in), so log it directly
+            request.setAttribute(GROUPER_REMOTE_USER_ATTRIBUTE, userIdLoggedIn);
+          }
+        }
+        
+      }
+      
+      request.setAttribute("debugMap", debugMap);
+
+      ThreadContext.clearStack();
+
+      //servlet will set this...
+      threadLocalServlet.remove();
+      threadLocalRequest.set((HttpServletRequest) request);
+
+      GrouperWsRequestContext.assignDebugMap(debugMap);
+
+      threadLocalResponse.set((HttpServletResponse) response);
+      GrouperWsRequestContext.assignRequestStartMillis(System.currentTimeMillis());
+      
+      GrouperContextTypeBuiltIn.setDefaultContext(GrouperContextTypeBuiltIn.GROUPER_WS);
+  
+      //lets add the request, session, and response
+      HooksContext.setAttributeThreadLocal(HooksContext.KEY_HTTP_SERVLET_REQUEST, request, false);
+      HooksContext.setAttributeThreadLocal(HooksContext.KEY_HTTP_SESSION, 
+          ((HttpServletRequest)request).getSession(), false);
+      HooksContext.setAttributeThreadLocal(HooksContext.KEY_HTTP_SERVLET_RESPONSE, response, false);
+  
+      GrouperContext grouperContext = GrouperContext.createNewDefaultContext(
+          GrouperEngineBuiltin.WS, false, false);
+      
+      String xForwardedFor = ((HttpServletRequest)request).getHeader("X-Forwarded-For");
+      String remoteAddr = StringUtils.defaultIfBlank(xForwardedFor, request.getRemoteAddr());
+      grouperContext.setCallerIpAddress(remoteAddr);
+      GrouperWsRequestContext.assignRemoteAddr(request.getRemoteAddr());
+      GrouperWsRequestContext.assignSubjectResolverForRequest(WS_SUBJECT_RESOLVER);
+      
+      //get the proxy IP address
+      debugMap.put("start", timeFormat.format(new Date()));
+      debugMap.put("remoteAddr", remoteAddr);
+      debugMap.put("requestUrl", ((HttpServletRequest)request).getRequestURL());
+      
+      filterChain.doFilter(request, response);
+
+    } catch (ServletException se) {
+      handleException(se);
+      throw se;
+    } catch (IOException ioe) {
+      handleException(ioe);
+      throw ioe;
+    } catch (RuntimeException re) {
+      LOG.info("error in request", re);
+      debugMap.put("exception", ExceptionUtils.getStackTrace(re));
+      handleException(re);
+      throw re;
+    } finally {
+
+      // so the tomcat access log can log who called (JWT, OIDC, basic, container auth)
+      assignRemoteUserForAccessLog((HttpServletRequest) request);
+
+      GrouperWsLog.wsLog(debugMap, start);
+      GrouperWsLongRunningLog.wsLog(debugMap, start);
+      
+      GrouperLogger.clearGrouperLoggerState();
+
+      threadLocalRequest.remove();
+      threadLocalResponse.remove();
+      threadLocalServlet.remove();
+      GrouperWsRequestContext.clearThreadLocals();
+
+      HooksContext.clearThreadLocal();
+      ServletRequestUtils.requestEnd();
+
+    }
+
+  }
+
+  /**
+   * 
+   * @param se
+   * @throws ServletException
+   */
+  private void handleException(IOException se) throws IOException {
+    try {
+      handleExceptionHelper(se);
+    } catch (Throwable t) {
+      throw (IOException) se;
+    }
+  }
+
+
+  
+  /**
+   * 
+   * @param se
+   * @throws ServletException
+   */
+  private void handleException(ServletException se) throws ServletException {
+    try {
+      handleExceptionHelper(se);
+    } catch (Throwable t) {
+      throw (ServletException) se;
+    }
+  }
+
+  /**
+   * 
+   * @param se
+   * @throws ServletException
+   */
+  private void handleException(RuntimeException se) throws ServletException {
+    try {
+      handleExceptionHelper(se);
+    } catch (Throwable t) {
+      throw (RuntimeException) se;
+    }
+  }
+
+  /**
+   * dont throw simple exception if configured not to throw detailed exception
+   * this method will throw the exception
+   * @param se
+   */
+  private void handleExceptionHelper(Throwable se) throws Throwable {
+
+    LOG.error("Error processing request", se);
+    if (GrouperWsConfig.retrieveConfig().propertyValueBoolean("ws.throwExceptionsToClient", true)) {
+      throw new RuntimeException("Error processing request, check logs", se);
+    }
+  }
+
+  /**
+   * filter method
+   */
+  public void init(FilterConfig arg0) throws ServletException {
+
+    //tell core how this war works out who is logged in.  this is only the fallback: every request
+    //through doFilter assigns the same resolver for itself, so a UI request in the same webapp
+    //cannot end up using this one or change it for the web service
+    GrouperWsRequestContext.assignSubjectResolver(WS_SUBJECT_RESOLVER);
+
+    GrouperContext.createNewDefaultContext(GrouperEngineBuiltin.WS, false, false);
+
+    GrouperStartup.startup();
+    GrouperStartup.waitForGrouperStartup();
+
+    InstrumentationThread.startThread(GrouperEngineBuiltin.WS, null);
+    
+    
+    initOnce();
+  }
+
+  /**
+   * mark group as cacheable
+   * should we auto-create?
+   * @param name
+   */
+  private static void initGroup(final String name) {
+    if (StringUtils.isBlank(name)) {
+      return;
+    }
+    
+    GrouperSession.internal_callbackRootGrouperSession(new GrouperSessionHandler() {
+      
+      public Object callback(GrouperSession grouperSession) throws GrouperSessionException {
+        
+        Group group = GroupFinder.findByName(grouperSession, name, false);
+        if (group != null) {
+          
+          GroupFinder.groupCacheAsRootAddSystemGroup(group);
+          
+        }
+        
+        return null;
+      }
+    });
+  }
+
+  /**
+   * if initted
+   */
+  private static boolean inittedOnce = false;
+
+  /**
+   * 
+   */
+  private static void initOnce() {
+    
+    if (!inittedOnce) {
+      synchronized (GrouperServiceJ2ee.class) {
+        if (!inittedOnce) {
+
+          //  # Web service users who are in the following group can use the actAs field to act as someone else
+          //  # You can put multiple groups separated by commas.  e.g. a:b:c, e:f:g
+          //  # You can put a single entry as the group the calling user has to be in, and the grouper the actAs has to be in
+          //  # separated by 4 colons
+          //  # e.g. if the configured values is:       a:b:c, e:f:d :::: r:e:w, x:e:w
+          //  # then if the calling user is in a:b:c or x:e:w, then the actAs can be anyone
+          //  # if not, then if the calling user is in e:f:d, then the actAs must be in r:e:w.  If multiple rules, then 
+          //  # if one passes, then it is a success, if they all fail, then fail.
+          //  ws.act.as.group = etc:webServiceActAsGroup
+          //
+          //  # similar syntax as ws.act.as.group but for the grouper actas (e.g. for grouper messaging to WS bridge)
+          //  ws.grouper.act.as.group = 
+          
+          String debugGroupConfig = GrouperWsConfig.retrieveConfig().propertyValueString("browser.debug.group");
+          String grouperDebugGroupConfig = GrouperWsConfig.retrieveConfig().propertyValueString("ws.grouper.act.as.group");
+          
+          for (String config : new String[]{debugGroupConfig, grouperDebugGroupConfig}) {
+            if (!StringUtils.isBlank(config)) {
+              for (String groupNameConfig : GrouperUtil.splitTrim(config, ",")) {
+                //now see if it is a multi input
+                if (StringUtils.contains(groupNameConfig, GrouperWsConfig.WS_SEPARATOR)) {
+  
+                  //it is the group the user is in, and the group the act as has to be in
+                  String[] groupEntryArray = GrouperUtil.splitTrim(groupNameConfig,
+                      GrouperWsConfig.WS_SEPARATOR);
+                  initGroup(groupEntryArray[0]);
+                  initGroup(groupEntryArray[1]);
+                } else {
+                  initGroup(groupNameConfig);
+                }
+              }
+            }
+          }
+          
+          //  # If there is an entry here for group name, then all web service client users must be in this group (before the actAs)
+          //  #ws.client.user.group.name = etc:webServiceClientUsers
+          initGroup(GrouperWsConfig.retrieveConfig().propertyValueString("ws.client.user.group.name"));
+          
+          inittedOnce = true;
+        }
+      }
+    }
+  }
+}

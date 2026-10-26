@@ -1,0 +1,205 @@
+<%@ include file="../assetsJsp/commonTaglib.jsp"%>
+
+                    <!-- start group/groupMoreActionsButtonContents.jsp -->
+
+                    <c:if test="${grouperRequestContainer.groupContainer.canUpdate && grouperRequestContainer.groupContainer.showAddMember}">
+
+                      <button type="button" id="show-add-block" onclick="showHideMemberAddBlock()" 
+                      	class="btn btn-medium btn-primary btn-block">
+                      		<i aria-hidden="true" class="fa fa-plus"></i> ${textContainer.text['groupViewMoreActionsAddMembers'] }
+                      </button>
+
+                    </c:if>
+                    <div class="btn-group btn-block">
+
+                    <%-- a11y GRP-7301 (accessibility item 16): this trigger id was the shared
+                         literal "more-action-button", reused by every *MoreActionsButtonContents.jsp.
+                         This group menu is included from groupHeader.jsp, so on every group
+                         SUB-screen (rules, loader, attestation, object types, workflow, report,
+                         deprovisioning, provisioning membership) it co-rendered with that
+                         sub-screen's own "more-action-button" - a live duplicate id. Each menu
+                         trigger now takes a unique id mirroring its already-unique <ul>, and
+                         aria-controls names that <ul>. Keep role="button" (this is an <a>, not a
+                         native button). The five *Browser* tests were retargeted to this id. --%>
+                      <button type="button" data-toggle="dropdown" aria-label="${textContainer.text['ariaLabelGuiMoreGroupActions']}" id="group-more-action-button" aria-controls="group-more-options" class="btn btn-medium btn-block dropdown-toggle"
+                      	aria-haspopup="true" aria-expanded="false" onclick="$('#group-more-options').is(':visible') === true ? $(this).attr('aria-expanded','false') : $(this).attr('aria-expanded',function(index, currentValue) { $('#group-more-options li').first().focus();return true;});">
+                      		${textContainer.text['groupViewMoreActionsButton'] } <span class="caret"></span></button>
+  
+                      <ul class="dropdown-menu dropdown-menu-right" id="group-more-options">
+                        <li class="dropdown-item disabled grouper-menu-subheader">${textContainer.text['groupViewMoreActionsQuickLinks'] }</li>
+                        <%-- add or remove to/from my favorites, this causes a success message --%>
+                        <c:if test="${!grouperRequestContainer.groupContainer.favorite}">
+                            <li><button type="button" class="grouper-menuitem" 
+                            onclick="ajax('../app/UiV2Group.addToMyFavorites?groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;" 
+                            >${textContainer.text['groupViewMoreActionsAddToMyFavorites']}</button></li>
+                        </c:if>
+                        <c:if test="${grouperRequestContainer.groupContainer.hasCustomUi }">
+                          <li><a href="?operation=UiV2CustomUi.customUiGroup&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2CustomUi.customUiGroup&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                              >${textContainer.text['groupViewCustomUiButton'] }</a></li>                    
+                        </c:if>
+
+                        <c:if test="${grouperRequestContainer.groupContainer.directMember && grouperRequestContainer.groupContainer.canOptout }">
+                          <li><button type="button" class="grouper-menuitem" onclick="ajax('../app/UiV2Group.leaveGroup?groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;" >${textContainer.text['groupViewLeaveGroupButton']}</button></li>
+                        </c:if>
+                        <c:if test="${!grouperRequestContainer.groupContainer.directMember && grouperRequestContainer.groupContainer.canJoin }">
+                          <li><button type="button" class="grouper-menuitem" onclick="ajax('../app/UiV2Group.joinGroup?groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;">${textContainer.text['groupViewJoinGroupButton']}</button></li>
+                        </c:if>
+
+                        <c:if test="${grouperRequestContainer.groupContainer.favorite}">
+                          <li><button type="button" class="grouper-menuitem" 
+                          onclick="ajax('../app/UiV2Group.removeFromMyFavorites?groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;" 
+                          >${textContainer.text['groupViewMoreActionsRemoveFromMyFavorites'] }</button></li>
+                        </c:if>
+
+                        <li><a href="javascript:void(0)" onclick="return guiV2link('operation=UiV2Visualization.groupView&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                          >${textContainer.text['visualization.title'] }</a></li>
+
+                        <c:if test="${ (grouperRequestContainer.groupContainer.canAdmin) || (grouperRequestContainer.groupStemTemplateContainer.templatesToShowInMoreActions.size() > 0 || grouperRequestContainer.groupStemTemplateContainer.customGshTemplates.size() > 0)}">
+
+                          <li class="dropdown-item disabled grouper-menu-subheader">${textContainer.text['groupViewMoreActionsTemplates']}</li>
+
+                          <li><a id="groupMoreActionsRunTemplateButton" href="?operation=UiV2Template.newTemplate&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Template.newTemplate&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                              >${textContainer.text['createNewTemplateMenuButton'] }</a></li>
+                              
+                          <c:forEach items="${grouperRequestContainer.groupStemTemplateContainer.templatesToShowInMoreActions}" var="gshTemplate">
+                            <li><a href="?operation=UiV2Template.newTemplate&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}&templateType=${gshTemplate.key}" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Template.newTemplate&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}&templateType=${gshTemplate.key}'); return false;"
+                                >${gshTemplate.value} </a></li>
+                          </c:forEach>
+                         
+                        </c:if>
+                                                
+                        <c:if test="${grouperRequestContainer.groupContainer.canUpdate }">
+                          <li class="dropdown-item disabled grouper-menu-subheader">${textContainer.text['groupViewMoreActionsManage']}</li>
+                        </c:if>
+                        <c:if test="${grouperRequestContainer.groupContainer.canAdmin }">
+                          <li><a href="?operation=UiV2Group.groupCopy&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Group.groupCopy&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                              >${textContainer.text['groupViewCopyGroupButton'] }</a></li>
+                        </c:if>
+                        <c:if test="${grouperRequestContainer.groupContainer.canUpdate && grouperRequestContainer.groupContainer.canRead }">
+                          <li><a href="?operation=UiV2Group.groupEditComposite&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Group.groupEditComposite&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                            >${textContainer.text['groupViewEditGroupCompositeButton'] }</a></li>
+                        </c:if>
+                        <c:if test="${grouperRequestContainer.groupContainer.canAdmin }">
+                          <li><a id="groupActionsEditGroupButton" href="?operation=UiV2Group.groupEdit&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Group.groupEdit&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                            >${textContainer.text['groupViewEditGroupButton'] }</a></li>
+                            
+                          <c:if test="${grouperRequestContainer.groupContainer.guiGroup.typeRole}">
+                            <li><a href="?operation=UiV2Role.roleEditInheritance&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Role.roleEditInheritance&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                            >${textContainer.text['roleViewEditInheritanceButton'] }</a></li>                      
+                          </c:if>  
+                        </c:if>
+                        <c:if test="${grouperRequestContainer.groupContainer.canRead}">
+                          <li><a href="?operation=UiV2GroupImport.groupExport&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2GroupImport.groupExport&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;">${textContainer.text['groupExportMenuButton'] }</a></li>
+                        </c:if>
+                        <c:if test="${!grouperRequestContainer.groupContainer.guiGroup.hasComposite && grouperRequestContainer.groupContainer.canUpdate}">
+                          <li><a href="?operation=UiV2GroupImport.groupImport&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}&backTo=group" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2GroupImport.groupImport&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}&backTo=group'); return false;">${textContainer.text['groupImportMenuButton'] }</a></li>
+                          <c:if test="${grouperRequestContainer.groupContainer.guiGroup.canInviteExternalUsers}">
+                            <li><a href="?operation=UiV2ExternalEntities.inviteExternal&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2ExternalEntities.inviteExternal&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                              >${textContainer.text['inviteExternalMenuLink']}</a></li>
+                          </c:if>
+                        </c:if>
+                        <c:if test="${grouperRequestContainer.groupContainer.canAdmin }">
+                          <li><a href="?operation=UiV2Group.groupMove&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Group.groupMove&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                              >${textContainer.text['groupViewMoveGroupButton'] }</a></li>
+                        </c:if>
+                        <c:choose>
+                          <c:when test="${grouperRequestContainer.groupContainer.canAdmin}">
+                            <li class="dropdown-item disabled grouper-menu-subheader">${textContainer.text['groupViewMoreActionsAuditing']}</li>
+                            <li><a href="?operation=UiV2Group.viewAudits&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}&auditType=group" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Group.viewAudits&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}&auditType=group'); return false;"
+                                >${textContainer.text['groupViewAuditButton'] }</a></li>
+
+                            <li><a href="?operation=UiV2Group.viewAudits&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}&auditType=actions" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Group.viewAudits&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}&auditType=actions'); return false;"
+                                >${textContainer.text['groupViewActionAuditButton'] }</a></li>
+
+                            <li><a href="?operation=UiV2Group.viewAudits&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}&auditType=membership" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Group.viewAudits&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}&auditType=membership'); return false;"
+                                >${textContainer.text['groupViewMembershipAuditButton'] }</a></li>
+
+                            <li><a href="?operation=UiV2Group.viewAudits&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}&auditType=privileges" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Group.viewAudits&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}&auditType=privileges'); return false;"
+                                >${textContainer.text['groupViewPrivilegeAuditButton'] }</a></li>
+                            <li><a href="?operation=UiV2Group.viewHistoryChart&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Group.viewHistoryChart&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                                >${textContainer.text['groupViewChartAuditButton'] }</a></li>
+                          </c:when>
+                          <c:when test="${grouperRequestContainer.groupContainer.canRead}">
+                            <li><a href="?operation=UiV2Group.viewHistoryChart&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Group.viewHistoryChart&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                                >${textContainer.text['groupViewChartAuditButton'] }</a></li>
+                          </c:when>
+                        </c:choose>
+                        
+                        <c:if test="${grouperRequestContainer.groupContainer.canRead
+                            || grouperRequestContainer.groupContainer.canAdmin 
+                            || grouperRequestContainer.groupContainer.canReadAttributes
+                            || grouperRequestContainer.deprovisioningContainer.canReadDeprovisioning
+                            || (grouperRequestContainer.groupContainer.canView && grouperRequestContainer.workflowContainer.canViewElectronicForm)
+                            || grouperRequestContainer.grouperLoaderContainer.canSeeLoader
+                            || grouperRequestContainer.provisioningContainer.canReadProvisioningForGroup
+                            || grouperRequestContainer.objectTypeContainer.canReadObjectType
+                            || grouperRequestContainer.grouperReportContainer.reportingEnabled
+                            }">
+                          <li class="dropdown-item disabled grouper-menu-subheader">${textContainer.text['groupViewMoreActionsAdministration']}</li>
+                        </c:if>
+                        <c:if test="${grouperRequestContainer.groupContainer.canRead}">
+                          <li><a href="javascript:void(0)" onclick="return guiV2link('operation=UiV2Attestation.groupAttestation&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                              >${textContainer.text['attestationButton'] }</a></li>
+                        </c:if>
+                        <c:if test="${grouperRequestContainer.groupContainer.canReadAttributes}">
+                          <li><a href="javascript:void(0)" onclick="return guiV2link('operation=UiV2GroupAttributeAssignment.viewAttributeAssignments&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                              >${textContainer.text['groupAttributeAssignmentsButton'] }</a></li>
+                          <li><a href="javascript:void(0)" onclick="return guiV2link('operation=UiV2GroupAttributeAssignment.viewMembershipAttributeAssignments&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                              >${textContainer.text['groupAttributeMembershipAssignmentsButton'] }</a></li>
+                        </c:if>
+                        
+                        <c:if test="${grouperRequestContainer.deprovisioningContainer.canReadDeprovisioning}">
+                          <li><a href="javascript:void(0)" onclick="return guiV2link('operation=UiV2Deprovisioning.deprovisioningOnGroupReport&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                            >${textContainer.text['deprovisioningMoreActionsMenuLabel'] }</a></li>
+                        </c:if> 
+                        
+                        <c:if test="${grouperRequestContainer.groupContainer.canView && grouperRequestContainer.workflowContainer.canViewElectronicForm}">
+                          <li><a href="javascript:void(0)" onclick="return guiV2link('operation=UiV2GrouperWorkflow.viewForms&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                              >${textContainer.text['groupWorkflowElectronicForms'] }</a></li>
+                        </c:if>
+
+                        <c:if test="${grouperRequestContainer.grouperLoaderContainer.canSeeLoader}">   
+                          <li><a href="?operation=UiV2GrouperLoader.loader&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2GrouperLoader.loader&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}', {dontScrollTop: true});">${textContainer.text['grouperMenuItemLoader'] }</a></li>
+                        </c:if>
+                        <c:if test="${grouperRequestContainer.groupContainer.canReadAttributes}">
+                          <li><a href="javascript:void(0)" onclick="return guiV2link('operation=UiV2GroupPermission.groupPermission&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                              >${textContainer.text['groupViewPermissionsButton'] }</a></li>
+                        </c:if>
+                        
+                        <c:if test="${grouperRequestContainer.provisioningContainer.canReadProvisioningForGroup}">
+                          <li><a href="javascript:void(0)" id="groupMoreActionsProvisioningButtonId" onclick="return guiV2link('operation=UiV2Provisioning.viewProvisioningOnGroup&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                            >${textContainer.text['provisioningMoreActionsMenuLabel'] }</a></li>
+                        </c:if>
+                        <c:if test="${grouperRequestContainer.grouperReportContainer.reportingEnabled}">
+                          <li><a href="javascript:void(0)" onclick="return guiV2link('operation=UiV2GrouperReport.viewReportConfigsOnGroup&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                            >${textContainer.text['groupViewReportButton'] }</a></li>
+                        </c:if>
+                        
+                        <c:if test="${grouperRequestContainer.groupContainer.canRead}">
+                            <li><a href="?operation=UiV2Group.viewGroupRules&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Group.viewGroupRules&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                                >${textContainer.text['stemViewRulesButton'] }</a></li>
+                        </c:if>
+                        
+                        <c:if test="${grouperRequestContainer.objectTypeContainer.canReadObjectType}">
+                          <li><a href="javascript:void(0)" onclick="return guiV2link('operation=UiV2GrouperObjectTypes.viewObjectTypesOnGroup&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                            >${textContainer.text['objectTypeMoreActionsMenuLabel'] }</a></li>
+                          
+                        </c:if>
+
+                        <c:if test="${grouperRequestContainer.groupContainer.canAdmin || (!grouperRequestContainer.groupContainer.guiGroup.hasComposite && grouperRequestContainer.groupContainer.canUpdate) }">
+                          <br />
+                          <li class="dropdown-item disabled grouper-menu-subheader">${textContainer.text['groupViewMoreActionsDelete']}</li>
+  
+                          <c:if test="${grouperRequestContainer.groupContainer.canAdmin }">
+                            <li><a href="#" id="groupActionsGroupDeleteButton" onclick="return guiV2link('operation=UiV2Group.groupDelete&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                              >${textContainer.text['groupViewDeleteGroupButton'] }</a></li>
+                          </c:if>
+                          <c:if test="${!grouperRequestContainer.groupContainer.guiGroup.hasComposite && grouperRequestContainer.groupContainer.canUpdate}">
+                            <li><a href="?operation=UiV2Group.groupRemoveAllMembers&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}" onclick="return handleGuiV2LinkClick(event, 'operation=UiV2Group.groupRemoveAllMembers&groupId=${grouperRequestContainer.groupContainer.guiGroup.group.id}'); return false;"
+                                >${textContainer.text['groupViewRemoveAllMembersButton'] }</a></li>
+                          </c:if>
+                        </c:if>
+                      </ul>
+                    </div>
+
+                    <!-- end group/groupMoreActionsButtonContents.jsp -->

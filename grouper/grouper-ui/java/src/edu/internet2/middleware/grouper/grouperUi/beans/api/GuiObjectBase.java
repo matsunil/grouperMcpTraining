@@ -1,0 +1,759 @@
+/*******************************************************************************
+ * Copyright 2014 Internet2
+ *  
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *  
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *  
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ ******************************************************************************/
+package edu.internet2.middleware.grouper.grouperUi.beans.api;
+
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.logging.Log;
+
+import edu.internet2.middleware.grouper.Group;
+import edu.internet2.middleware.grouper.GrouperSession;
+import edu.internet2.middleware.grouper.Stem;
+import edu.internet2.middleware.grouper.StemFinder;
+import edu.internet2.middleware.grouper.app.grouperTypes.GrouperObjectTypesAttributeValue;
+import edu.internet2.middleware.grouper.app.grouperTypes.GrouperObjectTypesConfiguration;
+import edu.internet2.middleware.grouper.attr.AttributeDef;
+import edu.internet2.middleware.grouper.attr.AttributeDefName;
+import edu.internet2.middleware.grouper.grouperUi.beans.api.objectTypes.GuiGrouperObjectTypesAttributeValue;
+import edu.internet2.middleware.grouper.grouperUi.beans.ui.GrouperRequestContainer;
+import edu.internet2.middleware.grouper.grouperUi.beans.ui.TextContainer;
+import edu.internet2.middleware.grouper.misc.GrouperDAOFactory;
+import edu.internet2.middleware.grouper.misc.GrouperObject;
+import edu.internet2.middleware.grouper.misc.GrouperObjectSubjectWrapper;
+import edu.internet2.middleware.grouper.ui.util.GrouperUiConfig;
+import edu.internet2.middleware.grouper.ui.util.GrouperUiUtils;
+import edu.internet2.middleware.grouper.util.GrouperUtil;
+import edu.internet2.middleware.subject.Subject;
+import edu.internet2.middleware.subject.SubjectNotFoundException;
+
+/**
+ * base object for gui grouper objects
+ */
+public abstract class GuiObjectBase {
+
+  /**
+   * cached parent gui stem, seeded by cacheParentStems() (bulk prefetch).  may be null (root / no parent).
+   */
+  private GuiStem cachedParentGuiStem;
+
+  /**
+   * whether the parent gui stem has been prefetched.  distinguishes "root / no parent" (cached null)
+   * from "never prefetched" (a programming error that throws in getParentGuiStem()).
+   */
+  private boolean parentGuiStemPrefetched = false;
+
+  /**
+   * if this is a subject
+   * @return if this is a subject
+   */
+  public boolean isSubjectType() {
+    return false;
+  }
+  
+  /**
+   * convert grouper objects to gui object bases
+   * @param grouperObjects
+   * @return the gui object bases
+   */
+  public static Map<GuiObjectBase, String> convertFromGrouperObjects(Set<GrouperObject> grouperObjects) {
+    Map<GuiObjectBase, String> tempObjectBases = new LinkedHashMap<GuiObjectBase, String>();
+    
+    // prime the cache
+    GrouperObjectTypesConfiguration.getGrouperObjectTypesAttributeValues(grouperObjects);
+
+    // find the stems to find
+    Map<String, Stem> stemIdToStem = new LinkedHashMap<String, Stem>();
+    Set<String> parentStemIdsTofind = new HashSet<String>();
+    for (GrouperObject grouperObject : GrouperUtil.nonNull(grouperObjects)) {
+      if (grouperObject instanceof Group) {
+        parentStemIdsTofind.add( ((Group)grouperObject).getParentUuid() );
+      } else if (grouperObject instanceof Stem) {
+        parentStemIdsTofind.add( ((Stem)grouperObject).getParentUuid() );
+      } else if (grouperObject instanceof AttributeDef) {
+        parentStemIdsTofind.add( ((AttributeDef)grouperObject).getParentUuid() );
+      } else if (grouperObject instanceof AttributeDefName) {
+        parentStemIdsTofind.add( ((AttributeDefName)grouperObject).getParentUuid() );
+      }
+    }
+    
+    Set<Stem> stems = StemFinder.findByUuids(GrouperSession.staticGrouperSession(), parentStemIdsTofind, null);
+    for (Stem stem : GrouperUtil.nonNull(stems)) {
+      stemIdToStem.put(stem.getUuid(), stem);
+    }
+    
+    for (GrouperObject grouperObject : GrouperUtil.nonNull(grouperObjects)) {
+      if (grouperObject instanceof Group) {
+        Stem parentStem = stemIdToStem.get( ((Group)grouperObject).getParentUuid() );
+        String linkWithIcon = new GuiStem(parentStem).getLinkWithIcon();
+        tempObjectBases.put(new GuiGroup((Group)grouperObject), linkWithIcon);
+      } else if (grouperObject instanceof Stem) {
+        Stem parentStem = stemIdToStem.get( ((Stem)grouperObject).getParentUuid() );
+        String linkWithIcon = new GuiStem(parentStem).getLinkWithIcon();
+        tempObjectBases.put(new GuiStem((Stem)grouperObject), linkWithIcon);
+      } else if (grouperObject instanceof AttributeDef) {
+        Stem parentStem = stemIdToStem.get( ((AttributeDef)grouperObject).getParentUuid() );
+        String linkWithIcon = new GuiStem(parentStem).getLinkWithIcon();
+        tempObjectBases.put(new GuiAttributeDef((AttributeDef)grouperObject), linkWithIcon);
+      } else if (grouperObject instanceof AttributeDefName) {
+        Stem parentStem = stemIdToStem.get( ((AttributeDefName)grouperObject).getParentUuid() );
+        String linkWithIcon = new GuiStem(parentStem).getLinkWithIcon();
+        tempObjectBases.put(new GuiAttributeDefName((AttributeDefName)grouperObject), linkWithIcon);
+      } else if (grouperObject instanceof GrouperObjectSubjectWrapper) {
+        tempObjectBases.put(new GuiSubject(((GrouperObjectSubjectWrapper)grouperObject).getSubject()), null);
+      } else {
+        throw new RuntimeException("Not expecting object of type: " 
+            + grouperObject.getClass().getSimpleName() + ", " + grouperObject.getName());
+      }
+      
+    }
+    
+    return tempObjectBases;
+
+  }
+
+  /**
+   * display short link with image next to it in li
+   * &lt;a href="#" rel="tooltip" data-html="true" data-delay-show='200' data-placement="right" title="&amp;lt;strong&amp;gt;FOLDER:&amp;lt;/strong&amp;gt;&amp;lt;br /&amp;gt;Full : Path : To : The : Entity&lt;br /&gt;&lt;br /&gt;This is the description for this entity. Lorem ipsum dolor sit amet, consectetur adipisicing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.">Editors</a>
+   * @return short link
+   */
+  public String getShortLinkWithIcon() {
+    
+    throw new RuntimeException("Not implemented");
+  }
+
+  /**
+   * get the gui object
+   * @return the object
+   */
+  public abstract GrouperObject getGrouperObject();
+  
+  /**
+   * 
+   * @see java.lang.Object#toString()
+   */
+  @Override
+  public String toString() {
+    return "" + this.getGrouperObject();
+  }
+  
+  /**
+   * colon space separated path e.g.
+   * Full : Path : To : The : Entity
+   * @return the colon space separated path
+   */
+  public String getPathColonSpaceSeparated() {
+
+    GrouperObject grouperObject = this.getGrouperObject();
+    
+    if (grouperObject == null) {
+      return null;
+    }
+    
+    if (grouperObject instanceof GrouperObjectSubjectWrapper) {
+      return TextContainer.retrieveFromRequest().getText().get("guiStemNotApplicable");
+    }
+    
+    String displayName = grouperObject.getDisplayName();
+    
+    String cantViewPrefix = TextContainer.retrieveFromRequest().getText().get("guiCantViewPrefix");
+    
+    //if we cant see the group or entity
+    if (displayName.startsWith(cantViewPrefix)) {
+      return "";
+    }
+    
+    String parentStemName = GrouperUtil.parentStemNameFromName(displayName);
+    
+    if (StringUtils.isBlank(parentStemName) || StringUtils.equals(":", parentStemName)) {
+      return TextContainer.retrieveFromRequest().getText().get("stem.root.display-name");
+    }
+    
+    return parentStemName.replace(":", " : ");
+    
+  }
+
+  /**
+   * fallback if property missing from base config; style is "Sun Feb 9 5:48:12 PM EST 2014"
+   */
+  private static String dateUiFormatString = "EE MMM d h:mm:ss aa zz yyyy";
+
+  private static SimpleDateFormat dateUiFormat = new SimpleDateFormat(dateUiFormatString);
+
+  /**
+   * default format for created/modified dates on objects, from UI config property uiV2.grouperObjects.dateFormat
+   * @return created/modified date format
+   */
+  public static SimpleDateFormat getDateUiFormat() {
+    String newFormatString = GrouperUiConfig.retrieveConfig().propertyValueString("uiV2.grouperObjects.dateFormat");
+
+    // only re-create SimpleDateFormat if the property changed
+    if (newFormatString != null && !dateUiFormatString.equals(newFormatString)) {
+      dateUiFormatString = newFormatString;
+      dateUiFormat = new SimpleDateFormat(dateUiFormatString);
+    }
+    return dateUiFormat;
+  }
+
+  /**
+   * 
+   * @param args
+   */
+  public static void main(String[] args) {
+    System.out.println(getDateUiFormat().format(new Date(System.currentTimeMillis())));
+  }
+  
+  /**
+   * who created the object
+   * @return subject or null if none registered
+   */
+  public GuiSubject getCreatorGuiSubject() {
+    Subject creator = null;
+    try {
+      if (this instanceof GuiGroup) {
+        creator = ((GuiGroup)this).getGroup().getCreateSubject();
+      } else if (this instanceof GuiStem) {
+        creator = ((GuiStem)this).getStem().getCreateSubject();
+      } else if (this instanceof GuiAttributeDef) {
+        creator = ((GuiAttributeDef)this).getAttributeDef().getCreateSubject();
+      }
+    } catch (SubjectNotFoundException snfe) {
+      LOG.info("Cant find creator of:" + this.getNameColonSpaceSeparated(), snfe );
+    }
+    return creator == null ? null : new GuiSubject(creator);
+  }
+  
+  /**
+   * 
+   * @return the parent gui stem
+   */
+  public GuiStem getParentGuiStem() {
+
+    //prefetched -> the cached value (possibly null for root) is the source of truth
+    if (this.parentGuiStemPrefetched) {
+      return this.cachedParentGuiStem;
+    }
+
+    //object types with no parent stem (e.g. subjects, and the loggedInSubject serialized into
+    //GuiSettings on every response) have no db lookup and therefore no N+1 risk; just return null
+    //rather than failing fast.
+    String parentStemId = this.internalParentStemId();
+    if (parentStemId == null) {
+      return null;
+    }
+
+    //a real object with a parent stem that was never prefetched.  Fail fast (config gated, off by
+    //default) so list screens get wired to cacheParentStems(); otherwise fall back to the (slower)
+    //per-row lookup so un-audited screens keep working.
+    if (failFastParentStemPrefetch()) {
+      throw new RuntimeException("Parent stem was not prefetched for " + this.getClass().getSimpleName()
+          + " '" + this.bestEffortNameForError() + "'. "
+          + "List screens must call GuiObjectBase.cacheParentStems(<collection>) on the "
+          + "page's gui objects before rendering parentGuiStem, to avoid an N+1 of "
+          + "parent-stem lookups. See GRP-7071.");
+    }
+
+    return this.parentGuiStemNoCache();
+  }
+
+  /**
+   * whether {@link #getParentGuiStem()} should fail fast (throw) when a parent-bearing object's parent
+   * stem was not prefetched via {@link #cacheParentStems(Collection)}.  Default false: when not
+   * prefetched, the getter falls back to the (slower) per-row lookup so behaviour is preserved until
+   * every screen is audited and wired to prefetch.
+   * @return true if fail-fast is enabled
+   */
+  private static boolean failFastParentStemPrefetch() {
+    return GrouperUiConfig.retrieveConfig().propertyValueBoolean("uiV2.parentStem.prefetch.failFast", false);
+  }
+
+  /**
+   * resolve the parent gui stem the old (per-row) way, without consulting the prefetch cache.  Used as
+   * the fallback when fail-fast is off and the object was not prefetched.
+   * @return the parent gui stem, or null if none
+   */
+  private GuiStem parentGuiStemNoCache() {
+    Stem parentStem = null;
+    if (this instanceof GuiGroup) {
+      parentStem = ((GuiGroup)this).getGroup().getParentStem();
+    } else if (this instanceof GuiStem) {
+      parentStem = ((GuiStem)this).getStem().getParentStem();
+    } else if (this instanceof GuiAttributeDef) {
+      parentStem = ((GuiAttributeDef)this).getAttributeDef().getParentStem();
+    } else if (this instanceof GuiAttributeDefName) {
+      parentStem = ((GuiAttributeDefName)this).getAttributeDefName().getAttributeDef().getParentStem();
+    }
+    return parentStem == null ? null : new GuiStem(parentStem);
+  }
+
+  /**
+   * the parent stem uuid for this gui object with NO db hit (single source of truth for prefetching).
+   * @return the parent stem uuid, or null for object types that have no parent stem
+   */
+  private String internalParentStemId() {
+    if (this instanceof GuiGroup) {
+      return ((GuiGroup)this).getGroup().getParentUuid();
+    } else if (this instanceof GuiStem) {
+      return ((GuiStem)this).getStem().getParentUuid();
+    } else if (this instanceof GuiAttributeDef) {
+      return ((GuiAttributeDef)this).getAttributeDef().getParentUuid();
+    } else if (this instanceof GuiAttributeDefName) {
+      return ((GuiAttributeDefName)this).getAttributeDefName().getAttributeDef().getParentUuid();
+    }
+    return null;
+  }
+
+  /**
+   * bulk-prefetch the parent gui stems for a collection of gui objects in ONE query, and seed the
+   * per-instance cache, so that getParentGuiStem() is a cache hit instead of a per-row db lookup
+   * (avoids an N+1 of parent-stem lookups on list screens).  Every list/render path that displays
+   * parentGuiStem MUST call this; getParentGuiStem() throws if its object was never prefetched.
+   * Objects with no parent stem (e.g. subjects, root) get a cached null and are marked prefetched.
+   * @param guiObjects the gui objects whose parent stems to prefetch
+   */
+  public static void cacheParentStems(Collection<? extends GuiObjectBase> guiObjects) {
+
+    if (GrouperUtil.length(guiObjects) == 0) {
+      return;
+    }
+
+    //collect the distinct, non-null parent stem ids (no db hit)
+    Set<String> parentStemIds = new HashSet<String>();
+    for (GuiObjectBase guiObject : guiObjects) {
+      if (guiObject == null) {
+        continue;
+      }
+      String parentStemId = guiObject.internalParentStemId();
+      if (parentStemId != null) {
+        parentStemIds.add(parentStemId);
+      }
+    }
+
+    //ONE query for all the distinct parent stems (the dao batches internally), one GuiStem per folder
+    Map<String, GuiStem> stemIdToGuiStem = new LinkedHashMap<String, GuiStem>();
+    if (parentStemIds.size() > 0) {
+      Set<Stem> parentStems = GrouperDAOFactory.getFactory().getStem().findByUuids(parentStemIds, null);
+      for (Stem parentStem : GrouperUtil.nonNull(parentStems)) {
+        stemIdToGuiStem.put(parentStem.getUuid(), new GuiStem(parentStem));
+      }
+    }
+
+    //seed each gui object's cache (shared GuiStem across siblings) and mark prefetched so it never throws
+    for (GuiObjectBase guiObject : guiObjects) {
+      if (guiObject == null) {
+        continue;
+      }
+      String parentStemId = guiObject.internalParentStemId();
+      guiObject.cachedParentGuiStem = (parentStemId == null) ? null : stemIdToGuiStem.get(parentStemId);
+      guiObject.parentGuiStemPrefetched = true;
+    }
+  }
+
+  /**
+   * best-effort name/id of this object for error messages (never throws)
+   * @return a name/id or null
+   */
+  private String bestEffortNameForError() {
+    try {
+      GrouperObject grouperObject = this.getGrouperObject();
+      if (grouperObject != null) {
+        return grouperObject.getName();
+      }
+    } catch (RuntimeException e) {
+      //best effort only
+    }
+    return null;
+  }
+  
+
+  /**
+   * who lsat updated the object
+   * @return subject or null if none registered
+   */
+  public GuiSubject getLastUpdatedByGuiSubject() {
+    Subject lastUpdater = null;
+    try {
+      if (this instanceof GuiGroup) {
+        lastUpdater = ((GuiGroup)this).getGroup().getModifySubject();
+      } else if (this instanceof GuiStem) {
+        lastUpdater = ((GuiStem)this).getStem().getModifySubject();
+      }
+    } catch (SubjectNotFoundException snfe) {
+      LOG.info("Cant find updater of:" + this.getNameColonSpaceSeparated(), snfe );
+    }
+
+    //note: attributes dont have this attribute
+    return lastUpdater == null ? null : new GuiSubject(lastUpdater);
+  }
+  
+  /**
+   * get last edited string: Tue Sep 25 12:01:07 PM CDT 2012
+   * @return the string of when last edited
+   */
+  public String getLastEditedString() {
+    long lastEditedTimeLong = -1;
+    if (this instanceof GuiGroup) {
+      lastEditedTimeLong = ((GuiGroup)this).getGroup().getModifyTimeLong();
+    } else if (this instanceof GuiStem) {
+        lastEditedTimeLong = ((GuiStem)this).getStem().getModifyTimeLong();
+    } else if (this instanceof GuiAttributeDef) {
+      lastEditedTimeLong = GrouperUtil.longValue(((GuiAttributeDef)this).getAttributeDef().getLastUpdatedDb(), 0);
+    } else if (this instanceof GuiAttributeDefName) {
+      lastEditedTimeLong = GrouperUtil.longValue(((GuiAttributeDefName)this).getAttributeDefName().getLastUpdatedDb(), 0);
+    }
+    return lastEditedTimeLong <= 0 ? "" : getDateUiFormat().format(new Date(lastEditedTimeLong));
+  }
+  
+  /**
+   * get created string: Tue Sep 25 12:01:07 PM CDT 2012
+   * @return when created
+   */
+  public String getCreatedString() {
+    long createTimeLong = -1;
+    if (this instanceof GuiGroup) {
+      createTimeLong = ((GuiGroup)this).getGroup().getCreateTimeLong();
+    } else if (this instanceof GuiStem) {
+        createTimeLong = ((GuiStem)this).getStem().getCreateTimeLong();
+    } else if (this instanceof GuiAttributeDef) {
+      createTimeLong = GrouperUtil.longValue(((GuiAttributeDef)this).getAttributeDef().getCreatedOnDb(), 0);
+    } else if (this instanceof GuiAttributeDefName) {
+      createTimeLong = GrouperUtil.longValue(((GuiAttributeDefName)this).getAttributeDefName().getCreatedOnDb(), 0);
+    } else {
+      return null;
+    }
+    return createTimeLong <= 0 ? "" : getDateUiFormat().format(new Date(createTimeLong));
+  }
+  
+  /**
+   * colon space separated name e.g.
+   * Full : Path : To : The : Entity
+   * @return the colon space separated path
+   */
+  public String getNameColonSpaceSeparated() {
+
+    GrouperObject grouperObject = this.getGrouperObject();
+    
+    if (grouperObject == null) {
+      return null;
+    }
+    String displayName = grouperObject.getDisplayName();
+    
+    if (StringUtils.isBlank(displayName) || StringUtils.equals(":", displayName)) {
+      return TextContainer.retrieveFromRequest().getText().get("stem.root.display-name");
+    }
+
+    return displayName.replace(":", " : ");
+    
+  }
+
+  /**
+   * if true, then this is a subpage, show a link for the last time so we can drill down one item lower
+   */
+  private boolean showBreadcrumbLink;
+
+  /**
+   * if true, then this is a subpage, show a link for the last time so we can drill down one item lower, though dont show separator
+   */
+  private boolean showBreadcrumbLinkSeparator = true;
+  
+  /**
+   * additional breadcrumb bullets if someone wants to add more custom bullets to the breadcrumb
+   */
+  private String additionalBreadcrumbBullets = "";
+
+  /** logger */
+  private static final Log LOG = edu.internet2.middleware.grouper.util.GrouperUtil.getLog(GuiObjectBase.class);
+  
+  /**
+   * if true, then this is a subpage, show a link for the last time so we can drill down one item lower, though dont show separator
+   * @return the showBreadcrumbLinkSeparator
+   */
+  public boolean isShowBreadcrumbLinkSeparator() {
+    return this.showBreadcrumbLinkSeparator;
+  }
+  
+  /**
+   * if true, then this is a subpage, show a link for the last time so we can drill down one item lower, though dont show separator
+   * @param showBreadcrumbLinkSeparator1 the showBreadcrumbLinkSeparator to set
+   */
+  public void setShowBreadcrumbLinkSeparator(boolean showBreadcrumbLinkSeparator1) {
+    this.showBreadcrumbLinkSeparator = showBreadcrumbLinkSeparator1;
+  }
+
+  /**
+   * if true, then this is a subpage, show a link for the last time so we can drill down one item lower
+   * @return if show breadcrumb link
+   */
+  public boolean isShowBreadcrumbLink() {
+    return this.showBreadcrumbLink;
+  }
+
+  /**
+   * if true, then this is a subpage, show a link for the last time so we can drill down one item lower
+   * @param showBreadcrumbLink1
+   */
+  public void setShowBreadcrumbLink(boolean showBreadcrumbLink1) {
+    this.showBreadcrumbLink = showBreadcrumbLink1;
+  }
+  
+  
+  /**
+   * additional breadcrumb bullets if someone wants to add more custom bullets to the breadcrumb
+   * @return
+   */
+  public String getAdditionalBreadcrumbBullets() {
+    return additionalBreadcrumbBullets;
+  }
+
+  /**
+   * additional breadcrumb bullets if someone wants to add more custom bullets to the breadcrumb
+   * @param additionalBreadcrumbBullets
+   */
+  public void setAdditionalBreadcrumbBullets(String additionalBreadcrumbBullets) {
+    this.additionalBreadcrumbBullets = additionalBreadcrumbBullets;
+  }
+
+  /**
+   * get the full breadcrumbs with list tags outside
+   * @return breancrumbs
+   */
+  public String getBreadcrumbs() {
+    
+    String ariaLabel = TextContainer.retrieveFromRequest().getText().get("guiBreadcrumbsAriaLabel");
+    StringBuilder result = new StringBuilder();
+    result.append("<nav role=\"navigation\" aria-label=\""+GrouperUtil.xmlEscape(ariaLabel, true)+"\">");
+    result.append("<ul class=\"breadcrumb\">");
+    result.append(this.getBreadcrumbBullets());
+    result.append(this.getAdditionalBreadcrumbBullets());
+    result.append("</ul>");
+    result.append("</nav>");
+    return result.toString();
+  }
+  
+  
+  /**
+   * breadcrumbs for v2 ui
+   * @return the breadcrumbs
+   */
+  public String getBreadcrumbBullets() {
+
+    //  <li><a href="index.html">Home </a><span class="divider"><i class='fa fa-angle-right' aria-hidden='true'></i></span></li>
+    //  <li><a href="#">Root </a><span class="divider"><i class='fa fa-angle-right' aria-hidden='true'></i></span></li>
+    //  <li><a href="view-folder-applications.html">Applications </a><span class="divider"><i class='fa fa-angle-right' aria-hidden='true'></i></span></li>
+    //  <li><a href="view-folder.html">Wiki </a><span class="divider"><i class='fa fa-angle-right' aria-hidden='true'></i></span></li>
+    //  <li class="active">Editors</li>
+    //GrouperUtil.xmlEscape(this.getPathColonSpaceSeparated(), true));
+    
+    StringBuilder result = new StringBuilder();
+    result.append("<li><a href=\"?operation=UiV2Main.indexMain\" onclick=\"return handleGuiV2LinkClick(event, 'operation=UiV2Main.indexMain');\">")
+      .append(TextContainer.retrieveFromRequest().getText().get("guiBreadcrumbsHomeLabel"))
+      .append(" </a><span class=\"divider\"><i class='fa fa-angle-right' aria-hidden='true'></i></span></li>");
+
+    //show local entity
+    if (this instanceof GuiSubject) {
+      GuiSubject guiSubject = (GuiSubject)this;
+      final Subject subject = guiSubject.getSubject();
+      if (subject != null) {
+        if (StringUtils.equals("grouperEntities", subject.getSourceId())) {
+          //show full path
+          GuiGroup guiGroup = GrouperRequestContainer.retrieveFromRequestOrCreate().getGroupContainer().getGuiGroup();
+          if (guiGroup != null && guiGroup.getGroup() != null) {
+            return guiGroup.getBreadcrumbBullets();
+          }
+        }
+      }
+    }
+    
+    if (this instanceof GuiSubject) {
+      GuiSubject guiSubject = (GuiSubject)this;
+      if (guiSubject.getSubject() != null) {
+        if (!this.showBreadcrumbLink) {
+          result.append("<li class=\"active\">").append(guiSubject.getScreenLabelShort2noLink()).append("</li>");
+        } else {
+          result.append("<li>").append(guiSubject.getShortLink());
+          if (this.showBreadcrumbLinkSeparator) {
+            result.append("<span class=\"divider\"><i class='fa fa-angle-right' aria-hidden='true'></i></span>");
+          }
+          result.append("</li>");
+        }
+      }
+    } else {
+      GrouperObject grouperObject = this.getGrouperObject();
+      if (grouperObject instanceof Stem && ((Stem)grouperObject).isRootStem()) {
+        result.append("<li class=\"active\">").append(TextContainer.retrieveFromRequest().getText().get("stem.root.display-name")).append("</li>");
+      } else {
+        List<String> displayExtenstionsList = GrouperUtil.splitTrimToList(grouperObject.getDisplayName(), ":");
+        List<String> theExtenstionsList = GrouperUtil.splitTrimToList(grouperObject.getName(), ":");
+        displayExtenstionsList.add(0, TextContainer.retrieveFromRequest().getText().get("stem.root.display-name"));
+        theExtenstionsList.add(0, ":");
+        
+        StringBuilder stemNameBuilder = new StringBuilder();
+        
+        for (int i=0;i<theExtenstionsList.size();i++) {
+          //  <li><a href="view-folder-applications.html">Applications </a><span class="divider"><i class='fa fa-angle-right' aria-hidden='true'></i></span></li>
+          String stemName = null;
+
+          if (i == 0) {
+            stemName = ":";
+          } else {
+            if (i > 1) {
+              stemNameBuilder.append(":");
+            }
+            stemNameBuilder.append(theExtenstionsList.get(i));
+            stemName = stemNameBuilder.toString();
+          }
+
+          if (i == theExtenstionsList.size() -1) {
+            if (!this.showBreadcrumbLink) {
+              //  <li class="active">Editors</li>
+              result.append("<li class=\"active\">").append(GrouperUtil.xmlEscape(displayExtenstionsList.get(i))).append("</li>");
+            } else {
+              if (this instanceof GuiGroup) {
+                
+                result.append("<li><a href=\"?operation=UiV2Group.viewGroup&groupName=")
+                  .append(GrouperUtil.escapeUrlEncode(stemName))
+                  .append("\" onclick=\"return handleGuiV2LinkClick(event, 'operation=UiV2Group.viewGroup&groupName=")
+                  .append(GrouperUtil.escapeUrlEncode(stemName))
+                  .append("');\" >").append(GrouperUtil.xmlEscape(displayExtenstionsList.get(i))).append(" </a>");
+                if (this.showBreadcrumbLinkSeparator) {
+                  result.append("<span class=\"divider\"><i class='fa fa-angle-right' aria-hidden='true'></i></span>");
+                }
+                result.append("</li>");
+
+              } else if (this instanceof GuiAttributeDef) {
+                
+                result.append("<li><a href=\"?operation=UiV2AttributeDef.viewAttributeDef&nameOfAttributeDef=")
+                  .append(GrouperUtil.escapeUrlEncode(stemName))
+                  .append("\" onclick=\"return handleGuiV2LinkClick(event, 'operation=UiV2AttributeDef.viewAttributeDef&nameOfAttributeDef=")
+                  .append(GrouperUtil.escapeUrlEncode(stemName))
+                  .append("');\" >").append(GrouperUtil.xmlEscape(displayExtenstionsList.get(i))).append(" </a>");
+                if (this.showBreadcrumbLinkSeparator) {
+                  result.append("<span class=\"divider\"><i class='fa fa-angle-right' aria-hidden='true'></i></span>");
+                }
+                result.append("</li>");
+
+              } else if (this instanceof GuiStem) {
+                
+                result.append("<li><a href=\"?operation=UiV2Stem.viewStem&stemName=")
+                  .append(GrouperUtil.escapeUrlEncode(stemName))
+                  .append("\" onclick=\"return handleGuiV2LinkClick(event, 'operation=UiV2Stem.viewStem&stemName=")
+                  .append(GrouperUtil.escapeUrlEncode(stemName))
+                  .append("');\" >").append(GrouperUtil.xmlEscape(displayExtenstionsList.get(i)))
+                  .append(" </a>");
+                if (this.showBreadcrumbLinkSeparator) {
+                  result.append("<span class=\"divider\"><i class='fa fa-angle-right' aria-hidden='true'></i></span>");
+                }
+                result.append("</li>");
+
+              } else {
+                throw new RuntimeException("Not expecting object type: " + this.getClass().getName());
+              }
+            }
+          } else {
+            result.append("<li><a href=\"?operation=UiV2Stem.viewStem&stemName=")
+              .append(GrouperUtil.escapeUrlEncode(stemName))
+              .append("\" onclick=\"return handleGuiV2LinkClick(event, 'operation=UiV2Stem.viewStem&stemName=")
+              .append(GrouperUtil.escapeUrlEncode(stemName))
+              .append("');\" >").append(GrouperUtil.xmlEscape(displayExtenstionsList.get(i)))
+              .append(" </a><span class=\"divider\"><i class='fa fa-angle-right' aria-hidden='true'></i></span></li>");
+          }
+        }
+      }
+    }
+    return result.toString();
+  }
+  
+  /**
+   * title for browser:
+   * &lt;strong&gt;FOLDER:&lt;/strong&gt;&lt;br /&gt;Full : Path : To : The : Entity&lt;br /&gt;&lt;br /&gt;This is the description for this entity. Lorem ipsum dolor sit amet, consectetur adipisicing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
+   * note, this is not xml escaped, if used in a title tag, it needs to be xml escaped...
+   * @return the title
+   */
+  public String getTitle() {
+    GrouperObject grouperObject = this.getGrouperObject();
+
+    if (grouperObject == null) {
+      return null;
+    }
+    StringBuilder result = new StringBuilder();
+    
+    result.append("<strong>").append(
+        TextContainer.retrieveFromRequest().getText().get("guiTooltipFolderLabel"))
+        .append("</string><br />").append(GrouperUtil.xmlEscape(this.getPathColonSpaceSeparated(), true));
+    result.append("<br />");
+    result.append(GrouperUtil.xmlEscape(StringUtils.abbreviate(StringUtils.defaultString(grouperObject.getDescription()), 100), true));
+    
+    String resultString = result.toString();
+    return resultString;
+  }
+  
+  /**
+   * 
+   * @return comma separated list of types with tooltips this grouper object (stem/group) is assigned to
+   */
+  public String getUserFriendlyTypesNames() {
+    StringBuilder output = new StringBuilder();
+    List<String> types = new ArrayList<String>();
+    
+    GrouperObject grouperObject = getGrouperObject();
+    List<GrouperObjectTypesAttributeValue> attributeValues = GrouperObjectTypesConfiguration.getGrouperObjectTypesAttributeValues(grouperObject);
+    
+    if (GrouperUtil.length(attributeValues) > 0) {
+      
+      Collections.sort(attributeValues, new Comparator<GrouperObjectTypesAttributeValue>() {
+
+        @Override
+        public int compare(GrouperObjectTypesAttributeValue o1, GrouperObjectTypesAttributeValue o2) {
+          if (StringUtils.isBlank(o1.getObjectTypeName()) || StringUtils.isBlank(o2.getObjectTypeName())) {
+            return 0;
+          }
+          return o1.getObjectTypeName().compareTo(o2.getObjectTypeName());
+        }
+      });
+      
+      List<GuiGrouperObjectTypesAttributeValue> guiAttributeValues = GuiGrouperObjectTypesAttributeValue.convertFromGrouperObjectTypesAttributeValues(attributeValues);
+      output.append("(");
+      for (GuiGrouperObjectTypesAttributeValue guiAttributeValue: guiAttributeValues) {
+        String title = TextContainer.retrieveFromRequest().getTextEscapeXml()
+            .get(guiAttributeValue.getObjectTypeDescriptionKey());
+        
+        String escapedTooltipText = StringUtils.replace(title, "'", "&#39;");
+        escapedTooltipText = GrouperUiUtils.escapeHtml(escapedTooltipText, true, true);
+        
+        types.add("<span class=\"grouperTooltip\" onmouseover=\"grouperTooltip('"+escapedTooltipText+"')\" onmouseout=\"UnTip()\" >"
+            +guiAttributeValue.getGrouperObjectTypesAttributeValue().getObjectTypeName()+"</span>");
+      }
+      output.append(StringUtils.join(types, ", "));
+      output.append(")");
+    }
+    
+    return output.toString();
+  }
+
+  
+}
+
+

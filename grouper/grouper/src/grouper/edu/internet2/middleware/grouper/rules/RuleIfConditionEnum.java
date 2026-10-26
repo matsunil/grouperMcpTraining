@@ -1,0 +1,1767 @@
+/**
+ * Copyright 2014 Internet2
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/**
+ * 
+ */
+package edu.internet2.middleware.grouper.rules;
+
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
+
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.logging.Log;
+
+import edu.internet2.middleware.grouper.Group;
+import edu.internet2.middleware.grouper.GrouperSession;
+import edu.internet2.middleware.grouper.Member;
+import edu.internet2.middleware.grouper.MemberFinder;
+import edu.internet2.middleware.grouper.Membership;
+import edu.internet2.middleware.grouper.Stem;
+import edu.internet2.middleware.grouper.exception.GrouperSessionException;
+import edu.internet2.middleware.grouper.misc.GrouperDAOFactory;
+import edu.internet2.middleware.grouper.misc.GrouperSessionHandler;
+import edu.internet2.middleware.grouper.permissions.PermissionEntry;
+import edu.internet2.middleware.grouper.rules.beans.RulesBean;
+import edu.internet2.middleware.grouper.util.GrouperUtil;
+import edu.internet2.middleware.grouperClient.jdbc.GcDbAccess;
+import edu.internet2.middleware.grouperClient.util.GrouperClientUtils;
+import edu.internet2.middleware.subject.Subject;
+
+
+/**
+ * built in if condition
+ * @author mchyzer
+ *
+ */
+public enum RuleIfConditionEnum {
+  
+  subjectNotInSources {
+
+    @Override
+    public boolean usesArg0() {
+      return true;
+    }
+
+    @Override
+    public boolean usesArg1() {
+      return false;
+    }
+
+    @Override
+    public boolean shouldFire(RuleDefinition ruleDefinition, RuleEngine ruleEngine, RulesBean rulesBean) {
+      
+      String sources = ruleDefinition.getIfCondition().getIfConditionEnumArg0();
+      Subject subject = rulesBean.getSubject();
+      if (subject != null && StringUtils.isNotBlank(sources) ) {
+        
+        Set<String> sourcesSet = GrouperUtil.splitTrimToSet(sources, ",");
+        if (sourcesSet.contains(subject.getSourceId())) {
+          return false;
+        }
+        return true;
+        
+      }
+      return false;
+    }
+    
+    @Override
+    public String validate(RuleDefinition ruleDefinition) {
+      
+      String subjectSources = ruleDefinition.getIfCondition().getIfConditionEnumArg0();
+      
+      if (StringUtils.isBlank(subjectSources)) {
+        return "The comma separated subject sources should be in the if arg0!";
+      }
+      
+      return null;
+    }
+
+    @Override
+    public boolean isIfOwnerTypeGroup(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    @Override
+    public boolean isIfOwnerTypeStem(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    @Override
+    public boolean isIfOwnerTypeAttributeDef(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    @Override
+    public RuleOwnerType getOwnerType() {
+      return null;
+    }
+
+    @Override
+    public GroupPrivilegeStrategy getGroupPrivilegeStrategy() {
+      return null;
+    }
+
+    @Override
+    public StemPrivilegeStrategy getStemPrivilegeStrategy() {
+      return null;
+    }
+    
+  },
+
+  /**
+   * make sure no group in folder has an enabled membership
+   */
+  noGroupInFolderHasImmediateEnabledMembership {
+    
+    @Override
+    public boolean usesArg0() {
+      return false;
+    }
+
+    @Override
+    public boolean usesArg1() {
+      return false;
+    }
+
+    /**
+     * 
+     */
+    @Override
+    public boolean shouldFire(RuleDefinition ruleDefinition, RuleEngine ruleEngine,
+        RulesBean rulesBean) {
+      
+      Stem.Scope stemScope = Stem.Scope.valueOfIgnoreCase(ruleDefinition.getIfCondition().getIfStemScope(), true);
+      
+      boolean folderHasMembership = RuleUtils.folderHasMembership(rulesBean, ruleDefinition.getIfCondition().getIfOwnerId(), 
+          ruleDefinition.getIfCondition().getIfOwnerName(), 
+          stemScope, null);
+      
+      if (folderHasMembership) {
+        return false;
+      }
+      
+      return true;
+    }
+
+    /**
+     * 
+     */
+    @Override
+    public String validate(RuleDefinition ruleDefinition) {
+      
+      String error = RuleUtils.validateStem(ruleDefinition.getIfCondition().getIfOwnerId(), 
+          ruleDefinition.getIfCondition().getIfOwnerName(), 
+          null);
+
+      if (!StringUtils.isBlank(error)) {
+        return error;
+      }
+      
+      if (StringUtils.isBlank(ruleDefinition.getIfCondition().getIfStemScope())) {
+        return "Stem scope is required in if condition";
+      }
+      
+      return null;
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeAttributeDef(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeAttributeDef(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeGroup(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeGroup(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeStem(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeStem(RuleDefinition ruleDefinition) {
+      return true;
+    }
+
+    @Override
+    public RuleOwnerType getOwnerType() {
+      return RuleOwnerType.FOLDER;
+    }
+    
+    @Override
+    public GroupPrivilegeStrategy getGroupPrivilegeStrategy() {
+      return null;
+    }
+
+    @Override
+    public StemPrivilegeStrategy getStemPrivilegeStrategy() {
+      return StemPrivilegeStrategy.inheritedRead;
+    }
+    
+  },
+  /**
+   * make sure the name of the object matches this sql like string (with percent signs and underscores), 
+   * e.g. school:folder:whatever:%groupSuffix
+   */
+  nameMatchesSqlLikeString {
+    
+    @Override
+    public boolean usesArg0() {
+      return true;
+    }
+
+    @Override
+    public boolean usesArg1() {
+      return false;
+    }
+
+    /**
+     * 
+     */
+    @Override
+    public boolean shouldFire(RuleDefinition ruleDefinition, RuleEngine ruleEngine,
+        RulesBean rulesBean) {
+
+      String sqlLikeString = ruleDefinition.getIfCondition().getIfConditionEnumArg0();
+      
+      if (StringUtils.isBlank(sqlLikeString)) {
+        throw new RuntimeException("The like string should be in the if arg0!");
+      }
+
+      String name = null;
+      if (rulesBean.hasAttributeDefName()) {
+        name = rulesBean.getAttributeDefName().getName();
+      } else if (rulesBean.hasAttributeDef()) {
+        name = rulesBean.getAttributeDef().getName();
+      } else if (rulesBean.hasGroup()) {
+        name = rulesBean.getGroup().getName();
+      } else if (rulesBean.hasStem()) {
+        name = rulesBean.getStem().getName();
+      }
+      
+      boolean matches = GrouperUtil.matchSqlString(sqlLikeString, name);
+      
+      return matches;
+      
+    }
+
+    /**
+     * 
+     */
+    @Override
+    public String validate(RuleDefinition ruleDefinition) {
+            
+      if (StringUtils.isBlank(ruleDefinition.getIfCondition().getIfConditionEnumArg0())) {
+        return "ifArg0 is required and is the sql like string e.g. school:folder:%suffix";
+      }
+      
+      return null;
+    }
+    
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeAttributeDef(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeAttributeDef(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeGroup(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeGroup(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeStem(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeStem(RuleDefinition ruleDefinition) {
+      return false;
+    }
+    
+    @Override
+    public RuleOwnerType getOwnerType() {
+      return null;
+    }
+    
+    @Override
+    public GroupPrivilegeStrategy getGroupPrivilegeStrategy() {
+      return null;
+    }
+
+    @Override
+    public StemPrivilegeStrategy getStemPrivilegeStrategy() {
+      return null;
+    }
+  },
+  /**
+   * make sure this group and not the folder has membership
+   */
+  thisGroupAndNotFolderHasImmediateEnabledMembership {
+    
+    @Override
+    public boolean usesArg0() {
+      return false;
+    }
+
+    @Override
+    public boolean usesArg1() {
+      return false;
+    }
+
+    /**
+     * 
+     */
+    @Override
+    public boolean shouldFire(RuleDefinition ruleDefinition, RuleEngine ruleEngine,
+        RulesBean rulesBean) {
+      
+      Group group = RuleUtils.group(ruleDefinition.getIfCondition().getIfOwnerId(), 
+          ruleDefinition.getIfCondition().getIfOwnerName(), ruleDefinition.getAttributeAssignType().getOwnerGroupId(), false, true);
+      String groupId = group.getId();
+      
+      
+      boolean groupHasMembership = RuleUtils.groupHasImmediateEnabledMembership(rulesBean, 
+          groupId);
+      
+      if (!groupHasMembership) {
+        return false;
+      }
+      
+      Stem.Scope stemScope = Stem.Scope.valueOfIgnoreCase(ruleDefinition.getCheck().getCheckStemScope(), true);
+      
+      boolean folderHasMembership = RuleUtils.folderHasMembership(rulesBean, ruleDefinition.getCheck().getCheckOwnerId(), 
+          ruleDefinition.getCheck().getCheckOwnerName(), 
+          stemScope, null);
+      
+      if (folderHasMembership) {
+        return false;
+      }
+      
+      return true;
+    }
+
+    /**
+     * 
+     */
+    @Override
+    public String validate(RuleDefinition ruleDefinition) {
+      
+      //we need the owner stem and if sub or one
+      String error = RuleUtils.validateStem(ruleDefinition.getCheck().getCheckOwnerId(), 
+          ruleDefinition.getCheck().getCheckOwnerName(), 
+          null);
+
+      if (!StringUtils.isBlank(error)) {
+        return error;
+      }
+      
+      if (StringUtils.isBlank(ruleDefinition.getCheck().getCheckStemScope())) {
+        return "This if condition " + this + " requires a check stem scope";
+      }
+      
+      return super.validate(ruleDefinition);
+    }
+    
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeAttributeDef(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeAttributeDef(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeGroup(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeGroup(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeStem(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeStem(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    @Override
+    public RuleOwnerType getOwnerType() {
+      return RuleOwnerType.GROUP;
+    }
+    
+    @Override
+    public GroupPrivilegeStrategy getGroupPrivilegeStrategy() {
+      return GroupPrivilegeStrategy.read;
+    }
+
+    @Override
+    public StemPrivilegeStrategy getStemPrivilegeStrategy() {
+      return null;
+    }
+  },
+  /** 
+   * make sure there is not a membership in folder, but does have an attributeDef
+   */
+  thisPermissionDefHasAssignmentAndNotFolder {
+    
+    
+    @Override
+    public boolean usesArg0() {
+      return false;
+    }
+
+    @Override
+    public boolean usesArg1() {
+      return false;
+    }
+    
+    /**
+     * 
+     */
+    @Override
+    public boolean shouldFire(RuleDefinition ruleDefinition, RuleEngine ruleEngine,
+        RulesBean rulesBean) {
+      
+      Stem.Scope stemScope = Stem.Scope.valueOfIgnoreCase(ruleDefinition.getCheck().getCheckStemScope(), true);
+      
+      boolean folderHasMembership = RuleUtils.folderHasMembership(rulesBean, ruleDefinition.getCheck().getCheckOwnerId(), 
+          ruleDefinition.getCheck().getCheckOwnerName(), 
+          stemScope, null);
+      
+      if (folderHasMembership) {
+        return false;
+      }
+
+      Set<PermissionEntry> permissionEntries = RuleUtils.permissionsForUser(ruleDefinition
+          .getAttributeAssignType().getOwnerAttributeDefId(), rulesBean, false);
+      
+      if (GrouperUtil.length(permissionEntries) == 0) {
+        return false;
+      }
+      
+      return true;
+
+    }
+
+    /**
+     * 
+     */
+    @Override
+    public String validate(RuleDefinition ruleDefinition) {
+      
+      //we need the owner stem and if sub or one
+      if (StringUtils.isBlank(ruleDefinition.getCheck().getCheckOwnerId()) && StringUtils.isBlank(ruleDefinition.getCheck().getCheckOwnerName())) {
+        return "This if condition " + this + " requires a check name or id";
+      }
+      
+      if (StringUtils.isBlank(ruleDefinition.getCheck().getCheckStemScope())) {
+        return "This if condition " + this + " requires a check stem scope";
+      }
+      
+      return super.validate(ruleDefinition);
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeAttributeDef(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeAttributeDef(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeGroup(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeGroup(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeStem(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeStem(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    @Override
+    public RuleOwnerType getOwnerType() {
+      return RuleOwnerType.PERMISSION_DEF;
+    }
+    
+    @Override
+    public GroupPrivilegeStrategy getGroupPrivilegeStrategy() {
+      return null;
+    }
+
+    @Override
+    public StemPrivilegeStrategy getStemPrivilegeStrategy() {
+      return null;
+    }
+  },
+  
+  /**
+   * make sure a group has no immedaite enabled membership
+   */
+  groupHasNoImmediateEnabledMembership {
+    
+    @Override
+    public boolean usesArg0() {
+      return false;
+    }
+
+    @Override
+    public boolean usesArg1() {
+      return false;
+    }
+
+    /**
+     * 
+     */
+    @Override
+    public boolean shouldFire(RuleDefinition ruleDefinition, RuleEngine ruleEngine,
+        RulesBean rulesBean) {
+      
+          String memberId = null;
+          try {
+            memberId = rulesBean.getMemberId();
+          } catch (Exception e) {
+            //ignore
+          }
+      
+      GrouperSession rootSession = GrouperSession.startRootSession(false);
+      try {
+        
+          if (StringUtils.isBlank(memberId)) {
+            
+          Member member = MemberFinder.findBySubject(rootSession, rulesBean.getSubject(), false);
+            memberId = member == null ? null : member.getUuid();
+
+            if (StringUtils.isBlank(memberId )) {
+              return false;
+            }
+          }
+          Group group = RuleUtils.group(ruleDefinition.getIfCondition().getIfOwnerId(), 
+            ruleDefinition.getIfCondition().getIfOwnerName(), ruleDefinition.getAttributeAssignType().getOwnerGroupId(), false, false);
+          if (group == null) {
+            LOG.error("Group doesnt exist in rule! " + ruleDefinition);
+            return false;
+          }
+          String groupId = group.getId();
+          
+          Set<Membership> memberships = GrouperDAOFactory.getFactory().getMembership()
+            .findAllByGroupOwnerAndFieldAndMemberIdsAndType(
+                groupId, Group.getDefaultList(), 
+                GrouperUtil.toSet(memberId), "immediate", true);
+          
+          return GrouperUtil.length(memberships) == 0;
+        
+      } finally {
+        GrouperSession.stopQuietly(rootSession);
+        }
+    }
+
+    /**
+     * 
+     */
+    @Override
+    public String validate(RuleDefinition ruleDefinition) {
+
+      return RuleUtils.validateGroup(ruleDefinition.getIfCondition().getIfOwnerId(), 
+          ruleDefinition.getIfCondition().getIfOwnerName(), 
+          ruleDefinition.getAttributeAssignType().getOwnerGroupId());
+
+    }
+    
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeAttributeDef(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeAttributeDef(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeGroup(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeGroup(RuleDefinition ruleDefinition) {
+      if (!StringUtils.isBlank(ruleDefinition.getIfCondition().getIfOwnerId()) || !StringUtils.isBlank(ruleDefinition.getIfCondition().getIfOwnerName())) {
+        return true;
+      }
+      
+      return false;
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeStem(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeStem(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    @Override
+    public RuleOwnerType getOwnerType() {
+      return RuleOwnerType.GROUP;
+    }
+    
+    @Override
+    public GroupPrivilegeStrategy getGroupPrivilegeStrategy() {
+      return GroupPrivilegeStrategy.read;
+    }
+
+    @Override
+    public StemPrivilegeStrategy getStemPrivilegeStrategy() {
+      return null;
+    }
+    
+  }, 
+  
+  
+  /** if on group which has membership */
+  thisGroupHasImmediateEnabledMembership {
+    
+    
+    @Override
+    public boolean usesArg0() {
+      return false;
+    }
+
+    @Override
+    public boolean usesArg1() {
+      return false;
+    }
+
+    /**
+     * 
+     */
+    @Override
+    public String validate(RuleDefinition ruleDefinition) {
+      return RuleUtils.validateGroup(ruleDefinition.getIfCondition().getIfOwnerId(), 
+          ruleDefinition.getIfCondition().getIfOwnerName(), 
+          ruleDefinition.getAttributeAssignType().getOwnerGroupId());
+
+    }
+
+    /**
+     * 
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#shouldFire(edu.internet2.middleware.grouper.rules.RuleDefinition, edu.internet2.middleware.grouper.rules.RuleEngine, edu.internet2.middleware.grouper.rules.beans.RulesBean)
+     */
+    @Override
+    public boolean shouldFire(RuleDefinition ruleDefinition, RuleEngine ruleEngine,
+        RulesBean rulesBean) {
+      
+      String memberId = null;
+      try {
+        memberId = rulesBean.getMemberId();
+      } catch (Exception e) {
+        //ignore
+      }
+      
+      GrouperSession rootSession = GrouperSession.startRootSession(false);
+      try {
+        
+        if (StringUtils.isBlank(memberId)) {
+          
+          Member member = MemberFinder.findBySubject(rootSession, rulesBean.getSubject(), false);
+          memberId = member == null ? null : member.getUuid();
+
+          if (StringUtils.isBlank(memberId )) {
+            return false;
+          }
+        }
+        
+        Group group = RuleUtils.group(ruleDefinition.getIfCondition().getIfOwnerId(), 
+            ruleDefinition.getIfCondition().getIfOwnerName(), ruleDefinition.getAttributeAssignType().getOwnerGroupId(), false, true);
+        String groupId = group.getId();
+        
+        Set<Membership> memberships = GrouperDAOFactory.getFactory().getMembership()
+          .findAllByGroupOwnerAndFieldAndMemberIdsAndType(
+              groupId, Group.getDefaultList(), 
+              GrouperUtil.toSet(memberId), "immediate", true);
+        
+        return GrouperUtil.length(memberships) > 0;
+        
+      } finally {
+        GrouperSession.stopQuietly(rootSession);
+      }
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeAttributeDef(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeAttributeDef(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeGroup(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeGroup(RuleDefinition ruleDefinition) {
+      if (!StringUtils.isBlank(ruleDefinition.getIfCondition().getIfOwnerId()) || !StringUtils.isBlank(ruleDefinition.getIfCondition().getIfOwnerName())) {
+        return true;
+      }
+      
+      return false;
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeStem(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeStem(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    @Override
+    public RuleOwnerType getOwnerType() {
+      return RuleOwnerType.GROUP;
+    }
+    
+    @Override
+    public GroupPrivilegeStrategy getGroupPrivilegeStrategy() {
+      return GroupPrivilegeStrategy.read;
+    }
+
+    @Override
+    public StemPrivilegeStrategy getStemPrivilegeStrategy() {
+      return null;
+    }
+  },
+  
+  /** if on group which has membership with no end date */
+  thisGroupHasImmediateEnabledNoEndDateMembership {
+    
+    @Override
+    public boolean usesArg0() {
+      return false;
+    }
+
+    @Override
+    public boolean usesArg1() {
+      return false;
+    }
+
+    /**
+     * 
+     */
+    @Override
+    public String validate(RuleDefinition ruleDefinition) {
+      return RuleUtils.validateGroup(ruleDefinition.getIfCondition().getIfOwnerId(), 
+          ruleDefinition.getIfCondition().getIfOwnerName(), 
+          ruleDefinition.getAttributeAssignType().getOwnerGroupId());
+
+    }
+
+    /**
+     * 
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#shouldFire(edu.internet2.middleware.grouper.rules.RuleDefinition, edu.internet2.middleware.grouper.rules.RuleEngine, edu.internet2.middleware.grouper.rules.beans.RulesBean)
+     */
+    @Override
+    public boolean shouldFire(RuleDefinition ruleDefinition, RuleEngine ruleEngine,
+        RulesBean rulesBean) {
+      
+      return (boolean)GrouperSession.internal_callbackRootGrouperSession(new GrouperSessionHandler() {
+
+        @Override
+        public Object callback(GrouperSession grouperSession) throws GrouperSessionException {
+          String memberId = null;
+          try {
+            memberId = rulesBean.getMemberId();
+          } catch (Exception e) {
+            //ignore
+          }
+          if (StringUtils.isBlank(memberId)) {
+            
+            Member member = MemberFinder.findBySubject(grouperSession, rulesBean.getSubject(), false);
+            memberId = member == null ? null : member.getUuid();
+
+            if (StringUtils.isBlank(memberId )) {
+              return false;
+            }
+          }
+          
+          Group group = RuleUtils.group(ruleDefinition.getIfCondition().getIfOwnerId(), 
+              ruleDefinition.getIfCondition().getIfOwnerName(), ruleDefinition.getAttributeAssignType().getOwnerGroupId(), false, true);
+          String groupId = group.getId();
+          
+          Set<Membership> memberships = GrouperDAOFactory.getFactory().getMembership()
+            .findAllByGroupOwnerAndFieldAndMemberIdsAndType(
+                groupId, Group.getDefaultList(), 
+                GrouperUtil.toSet(memberId), "immediate", true);
+
+          
+          for (Membership membership : memberships) {
+            if (membership.getDisabledTime() == null) {
+              return true;
+            }
+          }
+          
+          return false;
+        }
+      });
+        
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeAttributeDef(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeAttributeDef(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeGroup(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeGroup(RuleDefinition ruleDefinition) {
+      if (!StringUtils.isBlank(ruleDefinition.getIfCondition().getIfOwnerId()) 
+          || !StringUtils.isBlank(ruleDefinition.getIfCondition().getIfOwnerName())) {
+        return true;
+      }
+      
+      return false;
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeStem(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeStem(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    @Override
+    public RuleOwnerType getOwnerType() {
+      return RuleOwnerType.GROUP;
+    }
+    
+    @Override
+    public GroupPrivilegeStrategy getGroupPrivilegeStrategy() {
+      return GroupPrivilegeStrategy.read;
+    }
+
+    @Override
+    public StemPrivilegeStrategy getStemPrivilegeStrategy() {
+      return null;
+    }
+  },
+  /** if permission def has assignment */
+  thisPermissionDefHasAssignment {
+    
+    @Override
+    public boolean usesArg0() {
+      return false;
+    }
+
+    @Override
+    public boolean usesArg1() {
+      return false;
+    }
+
+    /**
+     * 
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#shouldFire(edu.internet2.middleware.grouper.rules.RuleDefinition, edu.internet2.middleware.grouper.rules.RuleEngine, edu.internet2.middleware.grouper.rules.beans.RulesBean)
+     */
+    @Override
+    public boolean shouldFire(final RuleDefinition ruleDefinition, final RuleEngine ruleEngine,
+        final RulesBean rulesBean) {
+      
+      Set<PermissionEntry> permissionEntries = RuleUtils.permissionsForUser(ruleDefinition
+          .getAttributeAssignType().getOwnerAttributeDefId(), rulesBean, false);
+      
+      return GrouperUtil.length(permissionEntries) > 0;
+      
+    }
+    
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeAttributeDef(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeAttributeDef(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeGroup(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeGroup(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeStem(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeStem(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    @Override
+    public RuleOwnerType getOwnerType() {
+      return RuleOwnerType.PERMISSION_DEF;
+    }
+    
+    @Override
+    public GroupPrivilegeStrategy getGroupPrivilegeStrategy() {
+      return null;
+    }
+
+    @Override
+    public StemPrivilegeStrategy getStemPrivilegeStrategy() {
+      return null;
+    }
+  },
+  /** if permission def has assignment with no end date */
+  thisPermissionDefHasNoEndDateAssignment {
+    
+    @Override
+    public boolean usesArg0() {
+      return false;
+    }
+
+    @Override
+    public boolean usesArg1() {
+      return false;
+    }
+
+    /**
+     * 
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#shouldFire(edu.internet2.middleware.grouper.rules.RuleDefinition, edu.internet2.middleware.grouper.rules.RuleEngine, edu.internet2.middleware.grouper.rules.beans.RulesBean)
+     */
+    @Override
+    public boolean shouldFire(final RuleDefinition ruleDefinition, final RuleEngine ruleEngine,
+        final RulesBean rulesBean) {
+      
+      Set<PermissionEntry> permissionEntries = RuleUtils.permissionsForUser(ruleDefinition
+          .getAttributeAssignType().getOwnerAttributeDefId(), rulesBean, true);
+      
+      return GrouperUtil.length(permissionEntries) > 0;
+      
+    }
+    
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeAttributeDef(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeAttributeDef(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeGroup(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeGroup(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeStem(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeStem(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    @Override
+    public RuleOwnerType getOwnerType() {
+      return RuleOwnerType.PERMISSION_DEF;
+    }
+    
+    @Override
+    public GroupPrivilegeStrategy getGroupPrivilegeStrategy() {
+      return null;
+    }
+
+    @Override
+    public StemPrivilegeStrategy getStemPrivilegeStrategy() {
+      return null;
+    }
+  }, 
+  
+  /**
+   * make sure a group has no enabled membership
+   */
+  groupHasNoEnabledMembership {
+    
+    @Override
+    public boolean usesArg0() {
+      return false;
+    }
+
+    @Override
+    public boolean usesArg1() {
+      return false;
+    }
+  
+    /**
+     * 
+     */
+    @Override
+    public boolean shouldFire(RuleDefinition ruleDefinition, RuleEngine ruleEngine,
+        RulesBean rulesBean) {
+      
+      String memberId = null;
+      try {
+        memberId = rulesBean.getMemberId();
+      } catch (Exception e) {
+        //ignore
+      }
+      
+      if (StringUtils.isBlank(memberId)) {
+        
+        GrouperSession rootSession = GrouperSession.startRootSession(false);
+        Member member = null;
+        try {
+          member = MemberFinder.findBySubject(rootSession, rulesBean.getSubject(), false);
+          memberId = member == null ? null : member.getUuid();
+        } finally {
+          GrouperSession.stopQuietly(rootSession);
+        }
+
+        if (StringUtils.isBlank(memberId )) {
+          return false;
+        }
+      }
+      Group group = RuleUtils.group(ruleDefinition.getIfCondition().getIfOwnerId(), 
+          ruleDefinition.getIfCondition().getIfOwnerName(), ruleDefinition.getAttributeAssignType().getOwnerGroupId(), false, false);
+      if (group == null) {
+        LOG.error("Group doesnt exist in rule! " + ruleDefinition);
+        return false;
+      }
+      String groupId = group.getId();
+      
+      Set<Membership> memberships = GrouperDAOFactory.getFactory().getMembership()
+        .findAllByGroupOwnerAndFieldAndMemberIdsAndType(
+            groupId, Group.getDefaultList(), 
+            GrouperUtil.toSet(memberId), null, true);
+      
+      return GrouperUtil.length(memberships) == 0;
+      
+    }
+  
+    /**
+     * 
+     */
+    @Override
+    public String validate(RuleDefinition ruleDefinition) {
+  
+      return RuleUtils.validateGroup(ruleDefinition.getIfCondition().getIfOwnerId(), 
+          ruleDefinition.getIfCondition().getIfOwnerName(), 
+          ruleDefinition.getAttributeAssignType().getOwnerGroupId());
+  
+    }
+    
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeAttributeDef(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeAttributeDef(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeGroup(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeGroup(RuleDefinition ruleDefinition) {
+      if (!StringUtils.isBlank(ruleDefinition.getIfCondition().getIfOwnerId()) || !StringUtils.isBlank(ruleDefinition.getIfCondition().getIfOwnerName())) {
+        return true;
+      }
+      
+      return false;
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeStem(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeStem(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    @Override
+    public RuleOwnerType getOwnerType() {
+      return RuleOwnerType.GROUP;
+    }
+    
+    @Override
+    public GroupPrivilegeStrategy getGroupPrivilegeStrategy() {
+      return GroupPrivilegeStrategy.read;
+    }
+
+    @Override
+    public StemPrivilegeStrategy getStemPrivilegeStrategy() {
+      return null;
+    }
+  }, 
+  
+  /**
+   * make sure a group has no enabled membership
+   */
+  never {
+    
+    @Override
+    public boolean usesArg0() {
+      return false;
+    }
+
+    @Override
+    public boolean usesArg1() {
+      return false;
+    }
+  
+    /**
+     * 
+     */
+    @Override
+    public boolean shouldFire(RuleDefinition ruleDefinition, RuleEngine ruleEngine,
+        RulesBean rulesBean) {
+      return false;
+    }
+  
+    /**
+     * 
+     */
+    @Override
+    public String validate(RuleDefinition ruleDefinition) {
+  
+      RuleIfCondition ifCondition = ruleDefinition.getIfCondition();
+      if (!StringUtils.isBlank(ifCondition.getIfConditionEnumArg0())
+          || !StringUtils.isBlank(ifCondition.getIfConditionEnumArg1())
+          || !StringUtils.isBlank(ifCondition.getIfConditionEl())
+          || !StringUtils.isBlank(ifCondition.getIfOwnerId())
+          || !StringUtils.isBlank(ifCondition.getIfOwnerName())
+          || !StringUtils.isBlank(ifCondition.getIfStemScope())
+      ) {
+        return "This if condition enum does not take args: " + this.name() + ", " 
+          + ifCondition;
+      }
+      return null;
+    }
+    
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeAttributeDef(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeAttributeDef(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeGroup(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeGroup(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeStem(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeStem(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    @Override
+    public RuleOwnerType getOwnerType() {
+      return null;
+    }
+    
+    @Override
+    public GroupPrivilegeStrategy getGroupPrivilegeStrategy() {
+      return null;
+    }
+
+    @Override
+    public StemPrivilegeStrategy getStemPrivilegeStrategy() {
+      return null;
+    }
+  }, 
+  
+  /**
+   * make sure a group has no enabled membership
+   */
+  groupHasTooManyMembers {
+    
+    @Override
+    public boolean usesArg0() {
+      return true;
+    }
+
+    @Override
+    public boolean usesArg1() {
+      return true;
+    }
+  
+    /**
+     * 
+     */
+    @Override
+    public boolean shouldFire(RuleDefinition ruleDefinition, RuleEngine ruleEngine,
+        RulesBean rulesBean) {
+            
+      GrouperSession rootSession = GrouperSession.startRootSession(false);
+      try {
+        
+        Group group = RuleUtils.group(ruleDefinition.getIfCondition().getIfOwnerId(), 
+            ruleDefinition.getIfCondition().getIfOwnerName(), ruleDefinition.getAttributeAssignType().getOwnerGroupId(), false, false);
+        if (group == null) {
+          LOG.error("Group doesnt exist in rule! " + ruleDefinition);
+          return false;
+        }
+        String groupId = group.getId();
+        
+        String maxAllowedString = ruleDefinition.getIfCondition().getIfConditionEnumArg0();
+
+        int maxAllowed = GrouperUtil.intValue(maxAllowedString);
+        
+        String sources = ruleDefinition.getIfCondition().getIfConditionEnumArg1();
+
+        String query = "select count(distinct(gm.ID)) from grouper_memberships_all_v gms, grouper_members gm "
+            + "where gms.MEMBER_ID = gm.ID and gms.IMMEDIATE_MSHIP_ENABLED = 'T' and gms.OWNER_GROUP_ID = ? "
+            + "and gms.FIELD_ID = ?";
+
+        GcDbAccess gcDbAccess = new GcDbAccess().addBindVar(groupId).addBindVar(Group.getDefaultList().getId());
+        
+        if (!StringUtils.isBlank(sources)) {
+          String[] sourcesArray = GrouperUtil.splitTrim(sources, ",");
+          query += " and gm.subject_source in ( " + GrouperClientUtils.appendQuestions(sourcesArray.length) + " ) ";
+          for (String source : sourcesArray) {
+            gcDbAccess.addBindVar(source);
+          }
+        }
+        
+        int count = gcDbAccess.sql(query).select(int.class);
+        
+        return count >= maxAllowed;
+        
+      } finally {
+        GrouperSession.stopQuietly(rootSession);
+      }
+    }
+  
+    /**
+     * 
+     */
+    @Override
+    public String validate(RuleDefinition ruleDefinition) {
+  
+      String error = RuleUtils.validateGroup(ruleDefinition.getIfCondition().getIfOwnerId(), 
+          ruleDefinition.getIfCondition().getIfOwnerName(), 
+          ruleDefinition.getAttributeAssignType().getOwnerGroupId());
+  
+      if (!StringUtils.isBlank(error)) {
+        return error;
+      }
+      
+      error = RuleUtils.validateInteger(ruleDefinition.getIfCondition().getIfConditionEnumArg0());
+
+      if (!StringUtils.isBlank(error)) {
+        return error;
+      }
+
+      String sources = ruleDefinition.getIfCondition().getIfConditionEnumArg1();
+      if (!StringUtils.isBlank(sources)) {
+        error = RuleUtils.validateSources(sources);
+      }
+
+      if (!StringUtils.isBlank(error)) {
+        return error;
+      }
+
+      return null;
+    }
+    
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeAttributeDef(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeAttributeDef(RuleDefinition ruleDefinition) {
+      return false;
+    }
+  
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeGroup(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeGroup(RuleDefinition ruleDefinition) {
+      return true;
+    }
+  
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeStem(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeStem(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    @Override
+    public RuleOwnerType getOwnerType() {
+      return RuleOwnerType.GROUP;
+    }
+    
+    @Override
+    public GroupPrivilegeStrategy getGroupPrivilegeStrategy() {
+      return GroupPrivilegeStrategy.read;
+    }
+
+    @Override
+    public StemPrivilegeStrategy getStemPrivilegeStrategy() {
+      return null;
+    }
+  }, 
+  
+  /**
+   * make sure the name of the object matches this sql like string (with percent signs and underscores), 
+   * e.g. school:folder:whatever:%groupSuffix
+   */
+  permissionDefNotInList{
+  
+    /**
+     * 
+     */
+    @Override
+    public boolean shouldFire(RuleDefinition ruleDefinition, RuleEngine ruleEngine,
+        RulesBean rulesBean) {
+  
+      String permissionDefList = ruleDefinition.getIfCondition().getIfConditionEnumArg0();
+      
+      if (StringUtils.isBlank(permissionDefList)) {
+        throw new RuntimeException("The permission def list should be in the if arg0!");
+      }
+  
+      Set<String> permissionDefSet = GrouperUtil.splitTrimToSet(permissionDefList, ",");
+      if (rulesBean.getAttributeDef() == null) {
+        LOG.info("attributeDef of permission is null");
+        return false;
+      }
+      
+      return !permissionDefSet.contains(rulesBean.getAttributeDef().getName()) && !permissionDefSet.contains(rulesBean.getAttributeDef().getId());
+      
+    }
+  
+    /**
+     * 
+     */
+    @Override
+    public String validate(RuleDefinition ruleDefinition) {
+            
+      if (StringUtils.isBlank(ruleDefinition.getIfCondition().getIfConditionEnumArg0())) {
+        return "ifArg0 is required and is the permission definition list";
+      }
+      
+      return null;
+    }
+    
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeAttributeDef(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeAttributeDef(RuleDefinition ruleDefinition) {
+      return false;
+    }
+  
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeGroup(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeGroup(RuleDefinition ruleDefinition) {
+      return true;
+    }
+  
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeStem(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeStem(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    @Override
+    public boolean usesArg0() {
+      return true;
+    }
+
+    @Override
+    public boolean usesArg1() {
+      return false;
+    }
+
+    @Override
+    public GroupPrivilegeStrategy getGroupPrivilegeStrategy() {
+      return null;
+    }
+
+    @Override
+    public StemPrivilegeStrategy getStemPrivilegeStrategy() {
+      return null;
+    }
+
+    @Override
+    public RuleOwnerType getOwnerType() {
+      return null;
+    }
+  }, 
+  
+  /**
+   * make sure a group has no enabled membership
+   */
+  groupHasTooFewMembers{
+  
+    /**
+     * 
+     */
+    @Override
+    public boolean shouldFire(RuleDefinition ruleDefinition, RuleEngine ruleEngine,
+        RulesBean rulesBean) {
+            
+      GrouperSession rootSession = GrouperSession.startRootSession(false);
+      try {
+        
+        Group group = RuleUtils.group(ruleDefinition.getIfCondition().getIfOwnerId(), 
+            ruleDefinition.getIfCondition().getIfOwnerName(), ruleDefinition.getAttributeAssignType().getOwnerGroupId(), false, false);
+        if (group == null) {
+          LOG.error("Group doesnt exist in rule! " + ruleDefinition);
+          return false;
+        }
+        String groupId = group.getId();
+        
+        String minAllowedString = ruleDefinition.getIfCondition().getIfConditionEnumArg0();
+  
+        int minAllowed = GrouperUtil.intValue(minAllowedString);
+        
+        String sources = ruleDefinition.getIfCondition().getIfConditionEnumArg1();
+  
+        String query = "select count(distinct(gm.ID)) from grouper_memberships_all_v gms, grouper_members gm "
+            + "where gms.MEMBER_ID = gm.ID and gms.IMMEDIATE_MSHIP_ENABLED = 'T' and gms.OWNER_GROUP_ID = ? "
+            + "and gms.FIELD_ID = ?";
+  
+        GcDbAccess gcDbAccess = new GcDbAccess().addBindVar(groupId).addBindVar(Group.getDefaultList().getId());
+        
+        if (!StringUtils.isBlank(sources)) {
+          String[] sourcesArray = GrouperUtil.splitTrim(sources, ",");
+          query += " and gm.subject_source in ( " + GrouperClientUtils.appendQuestions(sourcesArray.length) + " ) ";
+          for (String source : sourcesArray) {
+            gcDbAccess.addBindVar(source);
+          }
+        }
+        
+        int count = gcDbAccess.sql(query).select(int.class);
+        
+        return count <= minAllowed;
+        
+      } finally {
+        GrouperSession.stopQuietly(rootSession);
+      }
+    }
+  
+    /**
+     * 
+     */
+    @Override
+    public String validate(RuleDefinition ruleDefinition) {
+  
+      String error = RuleUtils.validateGroup(ruleDefinition.getIfCondition().getIfOwnerId(), 
+          ruleDefinition.getIfCondition().getIfOwnerName(), 
+          ruleDefinition.getAttributeAssignType().getOwnerGroupId());
+  
+      if (!StringUtils.isBlank(error)) {
+        return error;
+      }
+      
+      error = RuleUtils.validateInteger(ruleDefinition.getIfCondition().getIfConditionEnumArg0());
+  
+      if (!StringUtils.isBlank(error)) {
+        return error;
+      }
+  
+      String sources = ruleDefinition.getIfCondition().getIfConditionEnumArg1();
+      if (!StringUtils.isBlank(sources)) {
+        error = RuleUtils.validateSources(sources);
+      }
+  
+      if (!StringUtils.isBlank(error)) {
+        return error;
+      }
+  
+      return null;
+    }
+    
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeAttributeDef(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeAttributeDef(RuleDefinition ruleDefinition) {
+      return false;
+    }
+  
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeGroup(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeGroup(RuleDefinition ruleDefinition) {
+      return true;
+    }
+  
+    /**
+     * @see edu.internet2.middleware.grouper.rules.RuleIfConditionEnum#isIfOwnerTypeStem(edu.internet2.middleware.grouper.rules.RuleDefinition)
+     */
+    @Override
+    public boolean isIfOwnerTypeStem(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    @Override
+    public boolean usesArg0() {
+      return true;
+    }
+
+    @Override
+    public boolean usesArg1() {
+      return true;
+    }
+
+    @Override
+    public GroupPrivilegeStrategy getGroupPrivilegeStrategy() {
+      return GroupPrivilegeStrategy.read;
+    }
+
+    @Override
+    public StemPrivilegeStrategy getStemPrivilegeStrategy() {
+      return null;
+    }
+
+    @Override
+    public RuleOwnerType getOwnerType() {
+      return RuleOwnerType.GROUP;
+    }
+  },
+  
+  nameMatchesRegex {
+
+    @Override
+    public boolean usesArg0() {
+      return true;
+    }
+
+    @Override
+    public boolean usesArg1() {
+      return false;
+    }
+
+    @Override
+    public boolean shouldFire(RuleDefinition ruleDefinition, RuleEngine ruleEngine,
+        RulesBean rulesBean) {
+      
+      String regex = ruleDefinition.getIfCondition().getIfConditionEnumArg0();
+      
+      if (StringUtils.isBlank(regex)) {
+        return true;
+      }
+
+      String name = rulesBean.getGroup().getName();
+      Pattern pattern = null;
+      try {        
+        pattern = Pattern.compile(regex);
+      } catch (PatternSyntaxException e) {
+        throw new RuntimeException("Invalid regex: '"+regex+"' configured on the rule");
+      }
+      
+      Matcher matcher = pattern.matcher(name);
+      return matcher.matches();
+    }
+
+    @Override
+    public boolean isIfOwnerTypeGroup(RuleDefinition ruleDefinition) {
+      return true;
+    }
+
+    @Override
+    public boolean isIfOwnerTypeStem(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    @Override
+    public boolean isIfOwnerTypeAttributeDef(RuleDefinition ruleDefinition) {
+      return false;
+    }
+
+    @Override
+    public GroupPrivilegeStrategy getGroupPrivilegeStrategy() {
+      return null;
+    }
+
+    @Override
+    public StemPrivilegeStrategy getStemPrivilegeStrategy() {
+      return null;
+    }
+
+    @Override
+    public RuleOwnerType getOwnerType() {
+      return RuleOwnerType.GROUP;
+    }
+    
+    @Override
+    public String validate(RuleDefinition ruleDefinition) {
+      return null;
+    }
+    
+    
+  };
+  
+  /** logger */
+  private static final Log LOG = GrouperUtil.getLog(RuleIfConditionEnum.class);
+  
+  
+  public boolean isAdminOnly() {
+    return false;
+  }
+  
+  public abstract boolean usesArg0();
+
+  public abstract boolean usesArg1();
+
+  /**
+   * should fire
+   * @param ruleDefinition
+   * @param ruleEngine
+   * @param rulesBean
+   * @return if should fire
+   */
+  public abstract boolean shouldFire(RuleDefinition ruleDefinition, 
+      RuleEngine ruleEngine, RulesBean rulesBean);
+  
+  /**
+   * Whether or not the rule if condition owner type is a group
+   * @param ruleDefinition 
+   * @return true if the if condition owner type is a group
+   */
+  public abstract boolean isIfOwnerTypeGroup(RuleDefinition ruleDefinition);
+  
+  /**
+   * Whether or not the rule if condition owner type is a stem
+   * @param ruleDefinition 
+   * @return true if the if condition owner type is a stem
+   */
+  public abstract boolean isIfOwnerTypeStem(RuleDefinition ruleDefinition);
+  
+  /**
+   * Whether or not the rule if condition owner type is an attribute def
+   * @param ruleDefinition 
+   * @return true if the if condition owner type is an attribute def
+   */
+  public abstract boolean isIfOwnerTypeAttributeDef(RuleDefinition ruleDefinition);
+  
+  /**
+   * what privileges the logged in user needs to have to view the group while editing the rule
+   * @return
+   */
+  public abstract GroupPrivilegeStrategy getGroupPrivilegeStrategy();
+  
+  
+  /**
+   * what privileges the logged in user needs to have to view the folder while editing the rule
+   * @return
+   */
+  public abstract StemPrivilegeStrategy getStemPrivilegeStrategy();
+  
+  /**
+   * do a case-insensitive matching
+   * 
+   * @param string
+   * @param exceptionOnNull will not allow null or blank entries
+   * @return the enum or null or exception if not found
+   */
+  public static RuleIfConditionEnum valueOfIgnoreCase(String string, boolean exceptionOnNull) {
+    return GrouperUtil.enumValueOfIgnoreCase(RuleIfConditionEnum.class, 
+        string, exceptionOnNull);
+
+  }
+  
+  /**
+   * do a case-insensitive matching
+   * 
+   * @param string
+   * @param exceptionOnNull will not allow null or blank entries
+   * @param exceptionIfInvalid if there is a string, but it is not an enum, if it should throw an exception.
+   * pass false to look up the enum of an invalid rule without blowing up
+   * @return the enum or null or exception if not found
+   */
+  public static RuleIfConditionEnum valueOfIgnoreCase(String string, boolean exceptionOnNull, boolean exceptionIfInvalid) {
+    return GrouperUtil.enumValueOfIgnoreCase(RuleIfConditionEnum.class, 
+        string, exceptionOnNull, exceptionIfInvalid);
+
+  }
+  
+  /**
+   * validate the enum
+   * @param ruleDefinition 
+   * @return error message or null if ok
+   */
+  public String validate(RuleDefinition ruleDefinition) {
+    
+    if (!StringUtils.isBlank(ruleDefinition.getIfCondition().getIfConditionEnumArg0())
+        || !StringUtils.isBlank(ruleDefinition.getIfCondition().getIfConditionEnumArg1())) {
+      return "This if condition enum does not take args: " + this.name() + ", " 
+        + ruleDefinition.getIfCondition().getIfConditionEnumArg0()
+        + ", " + ruleDefinition.getIfCondition().getIfConditionEnumArg1();
+    }
+    
+    RuleIfCondition ruleIfCondition = ruleDefinition.getIfCondition();
+    if (!StringUtils.isBlank(ruleIfCondition.getIfOwnerId()) || !StringUtils.isBlank(ruleIfCondition.getIfOwnerName())) {
+      return "This ifConditionEnum " + this.name() + " requires no ifOwnerId or ifOwnerName";
+    }
+    return null;
+  }
+  
+  /**
+   * make sure there are no params
+   * @param ruleDefinition
+   * @return error message if there are params
+   */
+  public static String validateNoParams(@SuppressWarnings("unused") RuleDefinition ruleDefinition) {
+    //if (!StringUtils.isBlank(ruleDefinition.getIfCondition().get))
+    //TODO
+    return null;
+  }
+
+  public abstract RuleOwnerType getOwnerType();
+
+  
+}

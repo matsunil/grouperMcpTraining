@@ -1,0 +1,1591 @@
+/*******************************************************************************
+ * Copyright 2024 Internet2
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ ******************************************************************************/
+package edu.internet2.middleware.grouper.ws.mcp;
+
+import java.io.IOException;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+import java.util.Map;
+import java.util.UUID;
+import java.util.regex.Pattern;
+
+import javax.servlet.ServletException;
+import javax.servlet.http.HttpServlet;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+import com.auth0.jwt.interfaces.DecodedJWT;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.logging.Log;
+
+import edu.internet2.middleware.grouper.GrouperSession;
+import edu.internet2.middleware.grouper.Member;
+import edu.internet2.middleware.grouper.MemberFinder;
+import edu.internet2.middleware.grouper.SubjectFinder;
+import edu.internet2.middleware.grouper.authentication.GrouperOAuthClient;
+import edu.internet2.middleware.grouper.authentication.GrouperOAuthSigningKey;
+import edu.internet2.middleware.grouper.authentication.GrouperOAuthStore;
+import edu.internet2.middleware.grouper.mcp.GrouperMcpGroupMembership;
+import edu.internet2.middleware.grouper.mcp.GrouperToolException;
+import edu.internet2.middleware.grouper.mcp.GrouperToolExecutor;
+import edu.internet2.middleware.grouper.cfg.GrouperConfig;
+import edu.internet2.middleware.grouper.cfg.GrouperHibernateConfig;
+import edu.internet2.middleware.grouper.hibernate.GrouperContext;
+import edu.internet2.middleware.grouper.j2ee.Authentication;
+import edu.internet2.middleware.grouper.util.GrouperUtil;
+import edu.internet2.middleware.grouper.ws.GrouperWsConfig;
+import edu.internet2.middleware.grouper.ws.security.WsCustomAuthentication;
+import edu.internet2.middleware.subject.Subject;
+
+/**
+ * MCP (Model Context Protocol) server servlet implementing the Streamable HTTP transport
+ * (spec version 2025-03-26).
+ *
+ * <p>Authentication is supported via two mechanisms:</p>
+ * <ol>
+ *   <li><strong>OAuth 2.1 JWT</strong> - Bearer token from the Grouper OAuth flow (preferred for MCP clients)</li>
+ *   <li><strong>Normal WS authentication</strong> - HTTP Basic auth or container-managed auth
+ *   (same as regular Grouper WS)</li>
+ * </ol>
+ * <p>If a Bearer token is present it is tried first.  If no Bearer token is present,
+ * the servlet falls back to normal WS authentication (HTTP Basic if
+ * {@code grouper.is.ws.basicAuthn} is enabled, or a custom authentication class).
+ * If neither authentication method succeeds, the error message references the
+ * OAuth flow.</p>
+ *
+ * <p>All communication happens on a single endpoint {@code /mcp}:</p>
+ * <ul>
+ *   <li>POST - Client-to-server JSON-RPC 2.0 messages (initialize, tools/list, tools/call, etc.)</li>
+ *   <li>DELETE - Session termination</li>
+ *   <li>GET - Returns 405 (server-initiated SSE not needed for this tool server)</li>
+ * </ul>
+ *
+ * <p>{@code server/discover} is answered so that a client on spec version 2026-07-28, which has
+ * no initialize handshake, can find out which protocol versions this server speaks instead of
+ * getting a "method not found" it cannot interpret. This server implements the 2025-03-26
+ * semantics and accepts requests declaring any of the handshake based revisions, so those are
+ * the versions it advertises.</p>
+ *
+ * <p>The {@code Mcp-Session-Id} header is accepted but not required. A session id is minted on
+ * {@code initialize} for clients on spec version 2025-03-26, which send it back on subsequent
+ * requests. Sessions were removed from the Streamable HTTP transport in spec version
+ * 2026-07-28, so clients on that revision never send the header and do not call
+ * {@code initialize} at all. No state is kept against the session id, so both work.</p>
+ *
+ * @author mchyzer
+ */
+public class GrouperMcpServlet extends HttpServlet {
+
+  private static final long serialVersionUID = 1L;
+
+  private static final Log LOG = GrouperUtil.getLog(GrouperMcpServlet.class);
+
+  private static final String MCP_PROTOCOL_VERSION = "2025-03-26";
+
+  /**
+   * the protocol version which has no initialize handshake, and instead has each request carry
+   * its own protocol version and client capabilities and mirror some body fields into HTTP
+   * headers.  a request declaring this version is validated and served differently to one from
+   * a client on any of the earlier, handshake based revisions.
+   */
+  private static final String MODERN_PROTOCOL_VERSION = "2026-07-28";
+
+  /**
+   * protocol versions this server accepts on a request, newest first.
+   *
+   * <p>These all establish a session with an initialize handshake and use the request and
+   * response shapes this server implements. What the later two revisions added is advertised
+   * through capabilities rather than changing the transport, so a request labelled with any of
+   * them is served the same way and gets the same tools capability. Listing them means this
+   * server will accept and serve such a request, not that it implements every feature those
+   * revisions introduced.</p>
+   *
+   * <p>{@link #MCP_PROTOCOL_VERSION} remains the version answered to initialize.</p>
+   */
+  private static final String[] SUPPORTED_PROTOCOL_VERSIONS = new String[] {
+      MODERN_PROTOCOL_VERSION, "2025-11-25", "2025-06-18", MCP_PROTOCOL_VERSION};
+
+  private static final String SERVER_NAME = "grouper-mcp-server";
+
+  private static final String SERVER_VERSION = "1.0.0";
+
+  private static final String SESSION_ID_HEADER = "Mcp-Session-Id";
+
+  /** HTTP header carrying the protocol version of a request, added in spec version 2025-06-18 */
+  private static final String PROTOCOL_VERSION_HEADER = "MCP-Protocol-Version";
+
+  /**
+   * key in the request's _meta carrying the protocol version, added in spec version 2026-07-28
+   * when the initialize handshake was removed and every request became self describing
+   */
+  private static final String META_PROTOCOL_VERSION = "io.modelcontextprotocol/protocolVersion";
+
+  /**
+   * key in a result's _meta where the server identifies itself, added in spec version
+   * 2026-07-28 since there is no longer an initialize handshake to carry it
+   */
+  private static final String META_SERVER_INFO = "io.modelcontextprotocol/serverInfo";
+
+  /**
+   * key in a request's _meta carrying what the client supports.  required on every request in
+   * spec version 2026-07-28, since without a handshake there is nowhere else to declare it
+   */
+  private static final String META_CLIENT_CAPABILITIES =
+      "io.modelcontextprotocol/clientCapabilities";
+
+  /** HTTP header mirroring the method of the request body */
+  private static final String MCP_METHOD_HEADER = "Mcp-Method";
+
+  /** HTTP header mirroring the name of the tool, resource or prompt the request is for */
+  private static final String MCP_NAME_HEADER = "Mcp-Name";
+
+  /** marks the start of a header value which is base64 encoded rather than plain */
+  private static final String BASE64_SENTINEL_PREFIX = "=?base64?";
+
+  /** marks the end of a header value which is base64 encoded rather than plain */
+  private static final String BASE64_SENTINEL_SUFFIX = "?=";
+
+  /** JSON-RPC error code for headers which do not agree with the request body */
+  private static final int ERROR_HEADER_MISMATCH = -32020;
+
+  /** JSON-RPC error code for a protocol version this server does not implement */
+  private static final int ERROR_UNSUPPORTED_PROTOCOL_VERSION = -32022;
+
+  /** JSON-RPC error code for params which are not shaped the way the method requires */
+  private static final int ERROR_INVALID_PARAMS = -32602;
+
+  /** JSON-RPC error code for a method this server does not implement */
+  private static final int ERROR_METHOD_NOT_FOUND = -32601;
+
+  /** JSON-RPC error code for a request which is not a well formed JSON-RPC request */
+  private static final int ERROR_INVALID_REQUEST = -32600;
+
+  /** JSON-RPC error code for a fault in this server rather than in the request */
+  private static final int ERROR_INTERNAL_ERROR = -32603;
+
+  /** HTTP header a browser sends identifying the page a request came from */
+  private static final String ORIGIN_HEADER = "Origin";
+
+  /**
+   * pattern to find all grouper.mcp.allowedOrigin.{configId}.regex config keys
+   */
+  private static final Pattern ALLOWED_ORIGIN_CONFIG_PATTERN = Pattern.compile(
+      "^grouper\\.mcp\\.allowedOrigin\\.([^.]+)\\.regex$");
+
+  /**
+   * how long a client may consider a tools/list result fresh, in milliseconds.  the tool list
+   * changes when a user's MCP group memberships change, and those memberships are themselves
+   * cached on the server for 60 seconds, so a shorter value here would not make a change take
+   * effect any sooner.
+   */
+  private static final int TOOLS_LIST_TTL_MS = 60000;
+
+  /**
+   * how long a client may consider a server/discover result fresh, in milliseconds.  what it
+   * returns only changes when Grouper is upgraded or reconfigured.
+   */
+  private static final int DISCOVER_TTL_MS = 3600000;
+
+  private static final ObjectMapper objectMapper = new ObjectMapper();
+
+
+  @Override
+  protected void doPost(HttpServletRequest request, HttpServletResponse response)
+      throws ServletException, IOException {
+
+    // this comes ahead of the Origin check, which cannot say which origin is this server's
+    // without the same configuration, so that a deployment which has not set it is told that
+    // rather than being told its own requests are cross origin
+    if (rejectIfMcpUrlsNotConfigured(response)) {
+      return;
+    }
+
+    // check the origin before anything else, so credentials from a page this server does not
+    // recognize are not processed at all
+    if (rejectIfOriginNotAllowed(request, response)) {
+      return;
+    }
+
+    // authenticate - try OAuth JWT first, then fall back to normal WS auth
+    GrouperMcpAuthUser authUser = authenticateRequest(request, response);
+    if (authUser == null) {
+      // response has already been set by authenticateRequest
+      return;
+    }
+
+    assignAuditContext(authUser);
+
+    JsonNode jsonRpcRequest;
+    try {
+      jsonRpcRequest = objectMapper.readTree(request.getInputStream());
+    } catch (Exception e) {
+      sendJsonRpcError(response, null, -32700, "Parse error");
+      return;
+    }
+
+    JsonNode methodNode = jsonRpcRequest.get("method");
+    String method = methodNode == null || !methodNode.isTextual() ? null : methodNode.asText();
+    JsonNode id = jsonRpcRequest.get("id");
+    JsonNode params = jsonRpcRequest.get("params");
+
+    // A method which is present but is not a string makes this something other than a JSON-RPC
+    // request, which is a different thing from naming a method this server does not have.  It
+    // is read with isTextual rather than asText, whose answer for a number is that number
+    // written out and for an object is nothing at all, either of which would go on to be
+    // looked up as though it were a method name.
+    if (methodNode != null && !methodNode.isTextual()) {
+      sendJsonRpcError(response, id, ERROR_INVALID_REQUEST,
+          "Invalid Request: method must be a string",
+          null, id == null ? HttpServletResponse.SC_BAD_REQUEST : HttpServletResponse.SC_OK);
+      return;
+    }
+
+    // JSON-RPC allows an id to be a string, a number or null and nothing else.  An id of any
+    // other shape cannot be echoed back on the response without this server itself emitting
+    // something which is not a valid JSON-RPC response, so it is refused rather than repeated.
+    // The error deliberately carries no id, since the id which arrived is the problem.
+    if (id != null && !id.isTextual() && !id.isNumber() && !id.isNull()) {
+      sendJsonRpcError(response, null, ERROR_INVALID_REQUEST,
+          "Invalid Request: id must be a string, a number or null");
+      return;
+    }
+
+    if (method == null) {
+      // A notification the server cannot accept has to be refused with an HTTP error status,
+      // where a request is answered with a JSON-RPC error at HTTP 200 as it always has been.
+      // The status is not simply always an error: a client working out which era this server
+      // speaks reads a 400 whose body is not one of the errors this revision defines as a
+      // legacy server and falls back to the initialize handshake, and this code is not one of
+      // those.  A notification is never used to work that out, so there the status is safe.
+      sendJsonRpcError(response, id, ERROR_INVALID_REQUEST, "Invalid Request: missing method",
+          null, id == null ? HttpServletResponse.SC_BAD_REQUEST : HttpServletResponse.SC_OK);
+      return;
+    }
+
+    if (rejectIfProtocolVersionNotSupported(request, response, params, id)) {
+      return;
+    }
+
+    // a request which declares spec version 2026-07-28 has to carry what that revision
+    // requires.  a request from any of the handshake based revisions carries none of it and is
+    // served the way this server has always served requests
+    boolean modernRequest = isModernProtocolVersion(declaredProtocolVersion(request, params));
+
+    if (modernRequest && rejectIfModernRequestInvalid(request, response, jsonRpcRequest, method,
+        params, id)) {
+      return;
+    }
+
+    // Spec version 2026-07-28 removed the initialize handshake, so the two methods which make
+    // it up are not methods of that revision and a request declaring it is answered the way any
+    // other method this server does not implement would be.  Without this, a request which
+    // declared 2026-07-28 and then called initialize would be served the handshake and handed
+    // back a session and a protocol version of 2025-03-26, neither of which it asked for.
+    //
+    // Only a request which declares the modern revision is turned away.  The same call without
+    // that metadata is still served the handshake, which is what a client on any of the earlier
+    // revisions opens with and depends on.
+    if (modernRequest && isMethodRemovedInModernRevision(method)) {
+      sendJsonRpcError(response, id, ERROR_METHOD_NOT_FOUND,
+          "Method not found: " + method + " was removed in protocol version "
+          + MODERN_PROTOCOL_VERSION, null, HttpServletResponse.SC_NOT_FOUND);
+      return;
+    }
+
+    // A request with no id at all is a notification.  JSON-RPC says a notification is never
+    // answered, and spec version 2026-07-28 says one the server accepts is acknowledged with
+    // 202 and no body.  Without this, a notification shaped call to something like tools/list
+    // would be run and answered with a full result, which is a response the client never asked
+    // for and which carries no id for the client to match it against anything.
+    //
+    // Note an id which is present and explicitly null is a request, not a notification.  An
+    // absent id is the only thing which marks a notification, so this cannot be told apart from
+    // a client which left the id out by mistake, and such a client stops getting results.
+    //
+    // This sits after the checks above so that a notification which is not well formed is still
+    // told why, which the transport allows.
+    if (id == null) {
+
+      // Spec version 2026-07-28 defines no notification a client can send over this transport
+      // at all, so there is nothing a notification could be asking this server to do and it
+      // cannot be accepted.  The transport says a notification the server cannot accept is
+      // refused with an HTTP error status, where one it accepts gets 202 and no body.  Clients
+      // on the earlier revisions do have a notification to send, notifications/initialized, so
+      // for them a notification is still accepted.
+      if (modernRequest) {
+        sendJsonRpcError(response, null, ERROR_INVALID_REQUEST,
+            "Invalid Request: protocol version " + MODERN_PROTOCOL_VERSION + " defines no "
+            + "notification a client sends over this transport, so '" + method
+            + "' has to carry an id", null, HttpServletResponse.SC_BAD_REQUEST);
+        return;
+      }
+
+      response.setStatus(HttpServletResponse.SC_ACCEPTED);
+      return;
+    }
+
+    // The Mcp-Session-Id header is optional.  Clients on spec version 2025-03-26 send it back
+    // on every request after initialize, and this server still mints one for them.  Sessions
+    // were removed from the Streamable HTTP transport in spec version 2026-07-28, so clients on
+    // that revision never send it, and requiring it would make every call after the handshake
+    // fail.  This server keeps no state against the session id, so there is nothing to look up
+    // and nothing to enforce.
+    if (LOG.isDebugEnabled()) {
+      String sessionId = request.getHeader(SESSION_ID_HEADER);
+      LOG.debug("MCP method '" + method + "' with "
+          + (StringUtils.isBlank(sessionId) ? "no session id" : "session id: " + sessionId));
+    }
+
+    ObjectNode result;
+
+    try {
+      switch (method) {
+        case "initialize":
+          result = handleInitialize(params, response);
+          break;
+        case "server/discover":
+          result = handleServerDiscover();
+          break;
+        case "notifications/initialized":
+          response.setStatus(HttpServletResponse.SC_ACCEPTED);
+          return;
+        case "tools/list":
+          result = handleToolsList(params, authUser);
+          break;
+        case "tools/call":
+          result = handleToolsCall(params, authUser);
+          break;
+        case "ping":
+          result = objectMapper.createObjectNode();
+          break;
+        default:
+          // Spec version 2026-07-28 answers an unknown method with HTTP 404, where the earlier
+          // revisions use HTTP 200.  The status on its own is ambiguous, since a server which
+          // hosts no MCP endpoint at this path would answer 404 as well.  What tells the two
+          // apart is the JSON-RPC error body sent below: a client which is working out what it
+          // is talking to reads a 404 carrying one as "this is an MCP server which does not
+          // implement that method", and a 404 without one as "this is not an MCP endpoint".
+          sendJsonRpcError(response, id, ERROR_METHOD_NOT_FOUND, "Method not found: " + method,
+              null, modernRequest ? HttpServletResponse.SC_NOT_FOUND
+                  : HttpServletResponse.SC_OK);
+          return;
+      }
+    } catch (GrouperMcpProtocolException gmpe) {
+      // the request itself could not be acted on, which the spec reports as a JSON-RPC error
+      // and not as a tool result.  not logged as an error, since a client naming a tool which
+      // does not exist is the client's mistake and not a fault in this server
+      sendJsonRpcError(response, id, gmpe.getCode(), gmpe.getMessage());
+      return;
+
+    } catch (Exception e) {
+      LOG.error("Error handling MCP method: " + method, e);
+      sendJsonRpcError(response, id, ERROR_INTERNAL_ERROR, "Internal error: " + e.getMessage());
+      return;
+    }
+
+    // Spec version 2026-07-28 requires a result type on every result.  "complete" means the
+    // request finished and this is the final content, which is the only kind of result this
+    // server produces; the other value, "input_required", is for servers which ask the client
+    // for more information part way through a request.  This is set here rather than in each
+    // tool so that every method and every tool gets it.  Clients on spec version 2025-03-26
+    // ignore fields they do not know about.
+    if (!result.has("resultType")) {
+      result.put("resultType", "complete");
+    }
+
+    // Spec version 2026-07-28 has the server identify itself in every result rather than only
+    // in the initialize response, since there is no longer a handshake to carry it.  set here
+    // so that every method and every tool gets it, and without disturbing a result which
+    // already put something in its _meta.
+    addServerInfoToMeta(result);
+
+    // build JSON-RPC response
+    ObjectNode jsonRpcResponse = objectMapper.createObjectNode();
+    jsonRpcResponse.put("jsonrpc", "2.0");
+    if (id != null) {
+      jsonRpcResponse.set("id", id);
+    }
+    jsonRpcResponse.set("result", result);
+
+    response.setContentType("application/json");
+    response.setCharacterEncoding("UTF-8");
+    response.getWriter().write(objectMapper.writeValueAsString(jsonRpcResponse));
+    response.getWriter().flush();
+  }
+
+  /**
+   * add this server's name and version to the _meta of a result, so that a client which has
+   * not been through an initialize handshake still knows what it is talking to.  the _meta
+   * object is created if the result does not have one, and an entry which is already there is
+   * left alone.
+   * @param result the result to add to
+   */
+  private static void addServerInfoToMeta(ObjectNode result) {
+
+    ObjectNode meta = null;
+    if (result.has("_meta") && result.get("_meta").isObject()) {
+      meta = (ObjectNode)result.get("_meta");
+    } else {
+      meta = objectMapper.createObjectNode();
+      result.set("_meta", meta);
+    }
+
+    if (meta.has(META_SERVER_INFO)) {
+      return;
+    }
+
+    ObjectNode serverInfo = objectMapper.createObjectNode();
+    serverInfo.put("name", SERVER_NAME);
+    serverInfo.put("version", SERVER_VERSION);
+    meta.set(META_SERVER_INFO, serverInfo);
+  }
+
+  /**
+   * audit what this request changes as the caller.  audit entries take the logged in member from
+   * the default context.  the UI sets it for each request and a web service call sets it once it
+   * knows who is calling, but an MCP request branches off before the web service would, so
+   * without this every change made through MCP was audited with nobody logged in, and screens
+   * which show who made a change, such as the config history, showed no one.  only the logged in
+   * member is set, as the UI does: act as is left for Grouper to fill in when a change runs as
+   * someone else, such as a GSH template which runs as a configured subject.  the web service
+   * filter creates this context for the request and removes it at the end.  if MCP ever passes a
+   * GSH template its own act as subject, GshTemplateExec's check that the caller is not already
+   * acting as someone else reads a set logged in member with an empty act as as a mismatch and
+   * refuses, so that check would need to treat an empty act as as not acting as anyone
+   * @param authUser the authenticated caller
+   */
+  private static void assignAuditContext(GrouperMcpAuthUser authUser) {
+    GrouperContext grouperContext = GrouperContext.retrieveDefaultContext();
+    if (grouperContext != null && authUser != null && !StringUtils.isBlank(authUser.getMemberId())) {
+      grouperContext.setLoggedInMemberId(authUser.getMemberId());
+    }
+  }
+
+  /**
+   * authenticate the request.  tries OAuth JWT first (Bearer token), then falls back
+   * to normal WS authentication (HTTP Basic or container auth).  if neither succeeds,
+   * returns null and sets the response to 401 with an OAuth error.
+   * @param request the HTTP request
+   * @param response the HTTP response
+   * @return the authenticated user, or null if authentication failed
+   */
+  private GrouperMcpAuthUser authenticateRequest(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+
+    String authHeader = request.getHeader("Authorization");
+
+    if (GrouperConfig.retrieveConfig().propertyValueBoolean("grouper.oauth.logAuthDebug", false)) {
+      LOG.warn("MCP authenticateRequest: authHeader "
+          + (StringUtils.isBlank(authHeader) ? "is blank"
+              : (authHeader.startsWith("Bearer ") ? "is Bearer (len=" + authHeader.length() + ")"
+                  : "starts with: " + StringUtils.abbreviate(authHeader, 20)))
+          + ", remoteAddr=" + request.getRemoteAddr());
+    }
+
+    // try OAuth JWT if Bearer token is present
+    if (StringUtils.isNotBlank(authHeader) && authHeader.startsWith("Bearer ")
+        && GrouperConfig.retrieveConfig().propertyValueBoolean("grouper.mcp.auth.oauth", true)) {
+      String bearerToken = authHeader.substring("Bearer ".length()).trim();
+      DecodedJWT decodedJwt = GrouperOAuthSigningKey.verifyAndDecodeJwt(bearerToken);
+      if (decodedJwt != null) {
+
+        String subjectId = decodedJwt.getSubject();
+        String subjectSourceId = decodedJwt.getClaim("subjectSourceId").asString();
+
+        LOG.debug("MCP request authenticated via OAuth: subject=" + subjectId
+            + ", client=" + decodedJwt.getClaim("client_id").asString());
+
+        // set REMOTE_USER so WS service logic can identify the logged-in user
+        if (StringUtils.isNotBlank(subjectSourceId)) {
+          request.setAttribute("REMOTE_USER", subjectSourceId + "::::" + subjectId);
+        } else {
+          request.setAttribute("REMOTE_USER", subjectId);
+        }
+
+        // resolve to a Subject
+        GrouperMcpAuthUser authUser = resolveAuthUser(subjectSourceId != null
+            ? (subjectSourceId + "::::" + subjectId) : subjectId);
+        if (authUser == null) {
+          response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+          response.setHeader("WWW-Authenticate", "Bearer error=\"invalid_token\"");
+          return null;
+        }
+
+        // extract consent scopes from JWT claims
+        authUser.setOAuthAuthenticated(true);
+        authUser.setJwtIssuedAt(decodedJwt.getIssuedAt());
+        authUser.setConsentScopeReadonly(
+            decodedJwt.getClaim("grouper_readonly") != null
+            && !decodedJwt.getClaim("grouper_readonly").isNull()
+            && decodedJwt.getClaim("grouper_readonly").asBoolean());
+        authUser.setConsentScopeReadwrite(
+            decodedJwt.getClaim("grouper_readwrite") != null
+            && !decodedJwt.getClaim("grouper_readwrite").isNull()
+            && decodedJwt.getClaim("grouper_readwrite").asBoolean());
+        authUser.setConsentScopeSqlReadonly(
+            decodedJwt.getClaim("grouper_sql_readonly") != null
+            && !decodedJwt.getClaim("grouper_sql_readonly").isNull()
+            && decodedJwt.getClaim("grouper_sql_readonly").asBoolean());
+        authUser.setConsentScopeAdminReadonly(
+            decodedJwt.getClaim("grouper_admin_readonly") != null
+            && !decodedJwt.getClaim("grouper_admin_readonly").isNull()
+            && decodedJwt.getClaim("grouper_admin_readonly").asBoolean());
+        authUser.setConsentScopeAdminReadwrite(
+            decodedJwt.getClaim("grouper_admin_readwrite") != null
+            && !decodedJwt.getClaim("grouper_admin_readwrite").isNull()
+            && decodedJwt.getClaim("grouper_admin_readwrite").asBoolean());
+
+        // extract readwrite scope restrictions from JWT claims
+        if (decodedJwt.getClaim("grouper_readwrite_folders") != null
+            && !decodedJwt.getClaim("grouper_readwrite_folders").isNull()) {
+          authUser.setConsentReadwriteFolders(
+              decodedJwt.getClaim("grouper_readwrite_folders").asList(String.class));
+        }
+        if (decodedJwt.getClaim("grouper_readwrite_groups") != null
+            && !decodedJwt.getClaim("grouper_readwrite_groups").isNull()) {
+          authUser.setConsentReadwriteGroups(
+              decodedJwt.getClaim("grouper_readwrite_groups").asList(String.class));
+        }
+        if (decodedJwt.getClaim("grouper_readwrite_subjects") != null
+            && !decodedJwt.getClaim("grouper_readwrite_subjects").isNull()) {
+          authUser.setConsentReadwriteSubjects(
+              decodedJwt.getClaim("grouper_readwrite_subjects").asList(String.class));
+        }
+
+        if (GrouperConfig.retrieveConfig().propertyValueBoolean("grouper.oauth.logAuthDebug", false)) {
+          LOG.warn("MCP OAuth scope: readwrite=" + authUser.isConsentScopeReadwrite()
+              + ", folders=" + authUser.getConsentReadwriteFolders()
+              + ", groups=" + authUser.getConsentReadwriteGroups()
+              + ", subjects=" + authUser.getConsentReadwriteSubjects());
+        }
+
+        // if readwrite data scope restrictions are enabled and user has readwrite consent,
+        // mark that empty restriction lists mean "nothing allowed" (not "wide open")
+        if (authUser.isConsentScopeReadwrite()
+            && GrouperConfig.retrieveConfig().propertyValueBoolean(
+                "grouper.mcp.oauth.requireReadwriteDataScope", true)) {
+          authUser.setConsentReadwriteScopeRestricted(true);
+        }
+
+        // look up OAuth client to verify it still exists and get internal id for audit logging
+        String clientId = decodedJwt.getClaim("client_id").asString();
+        if (StringUtils.isNotBlank(clientId)) {
+          try {
+            GrouperOAuthClient oauthClient = GrouperOAuthStore.retrieveClient(clientId);
+            if (oauthClient == null) {
+              LOG.warn("MCP auth: OAuth client has been deleted: " + clientId + ", returning 401");
+              response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+              response.setHeader("WWW-Authenticate", "Bearer error=\"invalid_token\"");
+              return null;
+            }
+            authUser.setOauthClientInternalId(oauthClient.getInternalId());
+          } catch (Exception e) {
+            LOG.warn("Could not look up OAuth client: " + clientId, e);
+          }
+        }
+
+        return authUser;
+      }
+
+      // Bearer token present but not a valid JWT
+      LOG.warn("MCP auth: Bearer token present but JWT verification failed, returning 401");
+      response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+      response.setHeader("WWW-Authenticate", "Bearer error=\"invalid_token\"");
+      return null;
+    }
+
+    // try HTTP Basic authentication
+    if (StringUtils.isNotBlank(authHeader) && authHeader.startsWith("Basic ")
+        && GrouperConfig.retrieveConfig().propertyValueBoolean("grouper.mcp.auth.httpBasic", false)) {
+      boolean runGrouperWsWithBasicAuth = GrouperHibernateConfig.retrieveConfig()
+          .propertyValueBoolean("grouper.is.ws.basicAuthn", false);
+      if (runGrouperWsWithBasicAuth) {
+        boolean isValid = new Authentication().authenticate(authHeader,
+            edu.internet2.middleware.grouper.authentication.GrouperPassword.Application.WS,
+            request.getRemoteAddr());
+        if (isValid) {
+          String userName = Authentication.retrieveUsername(authHeader);
+
+          LOG.debug("MCP request authenticated via HTTP Basic: user=" + userName);
+
+          request.setAttribute("REMOTE_USER", userName);
+
+          GrouperMcpAuthUser authUser = resolveAuthUser(userName);
+          if (authUser != null) {
+            if (!GrouperMcpGroupMembership.isSubjectInGroup(authUser, "grouper.mcp.users.wsAuthnAllowed")) {
+              LOG.warn("MCP access denied for WS-authenticated user (not in wsAuthnAllowed group): " + userName);
+              response.setStatus(HttpServletResponse.SC_FORBIDDEN);
+              return null;
+            }
+            return authUser;
+          }
+        }
+      }
+    }
+
+    // try container auth
+    if (GrouperConfig.retrieveConfig().propertyValueBoolean("grouper.mcp.auth.container", false)) {
+      String remoteUser = request.getRemoteUser();
+      if (StringUtils.isBlank(remoteUser) && request.getUserPrincipal() != null) {
+        remoteUser = request.getUserPrincipal().getName();
+      }
+      if (StringUtils.isNotBlank(remoteUser)) {
+
+        LOG.debug("MCP request authenticated via container: user=" + remoteUser);
+
+        request.setAttribute("REMOTE_USER", remoteUser);
+        GrouperMcpAuthUser authUser = resolveAuthUser(remoteUser);
+        if (authUser != null) {
+          if (!GrouperMcpGroupMembership.isSubjectInGroup(authUser, "grouper.mcp.users.wsAuthnAllowed")) {
+            LOG.warn("MCP access denied for WS-authenticated user (not in wsAuthnAllowed group): " + remoteUser);
+            response.setStatus(HttpServletResponse.SC_FORBIDDEN);
+            return null;
+          }
+          return authUser;
+        }
+      }
+    }
+
+    // try custom authentication class
+    if (GrouperConfig.retrieveConfig().propertyValueBoolean("grouper.mcp.auth.customAuthClass", false)) {
+      String authenticationClassName = GrouperWsConfig.retrieveConfig().propertyValueString(
+          GrouperWsConfig.WS_SECURITY_NON_RAMPART_AUTHENTICATION_CLASS, null);
+      if (StringUtils.isNotBlank(authenticationClassName)) {
+        try {
+          Class<? extends WsCustomAuthentication> theClass = GrouperUtil.forName(authenticationClassName);
+          WsCustomAuthentication wsAuthentication = GrouperUtil.newInstance(theClass);
+          String userIdLoggedIn = wsAuthentication.retrieveLoggedInSubjectId(request);
+          if (StringUtils.isNotBlank(userIdLoggedIn)) {
+
+            LOG.debug("MCP request authenticated via custom auth: user=" + userIdLoggedIn);
+
+            request.setAttribute("REMOTE_USER", userIdLoggedIn);
+            GrouperMcpAuthUser authUser = resolveAuthUser(userIdLoggedIn);
+            if (authUser != null) {
+              if (!GrouperMcpGroupMembership.isSubjectInGroup(authUser, "grouper.mcp.users.wsAuthnAllowed")) {
+                LOG.warn("MCP access denied for WS-authenticated user (not in wsAuthnAllowed group): " + userIdLoggedIn);
+                response.setStatus(HttpServletResponse.SC_FORBIDDEN);
+                return null;
+              }
+              return authUser;
+            }
+          }
+        } catch (Exception e) {
+          LOG.warn("Error in custom WS authentication for MCP: " + e.getMessage(), e);
+        }
+      }
+    }
+
+    // no authentication succeeded
+    response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+    response.setHeader("WWW-Authenticate",
+        "Bearer resource_metadata=\"" + resourceMetadataUrl() + "\"");
+    return null;
+  }
+
+  /**
+   * where a client is told to look to find out which authorization server protects this MCP
+   * server, sent as the {@code resource_metadata} parameter of the {@code WWW-Authenticate}
+   * header on a request which did not authenticate.
+   *
+   * <p>Taken from {@code grouper.mcp.baseUrl}, which falls back to {@code grouper.ws.url},
+   * rather than from the request. This is the address a
+   * client goes to next in order to be told where to authenticate, so a value taken from the
+   * request would let whoever set its Host header choose where clients are sent. A client which
+   * followed such an address would be handed an authorization server of that party's choosing
+   * and would put the user's login page in front of them. The response goes back to whoever
+   * made the request, so poisoning it for somebody else needs something in front of this server
+   * which caches without regard to Host, or which passes on a Host from one request to another;
+   * neither should be relied on not to be there.</p>
+   *
+   * <p>There is no fallback for the case where neither is configured, since every
+   * request which could reach here has already been refused by
+   * {@link #rejectIfMcpUrlsNotConfigured(HttpServletResponse)}. It is asked for with
+   * {@code exceptionIfNull} so that an entry point added without that check fails here rather
+   * than putting the string "null" in front of the path and sending that to a client.</p>
+   *
+   * @return the URL of this server's protected resource metadata
+   */
+  static String resourceMetadataUrl() {
+    return GrouperConfig.getGrouperMcpBaseUrl(true) + "/.well-known/oauth-protected-resource";
+  }
+
+  /**
+   * resolve a user id (which may contain sourceId::::subjectId) to a GrouperMcpAuthUser
+   * holding the resolved Subject.
+   * @param userId the user id, possibly in sourceId::::subjectId format
+   * @return the auth user, or null if the subject cannot be resolved
+   */
+  private GrouperMcpAuthUser resolveAuthUser(String userId) {
+    String subjectId = userId;
+    String subjectSourceId = null;
+
+    // check for sourceId::::subjectId format
+    if (StringUtils.contains(userId, "::::")) {
+      String[] parts = GrouperUtil.splitTrim(userId, "::::");
+      subjectSourceId = parts[0];
+      subjectId = parts[1];
+    }
+
+    GrouperSession grouperSession = null;
+    try {
+      grouperSession = GrouperSession.startRootSession();
+
+      Subject subject;
+      if (StringUtils.isNotBlank(subjectSourceId)) {
+        subject = SubjectFinder.findByIdOrIdentifierAndSource(subjectId, subjectSourceId, false);
+      } else {
+        // check default source config
+        String defaultSourceId = StringUtils.trimToNull(
+            GrouperWsConfig.retrieveConfig().propertyValueString(
+                GrouperWsConfig.WS_LOGGED_IN_SUBJECT_DEFAULT_SOURCE));
+
+        if (StringUtils.isNotBlank(defaultSourceId)) {
+          subject = SubjectFinder.findByIdOrIdentifierAndSource(subjectId, defaultSourceId, false);
+        } else {
+          subject = SubjectFinder.findByIdOrIdentifier(subjectId, false);
+        }
+      }
+      if (subject != null) {
+        GrouperMcpAuthUser authUser = new GrouperMcpAuthUser(subject);
+        Member member = MemberFinder.findBySubject(grouperSession, subject, true);
+        authUser.setMemberInternalId(member.getInternalId());
+        authUser.setMemberId(member.getUuid());
+        return authUser;
+      }
+    } catch (Exception e) {
+      LOG.warn("Error resolving subject for MCP auth: " + userId, e);
+    } finally {
+      GrouperSession.stopQuietly(grouperSession);
+    }
+
+    LOG.error("Could not resolve subject for MCP auth: " + userId);
+    return null;
+  }
+
+  @Override
+  protected void doGet(HttpServletRequest request, HttpServletResponse response)
+      throws ServletException, IOException {
+    try {
+      if (rejectIfMcpUrlsNotConfigured(response)) {
+        return;
+      }
+
+      // the transport requires this on every connection, not only the ones which carry a body
+      if (rejectIfOriginNotAllowed(request, response)) {
+        return;
+      }
+
+      String pathInfo = request.getPathInfo();
+      // MCP clients may request well-known metadata under the MCP endpoint path
+      if (pathInfo != null && pathInfo.contains(".well-known")) {
+        GrouperMcpWellKnownServlet wellKnownServlet = new GrouperMcpWellKnownServlet();
+        wellKnownServlet.doGet(request, response);
+        return;
+      }
+      // server-initiated SSE stream not needed for this tool server
+      response.setHeader("Allow", "POST, DELETE");
+      response.sendError(HttpServletResponse.SC_METHOD_NOT_ALLOWED);
+    } catch (RuntimeException re) {
+      LOG.error("Error in MCP doGet", re);
+      throw re;
+    }
+  }
+
+  @Override
+  protected void doDelete(HttpServletRequest request, HttpServletResponse response)
+      throws ServletException, IOException {
+    try {
+      if (rejectIfMcpUrlsNotConfigured(response)) {
+        return;
+      }
+
+      // the transport requires this on every connection, not only the ones which carry a body
+      if (rejectIfOriginNotAllowed(request, response)) {
+        return;
+      }
+
+      String sessionId = request.getHeader(SESSION_ID_HEADER);
+      if (StringUtils.isNotBlank(sessionId)) {
+        LOG.info("MCP session terminated: " + sessionId);
+      }
+      response.setStatus(HttpServletResponse.SC_ACCEPTED);
+    } catch (RuntimeException re) {
+      LOG.error("Error in MCP doDelete", re);
+      throw re;
+    }
+  }
+
+  /**
+   * refuse to serve MCP while {@code grouper.ws.url} or {@code grouper.ui.url} is not
+   * configured, and say so in the response.
+   *
+   * <p>Everything this endpoint tells a client about itself, and the audience and issuer which
+   * bind its access tokens to it, come from those two properties. Serving requests without them
+   * meant publishing addresses taken from the Host header and accepting tokens carrying neither
+   * an audience nor an issuer, so a request is refused instead of served in a weaker form.
+   * See {@link GrouperOAuthStore#mcpUrlConfigurationError()}.</p>
+   *
+   * <p>The message names the properties, since whoever gets this is the person who can fix it,
+   * and it says nothing which is not already in the sample configuration file.</p>
+   *
+   * @param response the HTTP response
+   * @return true if the request was rejected and a response has already been sent
+   * @throws IOException if the response cannot be written
+   */
+  boolean rejectIfMcpUrlsNotConfigured(HttpServletResponse response) throws IOException {
+
+    String mcpUrlConfigurationError = GrouperOAuthStore.mcpUrlConfigurationError();
+
+    if (mcpUrlConfigurationError == null) {
+      return false;
+    }
+
+    // no id, this is rejected before the body is read.  the status is 503 rather than one of
+    // the 400s, both because this is the server's problem and not the request's, and because a
+    // client working out which revision this server speaks reads a 400 it does not recognize as
+    // a legacy server and starts a handshake which would fail here in the same way
+    sendJsonRpcError(response, null, ERROR_INTERNAL_ERROR, mcpUrlConfigurationError, null,
+        HttpServletResponse.SC_SERVICE_UNAVAILABLE);
+    return true;
+  }
+
+  /**
+   * reject a request whose Origin header this server does not allow.
+   *
+   * <p>This is protection against DNS rebinding. An attacker's web page cannot read this
+   * server's address directly, but it can make the name it was served from resolve to this
+   * server and have the victim's browser post here. The browser sends the attacker's page as
+   * the Origin, so refusing origins which are not recognized stops that.</p>
+   *
+   * <p>Only a browser sends an Origin header, so a request without one, such as from a command
+   * line client or another server, is not what this protects against and is allowed. A request
+   * whose Origin is this server's own configured origin is also allowed, since that is not
+   * cross origin. See {@link #configuredOrigin()} for why that comparison cannot be made
+   * against anything taken from the request.</p>
+   *
+   * <p>Any other origin must match a configured
+   * {@code grouper.mcp.allowedOrigin.<configId>.regex} pattern. A deployment behind a gateway
+   * which also wants browsers to reach Grouper directly at the backend address configures that
+   * address as one of these patterns. If no patterns are configured
+   * then no cross origin browser request is allowed, which is the safe default and means a
+   * deployment has to opt in to browser based clients rather than opt out.</p>
+   *
+   * @param request the HTTP request
+   * @param response the HTTP response
+   * @return true if the request was rejected and a response has already been sent
+   * @throws IOException if the response cannot be written
+   */
+  boolean rejectIfOriginNotAllowed(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+
+    String origin = StringUtils.trimToNull(request.getHeader(ORIGIN_HEADER));
+
+    // not a browser request
+    if (origin == null) {
+      return false;
+    }
+
+    // the page was served by this server, so this is not cross origin
+    String configuredOrigin = configuredOrigin();
+    if (configuredOrigin != null && configuredOrigin.equalsIgnoreCase(origin)) {
+      return false;
+    }
+
+    Map<String, String> regexMap = GrouperConfig.retrieveConfig()
+        .propertiesMap(ALLOWED_ORIGIN_CONFIG_PATTERN);
+
+    for (Map.Entry<String, String> regexEntry : GrouperUtil.nonNull(regexMap).entrySet()) {
+      String regex = regexEntry.getValue();
+      if (StringUtils.isBlank(regex)) {
+        continue;
+      }
+      try {
+        if (Pattern.matches(regex, origin)) {
+          return false;
+        }
+      } catch (Exception e) {
+        LOG.error("Invalid regex in config key '" + regexEntry.getKey() + "': " + regex, e);
+      }
+    }
+
+    LOG.warn("MCP request rejected, Origin not allowed: '" + origin + "', remoteAddr="
+        + request.getRemoteAddr() + ". Configure grouper.mcp.allowedOrigin.<configId>.regex "
+        + "to allow browser based clients from this origin.");
+
+    // no id, this is rejected before the body is read
+    sendJsonRpcError(response, null, ERROR_INVALID_REQUEST, "Origin not allowed", null,
+        HttpServletResponse.SC_FORBIDDEN);
+    return true;
+  }
+
+  /**
+   * the origin clients reach this server at, taken from {@code grouper.mcp.baseUrl} which falls
+   * back to {@code grouper.ws.url}, that is its scheme, host and port, with the port left off
+   * when it is the default for the scheme.
+   *
+   * <p>This is deliberately read from configuration and not worked out from the request. What
+   * the Origin check defends against is a page which made a name it controls resolve to this
+   * server's address, and in a request from such a page the Host header carries that attacker
+   * chosen name. Deciding which origin is this server's from the request would therefore be
+   * comparing the attacker's Origin against the attacker's own Host, which always agrees, and
+   * the check would pass in exactly the case it exists to catch.</p>
+   *
+   * <p>This is the one origin clients are told to use, and not also the origin of
+   * {@code grouper.ws.url} when the two differ. What a deployment publishes and what it treats
+   * as its own are then the same thing, rather than the trusted set quietly being wider than
+   * the address anybody was given. The consequence, in a deployment which sets
+   * {@code grouper.mcp.baseUrl}, is that a browser reaching Grouper directly at the backend
+   * address is cross origin and needs a {@code grouper.mcp.allowedOrigin.<configId>.regex}
+   * entry, which is the same way every other browser origin is allowed.</p>
+   *
+   * <p>{@code grouper.ws.url} is required whenever MCP is enabled, and
+   * {@code grouper.mcp.baseUrl} falls back to it, so a request which reaches the Origin check
+   * has already been past
+   * {@link #rejectIfMcpUrlsNotConfigured(HttpServletResponse)}. What is left here is a value
+   * which is set but is not a URL an origin can be taken from, and there is nothing to be done
+   * with that but treat no request as same origin. Every browser request then has to match a
+   * configured allowed origin pattern instead. Clients which are not browsers send no Origin at
+   * all and are not affected either way.</p>
+   *
+   * @return the origin, or null if the configured URL cannot be parsed as one
+   */
+  static String configuredOrigin() {
+
+    String baseUrl = GrouperConfig.getGrouperMcpBaseUrl(true);
+
+    try {
+      URI baseUri = new URI(baseUrl);
+      String scheme = baseUri.getScheme();
+      String host = baseUri.getHost();
+
+      if (scheme == null || host == null) {
+        LOG.error(GrouperConfig.getGrouperMcpBaseUrlPropertyName()
+            + " is not a URL an Origin can be taken from: " + baseUrl);
+        return null;
+      }
+
+      StringBuilder origin = new StringBuilder();
+      origin.append(scheme).append("://").append(host);
+
+      int port = baseUri.getPort();
+      if (port != -1 && !("http".equalsIgnoreCase(scheme) && port == 80)
+          && !("https".equalsIgnoreCase(scheme) && port == 443)) {
+        origin.append(":").append(port);
+      }
+
+      return origin.toString();
+
+    } catch (URISyntaxException use) {
+      LOG.error(GrouperConfig.getGrouperMcpBaseUrlPropertyName()
+          + " cannot be parsed as a URL: " + baseUrl, use);
+      return null;
+    }
+  }
+
+  /**
+   * validate a request from a client on spec version 2026-07-28, and reject it if it does not
+   * carry what that revision requires.
+   *
+   * <p>Only called for a request which declares that version. Clients on the handshake based
+   * revisions send none of this and must not be held to it.</p>
+   *
+   * <p>Two things are checked. The request must carry the fields that revision requires in its
+   * {@code _meta}, which are the protocol version and what the client supports, since with no
+   * handshake there is nowhere else they could have been said. And the HTTP headers which
+   * mirror fields of the request body must all be present and must agree with the body, so that
+   * something in the network routing on a header cannot disagree with what this server acts
+   * on.</p>
+   *
+   * <p>{@code io.modelcontextprotocol/clientInfo} is not required and is not checked for.</p>
+   *
+   * @param request the HTTP request
+   * @param response the HTTP response
+   * @param jsonRpcRequest the parsed request body
+   * @param method the JSON-RPC method
+   * @param params the JSON-RPC params, may be null
+   * @param id the JSON-RPC id of the request
+   * @return true if the request was rejected and a response has already been sent
+   * @throws IOException if the response cannot be written
+   */
+  boolean rejectIfModernRequestInvalid(HttpServletRequest request,
+      HttpServletResponse response, JsonNode jsonRpcRequest, String method, JsonNode params,
+      JsonNode id) throws IOException {
+
+    // Every message is a JSON-RPC 2.0 message, which means saying so.  This is not new in spec
+    // version 2026-07-28, but it is only enforced for requests on that revision: a client on
+    // one of the earlier revisions which has been talking to this server without the field has
+    // no reason to start failing now, whereas a client on this revision is new enough that its
+    // library sends it.
+    JsonNode jsonRpcNode = jsonRpcRequest == null ? null : jsonRpcRequest.get("jsonrpc");
+
+    if (jsonRpcNode == null || !jsonRpcNode.isTextual()
+        || !"2.0".equals(jsonRpcNode.asText())) {
+      sendJsonRpcError(response, id, ERROR_INVALID_REQUEST,
+          "Invalid Request: jsonrpc must be \"2.0\"",
+          null, HttpServletResponse.SC_BAD_REQUEST);
+      return true;
+    }
+
+    JsonNode metaNode = params == null ? null : params.get("_meta");
+
+    // Spec version 2026-07-28 requires the protocol version in _meta on every request, not only
+    // in the header.  A request can reach here having declared the version in the header alone,
+    // since that is enough to tell which revision it is on, but that is not enough to be a well
+    // formed request of that revision.  The two disagreeing was already caught before this
+    // point, so what is left to check here is the field being absent.
+    JsonNode protocolVersionNode = metaNode == null ? null : metaNode.get(META_PROTOCOL_VERSION);
+
+    if (protocolVersionNode == null || protocolVersionNode.isNull()) {
+      sendJsonRpcError(response, id, ERROR_INVALID_PARAMS,
+          "Invalid params: " + META_PROTOCOL_VERSION + " is required in _meta",
+          null, HttpServletResponse.SC_BAD_REQUEST);
+      return true;
+    }
+
+    // A version is a string, and one which is not has to be refused rather than worked around.
+    // The text of a node which is not a string is either empty or something the client did not
+    // write, so reading it would either look like no version was declared, and let the header
+    // decide on its own, or like a version nobody asked for.
+    if (!protocolVersionNode.isTextual()) {
+      sendJsonRpcError(response, id, ERROR_INVALID_PARAMS,
+          "Invalid params: " + META_PROTOCOL_VERSION + " in _meta must be a string",
+          null, HttpServletResponse.SC_BAD_REQUEST);
+      return true;
+    }
+
+    // Spec version 2026-07-28 says explicitly that unlike plain JSON-RPC an id must not be
+    // null.  An id is what a client matches a response to a request by, so one it cannot match
+    // on is not usable.  Only requests on this revision are held to it; the earlier ones follow
+    // JSON-RPC, which allows a null id even though it discourages one.
+    //
+    // Any number is allowed, not only a whole one.  The prose of that revision says "a string
+    // or integer ID", but the schema it points to as the source of truth defines a request id
+    // as a string or a number, so a number with a fractional part is a valid id and is not
+    // refused here.
+    //
+    // Note an id which is absent is not checked here, since that is a notification rather than
+    // a request, and is answered further on.
+    if (id != null && !id.isTextual() && !id.isNumber()) {
+      sendJsonRpcError(response, id, ERROR_INVALID_REQUEST,
+          "Invalid Request: id must be a string or a number, and must not be null",
+          null, HttpServletResponse.SC_BAD_REQUEST);
+      return true;
+    }
+
+    JsonNode clientCapabilitiesNode = metaNode == null ? null
+        : metaNode.get(META_CLIENT_CAPABILITIES);
+
+    // a field explicitly set to null says no more than leaving it out does, so both are treated
+    // as not declared.  note this cannot be written with has(), which counts a field set to
+    // null as present
+    if (clientCapabilitiesNode == null || clientCapabilitiesNode.isNull()) {
+      sendJsonRpcError(response, id, ERROR_INVALID_PARAMS,
+          "Invalid params: " + META_CLIENT_CAPABILITIES + " is required in _meta",
+          null, HttpServletResponse.SC_BAD_REQUEST);
+      return true;
+    }
+
+    // what the client supports is a set of named capabilities, so a string, a number or an
+    // array cannot be read as one however well formed it is on its own
+    if (!clientCapabilitiesNode.isObject()) {
+      sendJsonRpcError(response, id, ERROR_INVALID_PARAMS,
+          "Invalid params: " + META_CLIENT_CAPABILITIES + " in _meta must be an object",
+          null, HttpServletResponse.SC_BAD_REQUEST);
+      return true;
+    }
+
+    // Spec version 2026-07-28 requires this header on every request.  A request carrying no
+    // version at all is served as spec version 2025-03-26, which had no such header, but this
+    // request declared 2026-07-28 in its body and so is held to that revision's rules.  Any
+    // disagreement between the header and the body was already caught before this point, so
+    // what is left to check here is the header being absent.
+    if (protocolVersionFromHeader(request) == null) {
+      return rejectHeaderMismatch(response, id,
+          "required header " + PROTOCOL_VERSION_HEADER + " is missing");
+    }
+
+    String methodHeader = StringUtils.trimToNull(request.getHeader(MCP_METHOD_HEADER));
+
+    if (methodHeader == null) {
+      return rejectHeaderMismatch(response, id,
+          "required header " + MCP_METHOD_HEADER + " is missing");
+    }
+
+    if (!methodHeader.equals(method)) {
+      return rejectHeaderMismatch(response, id, MCP_METHOD_HEADER + " header value '"
+          + methodHeader + "' does not match body value '" + method + "'");
+    }
+
+    // the name header is only required for the methods which name what they act on, and of
+    // those this server only implements tools/call
+    if ("tools/call".equals(method)) {
+
+      String nameHeader = decodeHeaderValue(
+          StringUtils.trimToNull(request.getHeader(MCP_NAME_HEADER)));
+
+      String nameFromBody = params != null && params.has("name")
+          ? params.get("name").asText() : null;
+
+      if (nameHeader == null) {
+        return rejectHeaderMismatch(response, id,
+            "required header " + MCP_NAME_HEADER + " is missing");
+      }
+
+      if (!nameHeader.equals(nameFromBody)) {
+        return rejectHeaderMismatch(response, id, MCP_NAME_HEADER + " header value '"
+            + nameHeader + "' does not match body value '" + nameFromBody + "'");
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * reject a request whose headers do not agree with its body
+   * @param response the HTTP response
+   * @param id the JSON-RPC id of the request
+   * @param detail what did not agree
+   * @return true always, so callers can return this directly
+   * @throws IOException if the response cannot be written
+   */
+  private boolean rejectHeaderMismatch(HttpServletResponse response, JsonNode id, String detail)
+      throws IOException {
+    sendJsonRpcError(response, id, ERROR_HEADER_MISMATCH, "Header mismatch: " + detail,
+        null, HttpServletResponse.SC_BAD_REQUEST);
+    return true;
+  }
+
+  /**
+   * decode a header value which the client base64 encoded because it could not be sent as
+   * plain ASCII, for example a tool name with an accent in it.  a value which is not marked as
+   * encoded is returned as it is.
+   * @param headerValue the raw header value, may be null
+   * @return the decoded value, or the original if it is not encoded or cannot be decoded
+   */
+  static String decodeHeaderValue(String headerValue) {
+
+    if (headerValue == null || !headerValue.startsWith(BASE64_SENTINEL_PREFIX)
+        || !headerValue.endsWith(BASE64_SENTINEL_SUFFIX)
+        || headerValue.length() < BASE64_SENTINEL_PREFIX.length()
+            + BASE64_SENTINEL_SUFFIX.length()) {
+      return headerValue;
+    }
+
+    String encoded = headerValue.substring(BASE64_SENTINEL_PREFIX.length(),
+        headerValue.length() - BASE64_SENTINEL_SUFFIX.length());
+
+    try {
+      return new String(Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8);
+    } catch (Exception e) {
+      // leave it as it was, it will not match the body and the request is rejected
+      LOG.warn("Could not base64 decode an MCP header value: " + headerValue);
+      return headerValue;
+    }
+  }
+
+  /**
+   * the protocol version from the HTTP header, null if the client did not send one
+   * @param request the HTTP request
+   * @return the version or null
+   */
+  static String protocolVersionFromHeader(HttpServletRequest request) {
+    return StringUtils.trimToNull(request.getHeader(PROTOCOL_VERSION_HEADER));
+  }
+
+  /**
+   * the protocol version from the request body's _meta, null if the client did not send one
+   * @param params the JSON-RPC params, may be null
+   * @return the version or null
+   */
+  static String protocolVersionFromMeta(JsonNode params) {
+    JsonNode metaNode = params == null ? null : params.get("_meta");
+    JsonNode versionNode = metaNode == null ? null : metaNode.get(META_PROTOCOL_VERSION);
+
+    // A field explicitly set to null declares no version, the same as leaving it out.  Note
+    // this cannot be written with has(), which counts a field set to null as present, and that
+    // the text of a null node is the word "null", so reading it either way would have the
+    // request appear to be asking for a protocol version by that name.
+    if (versionNode == null || versionNode.isNull()) {
+      return null;
+    }
+
+    return StringUtils.trimToNull(versionNode.asText());
+  }
+
+  /**
+   * the protocol version a request declares, preferring the body since that is where spec
+   * version 2026-07-28 puts it
+   * @param request the HTTP request
+   * @param params the JSON-RPC params, may be null
+   * @return the version, or null if the request declares none
+   */
+  static String declaredProtocolVersion(HttpServletRequest request, JsonNode params) {
+    String versionFromBody = protocolVersionFromMeta(params);
+    return versionFromBody != null ? versionFromBody : protocolVersionFromHeader(request);
+  }
+
+  /**
+   * check if a method is one which spec version 2026-07-28 removed, and so exists only in the
+   * earlier revisions.
+   *
+   * <p>{@code initialize} and {@code notifications/initialized} went with the handshake and the
+   * sessions it set up. {@code ping} went with them, having no purpose once a request no longer
+   * depends on a connection having been set up beforehand.</p>
+   *
+   * @param method the JSON-RPC method
+   * @return true if the method only exists in the earlier revisions
+   */
+  static boolean isMethodRemovedInModernRevision(String method) {
+    return "initialize".equals(method) || "notifications/initialized".equals(method)
+        || "ping".equals(method);
+  }
+
+  /**
+   * check if a request is from a client on the revision which carries per-request metadata and
+   * mirrors body fields into HTTP headers.  requests from the earlier, handshake based
+   * revisions must not be held to those rules, since their clients do not send any of it.
+   * @param protocolVersion the version the request declares, may be null
+   * @return true if the request is on spec version 2026-07-28
+   */
+  static boolean isModernProtocolVersion(String protocolVersion) {
+    return MODERN_PROTOCOL_VERSION.equals(protocolVersion);
+  }
+
+  /**
+   * check if this server accepts requests declaring a protocol version
+   * @param protocolVersion the version from the request
+   * @return true if supported
+   */
+  static boolean isProtocolVersionSupported(String protocolVersion) {
+    for (String supportedVersion : SUPPORTED_PROTOCOL_VERSIONS) {
+      if (supportedVersion.equals(protocolVersion)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * the protocol versions this server accepts, as a JSON array
+   * @return the array node
+   */
+  private static ArrayNode supportedProtocolVersionsArrayNode() {
+    ArrayNode supportedVersions = objectMapper.createArrayNode();
+    for (String supportedVersion : SUPPORTED_PROTOCOL_VERSIONS) {
+      supportedVersions.add(supportedVersion);
+    }
+    return supportedVersions;
+  }
+
+  /**
+   * check the protocol version a request declares, and reject it if this server does not
+   * implement that version.
+   *
+   * <p>Spec version 2025-06-18 added the {@code MCP-Protocol-Version} HTTP header, and spec
+   * version 2026-07-28 additionally carries the version in the request body's {@code _meta}, so
+   * that a request is self describing and no handshake is needed. A request with neither is
+   * from a client on spec version 2025-03-26, which had neither, and is served the way this
+   * server has always served requests.</p>
+   *
+   * <p>A client which asks for a version this server does not implement is told which versions
+   * it does implement, so the client can retry with one of those rather than guess. Without
+   * this the request would be served under this server's own semantics, which the spec calls
+   * out as a failure mode because the client cannot tell that happened.</p>
+   *
+   * @param request the HTTP request
+   * @param response the HTTP response
+   * @param params the JSON-RPC params, may be null
+   * @param id the JSON-RPC id of the request
+   * @return true if the request was rejected and a response has already been sent
+   * @throws IOException if the response cannot be written
+   */
+  boolean rejectIfProtocolVersionNotSupported(HttpServletRequest request,
+      HttpServletResponse response, JsonNode params, JsonNode id) throws IOException {
+
+    String versionFromHeader = protocolVersionFromHeader(request);
+    String versionFromBody = protocolVersionFromMeta(params);
+
+    // neither present, this is a client on spec version 2025-03-26
+    if (versionFromHeader == null && versionFromBody == null) {
+      return false;
+    }
+
+    // when a client sends both they must agree.  if they disagree, something in the network
+    // could route on one value while this server acts on the other
+    if (versionFromHeader != null && versionFromBody != null
+        && !versionFromHeader.equals(versionFromBody)) {
+      sendJsonRpcError(response, id, ERROR_HEADER_MISMATCH,
+          "Header mismatch: " + PROTOCOL_VERSION_HEADER + " header value '" + versionFromHeader
+          + "' does not match body value '" + versionFromBody + "'",
+          null, HttpServletResponse.SC_BAD_REQUEST);
+      return true;
+    }
+
+    String protocolVersion = versionFromBody != null ? versionFromBody : versionFromHeader;
+
+    if (isProtocolVersionSupported(protocolVersion)) {
+      return false;
+    }
+
+    ObjectNode data = objectMapper.createObjectNode();
+    data.set("supported", supportedProtocolVersionsArrayNode());
+    data.put("requested", protocolVersion);
+
+    sendJsonRpcError(response, id, ERROR_UNSUPPORTED_PROTOCOL_VERSION,
+        "Unsupported protocol version", data, HttpServletResponse.SC_BAD_REQUEST);
+    return true;
+  }
+
+  /**
+   * handle the server/discover method, which advertises the protocol versions, capabilities and
+   * identity of this server.
+   *
+   * <p>Spec version 2026-07-28 removed the initialize handshake, so a client on that revision
+   * has no other way to find out what this server speaks. Servers on that revision MUST
+   * implement this method. It is answered here even though this server implements the older
+   * revision, so that a client which supports both eras gets a definite answer -- the supported
+   * versions listed below -- instead of a "method not found" it has to guess about.</p>
+   *
+   * <p>The result is the same for every caller, so nothing here is filtered by the
+   * authenticated user.</p>
+   *
+   * @return the discover result
+   */
+  private ObjectNode handleServerDiscover() {
+
+    ObjectNode result = objectMapper.createObjectNode();
+
+    // results carry a result type in spec version 2026-07-28 and later.  clients on earlier
+    // revisions never call this method, so this cannot confuse them
+    result.put("resultType", "complete");
+
+    result.set("supportedVersions", supportedProtocolVersionsArrayNode());
+
+    ObjectNode capabilities = objectMapper.createObjectNode();
+    ObjectNode tools = objectMapper.createObjectNode();
+    tools.put("listChanged", false);
+    capabilities.set("tools", tools);
+    result.set("capabilities", capabilities);
+
+    // the server identifies itself in the result metadata rather than at the top level, which
+    // is where initialize puts it.  every result gets this, so it is added centrally where the
+    // response is built rather than here
+
+    String instructions = GrouperConfig.retrieveConfig()
+        .propertyValueString("grouper.mcp.instructions");
+    if (StringUtils.isNotBlank(instructions)) {
+      result.put("instructions", instructions);
+    }
+
+    // caching hints, required on this operation in spec version 2026-07-28.  the scope is
+    // public because everything above is the same for every caller
+    result.put("ttlMs", DISCOVER_TTL_MS);
+    result.put("cacheScope", "public");
+
+    return result;
+  }
+
+  /**
+   * handle the initialize method, create a session
+   */
+  private ObjectNode handleInitialize(JsonNode params, HttpServletResponse response) {
+    String sessionId = UUID.randomUUID().toString();
+    response.setHeader(SESSION_ID_HEADER, sessionId);
+
+    LOG.info("MCP session initialized: " + sessionId);
+
+    ObjectNode result = objectMapper.createObjectNode();
+    result.put("protocolVersion", MCP_PROTOCOL_VERSION);
+
+    ObjectNode capabilities = objectMapper.createObjectNode();
+    ObjectNode tools = objectMapper.createObjectNode();
+    tools.put("listChanged", false);
+    capabilities.set("tools", tools);
+    result.set("capabilities", capabilities);
+
+    ObjectNode serverInfo = objectMapper.createObjectNode();
+    serverInfo.put("name", SERVER_NAME);
+    serverInfo.put("version", SERVER_VERSION);
+    result.set("serverInfo", serverInfo);
+
+    // include instructions for the AI client (default is in grouper.base.properties)
+    String instructions = GrouperConfig.retrieveConfig()
+        .propertyValueString("grouper.mcp.instructions");
+    if (StringUtils.isNotBlank(instructions)) {
+      result.put("instructions", instructions);
+    }
+
+    return result;
+  }
+
+  /**
+   * handle tools/list - only include tools the user is authorized for
+   * and that are allowed by the deployer's allow/deny configuration.
+   * @param params the JSON-RPC params
+   * @param authUser the authenticated user
+   */
+  private ObjectNode handleToolsList(JsonNode params, GrouperMcpAuthUser authUser) {
+
+    // This server answers tools/list in one page and never sends a nextCursor, so there is no
+    // cursor it could have handed out and any cursor which arrives is one it cannot resume
+    // from.  Returning the whole list regardless would look to the client like the cursor had
+    // been honoured and would have it read the first page a second time.
+    JsonNode cursorNode = params == null ? null : params.get("cursor");
+    if (cursorNode != null && !cursorNode.isNull()) {
+      throw new GrouperMcpProtocolException(ERROR_INVALID_PARAMS,
+          "Invalid params: cursor is not one this server issued");
+    }
+
+    ObjectNode result = objectMapper.createObjectNode();
+
+    // which tools to offer is decided in core, so that this and the UI agent offer the same
+    // thing to the same caller
+    ArrayNode toolsArray = GrouperToolExecutor.retrieveToolDefinitions(authUser);
+
+    result.set("tools", toolsArray);
+
+    // caching hints, required on this operation in spec version 2026-07-28.  the scope is
+    // private because the tool list is filtered by what this user is authorized for, so a
+    // shared cache must not hand one user's list to another.  note this is a caching hint
+    // only, it is not what enforces authorization: tools/call checks access again on every
+    // invocation
+    result.put("ttlMs", TOOLS_LIST_TTL_MS);
+    result.put("cacheScope", "private");
+
+    return result;
+  }
+
+  /**
+   * thrown when a tools/call request is not one this server can act on at all, as opposed to a
+   * tool which ran and reported a failure.
+   *
+   * <p>The spec keeps these apart. A tool which exists and did not work says so in its result
+   * with {@code isError}, because that is feedback a model can read and correct itself from,
+   * such as a name which does not exist or a value out of range. A request naming a tool this
+   * server does not have, or leaving the name out, is not something the tool could report on
+   * because no tool was reached, so it comes back as a JSON-RPC error instead.</p>
+   */
+  private static class GrouperMcpProtocolException extends RuntimeException {
+
+    private static final long serialVersionUID = 1L;
+
+    /** the JSON-RPC error code to answer with */
+    private final int code;
+
+    /**
+     * @param code the JSON-RPC error code
+     * @param message what was wrong with the request
+     */
+    GrouperMcpProtocolException(int code, String message) {
+      super(message);
+      this.code = code;
+    }
+
+    /**
+     * @return the JSON-RPC error code to answer with
+     */
+    int getCode() {
+      return this.code;
+    }
+  }
+
+  /**
+   * handle tools/call - wraps the tool dispatch with audit logging and throttle checking.
+   * Every tool call is logged to the grouper_mcp_tool_log table with request, response,
+   * timing, and error information.  Rate limits are checked before execution.
+   * @param params the JSON-RPC params
+   * @param authUser the authenticated user
+   */
+  private ObjectNode handleToolsCall(JsonNode params, GrouperMcpAuthUser authUser) {
+    if (params == null || !params.has("name")) {
+      // no tool was named, so there is no tool whose result could carry this
+      throw new GrouperMcpProtocolException(ERROR_INVALID_PARAMS,
+          "Invalid params: tools/call requires a tool name");
+    }
+
+    String toolName = params.get("name").asText();
+    JsonNode arguments = params.get("arguments");
+
+    // everything below here -- the allow list, the authorization check, running the tool, and
+    // the audit row -- now lives in core so that the UI runs tools the same way.  all this
+    // servlet still does is turn a failure which is not a tool result into the JSON-RPC error
+    // this protocol expects
+    try {
+      return GrouperToolExecutor.executeTool(toolName, arguments, authUser);
+
+    } catch (GrouperToolException grouperToolException) {
+      int errorCode = grouperToolException.getKind() == GrouperToolException.Kind.notFound
+          ? ERROR_INVALID_PARAMS : ERROR_INTERNAL_ERROR;
+      throw new GrouperMcpProtocolException(errorCode, grouperToolException.getMessage());
+    }
+  }
+
+  /**
+   * send a JSON-RPC error response
+   */
+  private void sendJsonRpcError(HttpServletResponse response, JsonNode id,
+      int code, String message) throws IOException {
+    sendJsonRpcError(response, id, code, message, null, HttpServletResponse.SC_OK);
+  }
+
+  /**
+   * send a JSON-RPC error response, with error data and an HTTP status code.  the protocol
+   * errors added in spec version 2026-07-28 are required to be returned with HTTP 400 rather
+   * than the HTTP 200 that other JSON-RPC errors use, and some of them carry data the client
+   * needs in order to correct the request.
+   * @param response the HTTP response
+   * @param id the JSON-RPC id of the request being answered, may be null
+   * @param code the JSON-RPC error code
+   * @param message the error message
+   * @param data additional error data, may be null
+   * @param httpStatus the HTTP status code to send
+   * @throws IOException if the response cannot be written
+   */
+  private void sendJsonRpcError(HttpServletResponse response, JsonNode id,
+      int code, String message, ObjectNode data, int httpStatus) throws IOException {
+    if (GrouperConfig.retrieveConfig().propertyValueBoolean("grouper.mcp.logClientErrors", false)) {
+      LOG.warn("MCP client error (code " + code + "): " + message);
+    }
+    ObjectNode jsonRpcResponse = objectMapper.createObjectNode();
+    jsonRpcResponse.put("jsonrpc", "2.0");
+    if (id != null) {
+      jsonRpcResponse.set("id", id);
+    } else {
+      jsonRpcResponse.putNull("id");
+    }
+    ObjectNode error = objectMapper.createObjectNode();
+    error.put("code", code);
+    error.put("message", message);
+    if (data != null) {
+      error.set("data", data);
+    }
+    jsonRpcResponse.set("error", error);
+
+    response.setContentType("application/json");
+    response.setCharacterEncoding("UTF-8");
+    response.setStatus(httpStatus);
+    response.getWriter().write(objectMapper.writeValueAsString(jsonRpcResponse));
+    response.getWriter().flush();
+  }
+}
