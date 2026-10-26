@@ -68,3 +68,10 @@ mcp__grouper-gte-local__group_find.  Do not add
 any write tools.  Show me the result.
 
 
+If the VM is terminated and restarted:
+claude mcp remove grouper-gte-local -s user
+
+claude mcp add --transport http -s user grouper-gte-local https://localhost:8443/grouper-ws/mcp
+
+
+
